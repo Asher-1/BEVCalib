@@ -164,8 +164,9 @@ def main():
                 reproj_losses.append(metrics["PC_reproj_loss"])
 
                 # calculate the error 
-                translation_error = torch.abs((T_pred[:, :3, 3] - gt_T_to_camera[:, :3, 3]).reshape(1,3))
-                rotation_error = torch.abs(torch.stack(rotation_matrix_to_euler_xyz(T_pred[:, :3, :3] @ gt_T_to_camera[:, :3, :3].transpose(-2, -1)), dim=0).reshape(1,3))
+                batch_size = T_pred.shape[0]
+                translation_error = torch.abs((T_pred[:, :3, 3] - gt_T_to_camera[:, :3, 3]).reshape(batch_size, 3))
+                rotation_error = torch.abs(torch.stack(rotation_matrix_to_euler_xyz(T_pred[:, :3, :3] @ gt_T_to_camera[:, :3, :3].transpose(-2, -1)), dim=0).reshape(batch_size, 3))
 
                 translation_errors.append(translation_error)
                 rotation_errors.append(rotation_error)
