@@ -9,7 +9,7 @@
 ### Prerequistes
 First create a conda environment:
 ```bash
-conda env create -n bevcalib python=3.11
+conda create -n bevcalib python=3.11
 conda activate bevcalib
 pip3 install -r requirements.txt
 ```
@@ -91,10 +91,11 @@ Please run the following command to evaluate the model:
 ```bash
 python kitti-bev-calib/inference_kitti.py \
          --log_dir ./logs/kitti \
-         --dataset_root YOUR_PATH_TO_KITTI/kitti-odemetry \
-         --ckpt_path YOUR_PATH_TO_KITTI_CHECKPOINT/ckpt/ckpt.pth \
+         --dataset_root ~/develop/data/slam_data/KITTI/kitti-odometry \
+         --ckpt_path ./ckpt/kitti.pth \
          --angle_range_deg 20.0 \
-         --trans_range 1.5
+         --trans_range 1.5 \
+         --batch_size 16
 ```
 
 ## Training
