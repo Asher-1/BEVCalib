@@ -1,3 +1,4 @@
+# Core dependencies for BEVCalib
 deformable_attention==0.0.20
 numpy==1.23.5
 open3d==0.18.0
@@ -8,9 +9,18 @@ scipy==1.15.3
 setuptools==65.5.1
 spconv==2.3.8
 torch==2.0.1 --extra-index-url https://download.pytorch.org/whl/cu118
+torchvision==0.15.2 --extra-index-url https://download.pytorch.org/whl/cu118
 transformers==4.29.1
 spconv-cu118
 tensorboard
 wandb  # if failed, then manually install: pip install --only-binary :all: wandb
 pandas
 matplotlib
+
+# Additional dependencies for prepare_custom_dataset.py
+tqdm  # Progress bar for data processing
+rosbags>=0.9.11  # For reading rosbag files (alternative to ROS rosbag)
+# Note: prepare_custom_dataset.py also requires Self-Cali-GS modules
+#       which should be available in the Python path
+imageio
+plyfile

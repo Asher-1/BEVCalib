@@ -396,7 +396,7 @@ if __name__ == '__main__':
 python -c "import numpy as np; np.save('T_cam_to_velo.npy', your_4x4_matrix)"
 
 # 2. 运行数据准备脚本
-python prepare_custom_dataset.py \
+python tools/prepare_custom_dataset.py \
     --source_images /path/to/your/images \
     --source_pointclouds /path/to/your/pointclouds \
     --target_dir /path/to/output/dataset \

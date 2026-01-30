@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from kitti_dataset import KittiDataset
+from custom_dataset import CustomDataset
 from bev_calib import BEVCalib
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.tensorboard import SummaryWriter
@@ -36,6 +37,8 @@ def parse_args():
     parser.add_argument("--step_size", type=int, default=100)
     parser.add_argument("--scheduler", type=int, default=-1)
     parser.add_argument("--pretrain_ckpt", type=str, default=None)
+    parser.add_argument("--use_custom_dataset", type=int, default=0, help="使用 CustomDataset (1) 还是 KittiDataset (0)")
+    parser.add_argument("--max_range", type=float, default=100.0, help="点云最大范围(米)，仅对 CustomDataset 有效")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True):
@@ -98,19 +101,27 @@ def main():
         log_dir = f"{log_dir}/{current_time}"
     model_save_dir = os.path.join(log_dir, "model")
     ckpt_save_dir = os.path.join(log_dir, "checkpoint")
-    if not os.path.exists(ckpt_save_dir) or args.save_ckpt_per_epoches > 0:
-        os.makedirs(ckpt_save_dir)
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    if not os.path.exists(model_save_dir):
-        os.makedirs(model_save_dir)
+    os.makedirs(ckpt_save_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(model_save_dir, exist_ok=True)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     bev_calib_dir = os.path.join(parent_dir, 'kitti-bev-calib')
-    shutil.copytree(bev_calib_dir, os.path.join(log_dir, 'kitti-bev-calib'))
+    shutil.copytree(bev_calib_dir, os.path.join(log_dir, 'kitti-bev-calib'), dirs_exist_ok=True)
     
     writer = SummaryWriter(log_dir)
-    dataset = KittiDataset(dataset_root)
+    
+    # 选择数据集类型
+    if args.use_custom_dataset:
+        print(f"使用 CustomDataset (max_range={args.max_range}m)")
+        dataset = CustomDataset(
+            data_folder=dataset_root,
+            max_range=args.max_range,
+            detect_coordinate_system=True
+        )
+    else:
+        print("使用 KittiDataset")
+        dataset = KittiDataset(dataset_root)
 
     generator = torch.Generator().manual_seed(114514)
     train_size = int(0.8 * len(dataset))
