@@ -24,3 +24,5 @@ rosbags>=0.9.11  # For reading rosbag files (alternative to ROS rosbag)
 #       which should be available in the Python path
 imageio
 plyfile
+
+huggingface_hub[cli]<1.0,>=0.36.0
