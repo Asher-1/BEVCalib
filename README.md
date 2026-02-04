@@ -176,7 +176,10 @@ python kitti-bev-calib/train_kitti.py \
 **Quick Start (B26A Dataset):**
 ```bash
 # Train from scratch
-bash train_B26A.sh scratch
+nohup bash train_B26A.sh scratch > logs/train_B26A_scratch_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# use tensorboard
+tensorboard --logdir ./logs/B26A_model --port 6006
 
 # Fine-tune from KITTI pretrained model
 bash train_B26A.sh finetune

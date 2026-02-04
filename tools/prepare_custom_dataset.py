@@ -94,12 +94,13 @@ class UndistortionUtils:
         return R_mat, t
     
     @staticmethod
-    def motion_interpolate(poses: List[PoseMetadata], timestamp: float):
+    def motion_interpolate(poses: List[PoseMetadata], timestamp: float, max_gap: float = 1.0):
         """位姿插值（严格参考C++的motion_interpolate实现）
         
         Args:
             poses: 位姿列表（按时间戳排序）
             timestamp: 目标时间戳（秒）
+            max_gap: 允许的最大pose间隔（秒），超过此间隔认为数据不连续
             
         Returns:
             (R, t): 旋转矩阵和平移向量，如果失败返回None
@@ -107,6 +108,10 @@ class UndistortionUtils:
         Note:
             参考 math_utils.cpp:313-346
             C++版本只支持插值，不支持外推。时间戳超出范围直接返回false。
+            
+            🔧 改进：支持不连续的bag数据
+            - 当pose间隔超过max_gap时，认为数据不连续，不进行插值
+            - 这样可以正确处理线上过滤后的非连续bag数据
         """
         if not poses or len(poses) < 2:
             return None
@@ -118,6 +123,12 @@ class UndistortionUtils:
             
             # 只在范围内插值（对应C++的 if (t1 <= t && t2 >= t)）
             if t1 <= timestamp <= t2:
+                # 🔧 改进：检查pose间隔是否过大（数据不连续）
+                if (t2 - t1) > max_gap:
+                    # pose间隔过大，说明这段时间没有连续的pose数据
+                    # 不进行插值，返回None
+                    return None
+                
                 # 计算插值系数
                 alpha = (timestamp - t1) / (t2 - t1)
                 break
@@ -149,6 +160,83 @@ class UndistortionUtils:
         t_result = t1_vec + R1 @ t_interp
         
         return R_result, t_result
+    
+    @staticmethod
+    def can_interpolate(poses: List[PoseMetadata], timestamp: float, max_gap: float = 1.0) -> bool:
+        """检查是否可以对给定时间戳进行位姿插值
+        
+        Args:
+            poses: 位姿列表（按时间戳排序）
+            timestamp: 目标时间戳（秒）
+            max_gap: 允许的最大pose间隔（秒）
+            
+        Returns:
+            True 如果可以插值，False 否则
+            
+        Note:
+            用于快速检查，避免重复计算插值结果
+        """
+        if not poses or len(poses) < 2:
+            return False
+        
+        for i in range(len(poses) - 1):
+            t1 = poses[i].timestamp
+            t2 = poses[i + 1].timestamp
+            
+            if t1 <= timestamp <= t2:
+                # 检查pose间隔是否在允许范围内
+                return (t2 - t1) <= max_gap
+        
+        return False
+    
+    @staticmethod
+    def find_nearest_pose(poses: List[PoseMetadata], timestamp: float) -> Tuple[Optional[int], float]:
+        """找到最近的pose（参考C++ manual_sensor_calib.cpp的min_delta逻辑）
+        
+        Args:
+            poses: 位姿列表（按时间戳排序）
+            timestamp: 目标时间戳（秒）
+            
+        Returns:
+            (index, delta): 最近pose的索引和时间差（秒），如果没有pose返回(None, inf)
+        """
+        if not poses:
+            return None, float('inf')
+        
+        min_delta = float('inf')
+        best_idx = None
+        
+        for i, pose in enumerate(poses):
+            delta = abs(pose.timestamp - timestamp)
+            if delta < min_delta:
+                min_delta = delta
+                best_idx = i
+        
+        return best_idx, min_delta
+    
+    @staticmethod
+    def can_interpolate_nearest(poses: List[PoseMetadata], timestamp: float, 
+                                max_delta: float = 0.1) -> bool:
+        """使用最近邻方式检查是否可以进行位姿插值
+        
+        参考 C++ manual_sensor_calib.cpp 的 min_delta 逻辑：
+        - 找到最近的pose
+        - 如果时间差 < max_delta，则认为可以插值
+        
+        这种方式更适合处理不连续的bag数据，因为：
+        1. 不要求pose严格包围目标时间戳
+        2. 只要有足够近的pose就可以使用
+        
+        Args:
+            poses: 位姿列表
+            timestamp: 目标时间戳（秒）
+            max_delta: 最大允许的时间差（秒），参考C++的0.1e9 ns = 100ms
+            
+        Returns:
+            True 如果可以插值
+        """
+        _, min_delta = UndistortionUtils.find_nearest_pose(poses, timestamp)
+        return min_delta <= max_delta
     
     @staticmethod
     def motion_extrapolate(poses: List[PoseMetadata], timestamp: float):
@@ -218,7 +306,8 @@ class UndistortionUtils:
                             cloud_timestamp: float,
                             target_timestamp: float,
                             poses: List[PoseMetadata],
-                            debug: bool = False) -> np.ndarray:
+                            debug: bool = False,
+                            frame_idx: int = -1) -> np.ndarray:
         """点云去畸变（完全对齐C++实现）
         
         参考: ~/codetree/repo/calibration/modules/calib_utils/src/math_utils.cpp:169-252
@@ -239,6 +328,7 @@ class UndistortionUtils:
             target_timestamp: 目标时刻（通常是图像曝光时刻，秒）
             poses: GNSS位姿列表（Sensing→World，已转换！）
             debug: 是否打印调试信息
+            frame_idx: 帧索引（用于日志）
             
         Returns:
             去畸变后的点云 (N, 4): x, y, z, intensity
@@ -251,6 +341,11 @@ class UndistortionUtils:
             - math_utils.cpp:184-188: lidar_pose_data = vehicle_poses * iso_vehicle_lidar
             - math_utils.cpp:200: delta_stamp = max_inner_stamp * 2 (单位:2us)
             - math_utils.cpp:215: dt = timestamp * 2.0e-6 (单位:2us)
+            
+        ⚠️ 与C++时间戳单位对比：
+            - C++: cloud_stamp/target_stamp 是微秒(int64_t)，pose时间戳也是微秒
+            - C++: 插值时 pose_data[i].first * 1e-6 转换为秒
+            - Python: 所有时间戳已经是秒，无需转换
         """
         if points_raw.shape[1] < 5:
             # 没有timestamp，无法去畸变，直接返回前4列
@@ -338,14 +433,32 @@ class UndistortionUtils:
                 print(f"⚠️  位姿旋转异常！start-end: {np.degrees(rotation_se):.1f}°, start-target: {np.degrees(rotation_st):.1f}°")
             return None
         
-        # 🔍 DEBUG: 打印pose信息
+        # 🔍 DEBUG: 打印pose信息（对齐C++日志格式，便于对比）
         if debug:
-            print(f"\n🔍 去畸变调试信息 (完全对齐C++):")
-            print(f"  cloud_ts={cloud_timestamp:.6f}, target_ts={target_timestamp:.6f}, delta={end_timestamp-cloud_timestamp:.6f}s")
-            print(f"  假设：LiDAR系 = Sensing系 (iso_vehicle_lidar = Identity)")
-            print(f"  start_pose (Sensing→World): t=[{t_start[0]:.2f}, {t_start[1]:.2f}, {t_start[2]:.2f}]")
-            print(f"  end_pose (Sensing→World): t=[{t_end[0]:.2f}, {t_end[1]:.2f}, {t_end[2]:.2f}]")
-            print(f"  target_pose (Sensing→World): t=[{t_target[0]:.2f}, {t_target[1]:.2f}, {t_target[2]:.2f}]")
+            print(f"\n{'='*60}")
+            print(f"🔍 去畸变调试信息 [frame_idx={frame_idx}]")
+            print(f"{'='*60}")
+            print(f"  === 时间戳信息 (Python用秒，C++用微秒) ===")
+            print(f"  cloud_stamp(s): {cloud_timestamp:.6f}")
+            print(f"  cloud_stamp(us): {int(cloud_timestamp * 1e6)}")  # 便于与C++对比
+            print(f"  target_stamp(s): {target_timestamp:.6f}")
+            print(f"  target_stamp(us): {int(target_timestamp * 1e6)}")
+            print(f"  lidar_camera_delta(ms): {(target_timestamp - cloud_timestamp)*1000:.2f}")
+            print(f"  ")
+            print(f"  === 点云内部时间戳 ===")
+            print(f"  max_inner_stamp(2us): {max_inner_timestamp_2us:.0f}")
+            print(f"  delta_stamp(us): {delta_time_us:.0f}")
+            print(f"  end_stamp(s): {end_timestamp:.6f}")
+            print(f"  scan_duration(ms): {delta_time_us * 1e-3:.2f}")
+            print(f"  ")
+            print(f"  === 位姿范围 ===")
+            print(f"  poses.size(): {len(poses)}")
+            print(f"  pose_range(s): [{poses[0].timestamp:.6f}, {poses[-1].timestamp:.6f}]")
+            print(f"  ")
+            print(f"  === 插值位姿 (Sensing→World) ===")
+            print(f"  start_pose.t: [{t_start[0]:.4f}, {t_start[1]:.4f}, {t_start[2]:.4f}]")
+            print(f"  end_pose.t: [{t_end[0]:.4f}, {t_end[1]:.4f}, {t_end[2]:.4f}]")
+            print(f"  target_pose.t: [{t_target[0]:.4f}, {t_target[1]:.4f}, {t_target[2]:.4f}]")
         
         R_lidar_start = R_start
         t_lidar_start = t_start
@@ -456,21 +569,63 @@ class UndistortionUtils:
             # 返回 None 表示该帧应该被跳过
             return None
         
-        # 🔍 DEBUG: 打印结果统计
+        # 🔍 DEBUG: 打印结果统计（格式对齐C++ MLOG输出，便于逐行对比）
         if debug:
-            print(f"  Raw cloud:")
-            print(f"    X: [{xyz[:, 0].min():.2f}, {xyz[:, 0].max():.2f}], mean={xyz[:, 0].mean():.2f}")
-            print(f"    Y: [{xyz[:, 1].min():.2f}, {xyz[:, 1].max():.2f}], mean={xyz[:, 1].mean():.2f}")
-            print(f"    Z: [{xyz[:, 2].min():.2f}, {xyz[:, 2].max():.2f}], mean={xyz[:, 2].mean():.2f}")
-            print(f"  Undistorted cloud:")
-            print(f"    X: [{xyz_undistorted[:, 0].min():.2f}, {xyz_undistorted[:, 0].max():.2f}], mean={xyz_undistorted[:, 0].mean():.2f}")
-            print(f"    Y: [{xyz_undistorted[:, 1].min():.2f}, {xyz_undistorted[:, 1].max():.2f}], mean={xyz_undistorted[:, 1].mean():.2f}")
-            print(f"    Z: [{xyz_undistorted[:, 2].min():.2f}, {xyz_undistorted[:, 2].max():.2f}], mean={xyz_undistorted[:, 2].mean():.2f}")
+            print(f"  ")
+            print(f"  === 运动增量 (对齐C++: delta = inv(start) * end) ===")
+            print(f"  delta.translation: [{t_delta[0]:.6f}, {t_delta[1]:.6f}, {t_delta[2]:.6f}]")
+            print(f"  v(6d): {v_full}")
+            print(f"  v_per_sec(trans): [{v_per_second[3]:.6f}, {v_per_second[4]:.6f}, {v_per_second[5]:.6f}] m/s")
+            print(f"  v_per_sec(rot): [{v_per_second[0]:.6f}, {v_per_second[1]:.6f}, {v_per_second[2]:.6f}] rad/s")
+            print(f"  ")
+            print(f"  === iso_target_start (对齐C++: inv(target) * start) ===")
+            print(f"  iso_target_start.translation: [{t_target_start[0]:.6f}, {t_target_start[1]:.6f}, {t_target_start[2]:.6f}]")
+            iso_ts_rotvec = R.from_matrix(R_target_start).as_rotvec()
+            print(f"  iso_target_start.axis*angle: [{iso_ts_rotvec[0]:.6f}, {iso_ts_rotvec[1]:.6f}, {iso_ts_rotvec[2]:.6f}]")
+            print(f"  ")
+            
+            # ✅ 关键对比：前10个点的逐点去畸变过程（与C++完全对齐）
+            print(f"  === First 10 points undistortion detail ===")
+            for i in range(min(10, len(xyz))):
+                dt_i = ts_us[i] * 2.0e-6  # 秒
+                v2_i = v_per_second * dt_i
+                R_delta2_i = R.from_rotvec(v2_i[:3]).as_matrix()
+                t_delta2_i = v2_i[3:6]
+                
+                # delta2 = iso_target_start * delta2
+                R_comb_i = R_target_start @ R_delta2_i
+                t_comb_i = R_target_start @ t_delta2_i + t_target_start
+                
+                p_raw = xyz[i]
+                p_undist = R_comb_i @ p_raw + t_comb_i
+                
+                print(f"  Point[{i}] ts_2us={ts_us[i]:.0f}"
+                      f" dt_sec={dt_i:.6f}"
+                      f" raw=[{p_raw[0]:.4f}, {p_raw[1]:.4f}, {p_raw[2]:.4f}]"
+                      f" undist=[{p_undist[0]:.4f}, {p_undist[1]:.4f}, {p_undist[2]:.4f}]")
+            
+            print(f"  ")
+            print(f"  === 点云范围 ===")
+            print(f"  cloud_raw range: X=[{xyz[:, 0].min():.2f}, {xyz[:, 0].max():.2f}]"
+                  f" Y=[{xyz[:, 1].min():.2f}, {xyz[:, 1].max():.2f}]"
+                  f" Z=[{xyz[:, 2].min():.2f}, {xyz[:, 2].max():.2f}]")
+            print(f"  cloud_undistorted range: X=[{xyz_undistorted[:, 0].min():.2f}, {xyz_undistorted[:, 0].max():.2f}]"
+                  f" Y=[{xyz_undistorted[:, 1].min():.2f}, {xyz_undistorted[:, 1].max():.2f}]"
+                  f" Z=[{xyz_undistorted[:, 2].min():.2f}, {xyz_undistorted[:, 2].max():.2f}]")
+            
             diff = xyz_undistorted - xyz
+            print(f"  ")
+            print(f"  === 去畸变位移统计 ===")
             print(f"  Difference (mean ± std):")
-            print(f"    X: {diff[:, 0].mean():.3f} ± {diff[:, 0].std():.3f}m")
-            print(f"    Y: {diff[:, 1].mean():.3f} ± {diff[:, 1].std():.3f}m")
-            print(f"    Z: {diff[:, 2].mean():.3f} ± {diff[:, 2].std():.3f}m\n")
+            print(f"    X: {diff[:, 0].mean():.6f} ± {diff[:, 0].std():.6f}m, max={np.abs(diff[:, 0]).max():.6f}m")
+            print(f"    Y: {diff[:, 1].mean():.6f} ± {diff[:, 1].std():.6f}m, max={np.abs(diff[:, 1]).max():.6f}m")
+            print(f"    Z: {diff[:, 2].mean():.6f} ± {diff[:, 2].std():.6f}m, max={np.abs(diff[:, 2]).max():.6f}m")
+            max_displacement = np.sqrt((diff**2).sum(axis=1)).max()
+            mean_displacement = np.sqrt((diff**2).sum(axis=1)).mean()
+            print(f"  最大位移: {max_displacement:.6f}m, 平均位移: {mean_displacement:.6f}m")
+            if max_displacement > 1.0:
+                print(f"  ⚠️ 警告: 最大位移超过1米，检查是否正常！")
+            print(f"{'='*60}\n")
         
         return points_undistorted.astype(np.float32)
 
@@ -854,7 +1009,10 @@ class ProtobufUtils:
 
 
 class PointCloudParser:
-    """点云解析器（proto 格式）- 完全对齐Self-Cali-GS实现"""
+    """点云解析器（proto 格式）- 完全对齐Self-Cali-GS实现
+    
+    ✅ 新增：支持lidar_configs解析和decombine处理（对齐C++ DecombineProtoPointCloud）
+    """
     
     # DataType 常量（与 PointCloud2.proto 一致）
     _DT_INT8 = 1
@@ -865,6 +1023,9 @@ class PointCloudParser:
     _DT_UINT32 = 6
     _DT_FLOAT32 = 7
     _DT_FLOAT64 = 8
+    
+    # 静态缓存：避免重复打印lidar_configs日志
+    _lidar_configs_logged = False
     
     @staticmethod
     def _decode_varint(buf: bytes, pos: int):
@@ -880,6 +1041,346 @@ class PointCloudParser:
             if sh >= 35:
                 break
         return n, pos
+    
+    @staticmethod
+    def _parse_header(data: bytes) -> dict:
+        """解析 Header 消息
+        
+        Proto定义 (header.proto):
+          - timestamp_sec: field 1 (double)
+          - frame_id: field 9 (string)
+        """
+        result = {'timestamp_sec': None, 'frame_id': None}
+        pos = 0
+        
+        while pos < len(data):
+            tag, pos = PointCloudParser._decode_varint(data, pos)
+            if pos >= len(data):
+                break
+            field_num, wire = tag >> 3, tag & 7
+            
+            if wire == 1:  # Fixed64 (double)
+                if pos + 8 > len(data):
+                    break
+                if field_num == 1:  # timestamp_sec
+                    result['timestamp_sec'] = struct.unpack_from('<d', data, pos)[0]
+                pos += 8
+            elif wire == 2:  # Length-delimited
+                L, pos = PointCloudParser._decode_varint(data, pos)
+                if pos + L > len(data):
+                    break
+                if field_num == 9:  # frame_id
+                    result['frame_id'] = data[pos:pos + L].decode('utf-8', errors='ignore')
+                pos += L
+            elif wire == 0:  # Varint
+                _, pos = PointCloudParser._decode_varint(data, pos)
+            elif wire == 5:  # Fixed32
+                pos += 4
+            else:
+                break
+        
+        return result
+    
+    @staticmethod
+    def _parse_vector3(data: bytes) -> Optional[np.ndarray]:
+        """解析 Vector3 消息 (float版本)
+        
+        Proto定义 (geometry.proto):
+          - x: field 1 (float)
+          - y: field 2 (float)
+          - z: field 3 (float)
+        """
+        x, y, z = 0.0, 0.0, 0.0
+        pos = 0
+        
+        while pos < len(data):
+            tag, pos = PointCloudParser._decode_varint(data, pos)
+            if pos >= len(data):
+                break
+            field_num, wire = tag >> 3, tag & 7
+            
+            if wire == 5:  # Fixed32 (float)
+                if pos + 4 > len(data):
+                    break
+                val = struct.unpack_from('<f', data, pos)[0]
+                if field_num == 1:
+                    x = val
+                elif field_num == 2:
+                    y = val
+                elif field_num == 3:
+                    z = val
+                pos += 4
+            elif wire == 0:  # Varint
+                _, pos = PointCloudParser._decode_varint(data, pos)
+            elif wire == 2:  # Length-delimited
+                L, pos = PointCloudParser._decode_varint(data, pos)
+                pos += L
+            else:
+                break
+        
+        return np.array([x, y, z], dtype=np.float32)
+    
+    @staticmethod
+    def _parse_quaternion_f(data: bytes) -> Optional[np.ndarray]:
+        """解析 Quaternion_f 消息 (float版本)
+        
+        Proto定义 (geometry.proto):
+          - qx: field 1 (float)
+          - qy: field 2 (float)
+          - qz: field 3 (float)
+          - qw: field 4 (float)
+        """
+        qx, qy, qz, qw = 0.0, 0.0, 0.0, 1.0
+        pos = 0
+        
+        while pos < len(data):
+            tag, pos = PointCloudParser._decode_varint(data, pos)
+            if pos >= len(data):
+                break
+            field_num, wire = tag >> 3, tag & 7
+            
+            if wire == 5:  # Fixed32 (float)
+                if pos + 4 > len(data):
+                    break
+                val = struct.unpack_from('<f', data, pos)[0]
+                if field_num == 1:
+                    qx = val
+                elif field_num == 2:
+                    qy = val
+                elif field_num == 3:
+                    qz = val
+                elif field_num == 4:
+                    qw = val
+                pos += 4
+            elif wire == 0:  # Varint
+                _, pos = PointCloudParser._decode_varint(data, pos)
+            elif wire == 2:  # Length-delimited
+                L, pos = PointCloudParser._decode_varint(data, pos)
+                pos += L
+            else:
+                break
+        
+        return np.array([qx, qy, qz, qw], dtype=np.float32)
+    
+    @staticmethod
+    def _parse_transformation3(data: bytes) -> Optional[np.ndarray]:
+        """解析 Transformation3 消息，返回 4x4 变换矩阵
+        
+        Proto定义 (geometry.proto):
+          - position: field 1 (Vector3)
+          - orientation: field 2 (Quaternion_f)
+        """
+        position = np.zeros(3, dtype=np.float32)
+        orientation = np.array([0, 0, 0, 1], dtype=np.float32)  # [qx, qy, qz, qw]
+        pos = 0
+        
+        while pos < len(data):
+            tag, pos = PointCloudParser._decode_varint(data, pos)
+            if pos >= len(data):
+                break
+            field_num, wire = tag >> 3, tag & 7
+            
+            if wire == 2:  # Length-delimited
+                L, pos = PointCloudParser._decode_varint(data, pos)
+                if pos + L > len(data):
+                    break
+                chunk = data[pos:pos + L]
+                pos += L
+                
+                if field_num == 1:  # position
+                    position = PointCloudParser._parse_vector3(chunk)
+                elif field_num == 2:  # orientation
+                    orientation = PointCloudParser._parse_quaternion_f(chunk)
+            elif wire == 0:  # Varint
+                _, pos = PointCloudParser._decode_varint(data, pos)
+            elif wire == 5:  # Fixed32
+                pos += 4
+            elif wire == 1:  # Fixed64
+                pos += 8
+            else:
+                break
+        
+        # 构建 4x4 变换矩阵
+        T = np.eye(4, dtype=np.float64)
+        r = R.from_quat(orientation)  # [qx, qy, qz, qw]
+        T[:3, :3] = r.as_matrix()
+        T[:3, 3] = position
+        
+        return T
+    
+    @staticmethod
+    def _parse_lidar_config_single(data: bytes) -> dict:
+        """解析单个 LidarConfig.Config 消息
+        
+        Proto定义 (config.proto):
+          - ring_id_start: field 27 (int32)
+          - ring_id_end: field 28 (int32)
+          - sensor_to_lidar: field 26 (repeated Transformation3)
+        """
+        result = {
+            'ring_id_start': 0,
+            'ring_id_end': 255,
+            'sensor_to_lidar': None  # Transformation3
+        }
+        pos = 0
+        
+        while pos < len(data):
+            tag, pos = PointCloudParser._decode_varint(data, pos)
+            if pos >= len(data):
+                break
+            field_num, wire = tag >> 3, tag & 7
+            
+            if wire == 0:  # Varint
+                val, pos = PointCloudParser._decode_varint(data, pos)
+                if field_num == 27:
+                    result['ring_id_start'] = val
+                elif field_num == 28:
+                    result['ring_id_end'] = val
+            elif wire == 2:  # Length-delimited
+                L, pos = PointCloudParser._decode_varint(data, pos)
+                if pos + L > len(data):
+                    break
+                chunk = data[pos:pos + L]
+                pos += L
+                
+                if field_num == 26:  # sensor_to_lidar (repeated)
+                    # 只取第一个sensor_to_lidar
+                    if result['sensor_to_lidar'] is None:
+                        result['sensor_to_lidar'] = PointCloudParser._parse_transformation3(chunk)
+            elif wire == 5:  # Fixed32
+                pos += 4
+            elif wire == 1:  # Fixed64
+                pos += 8
+            else:
+                break
+        
+        return result
+    
+    @staticmethod
+    def _parse_lidar_configs(data: bytes) -> dict:
+        """解析 LidarConfig 消息
+        
+        Proto定义 (config.proto):
+          - vehicle_to_sensing: field 1 (Transformation3)
+          - config: field 2 (repeated Config)
+        
+        返回:
+          {
+            'vehicle_to_sensing': 4x4 ndarray (Sensing→Vehicle),
+            'configs': [
+              {'ring_id_start': int, 'ring_id_end': int, 'sensor_to_lidar': 4x4 ndarray},
+              ...
+            ]
+          }
+        """
+        result = {
+            'vehicle_to_sensing': None,
+            'configs': []
+        }
+        pos = 0
+        
+        while pos < len(data):
+            tag, pos = PointCloudParser._decode_varint(data, pos)
+            if pos >= len(data):
+                break
+            field_num, wire = tag >> 3, tag & 7
+            
+            if wire == 2:  # Length-delimited
+                L, pos = PointCloudParser._decode_varint(data, pos)
+                if pos + L > len(data):
+                    break
+                chunk = data[pos:pos + L]
+                pos += L
+                
+                if field_num == 1:  # vehicle_to_sensing
+                    result['vehicle_to_sensing'] = PointCloudParser._parse_transformation3(chunk)
+                elif field_num == 2:  # config (repeated)
+                    config = PointCloudParser._parse_lidar_config_single(chunk)
+                    result['configs'].append(config)
+            elif wire == 0:  # Varint
+                _, pos = PointCloudParser._decode_varint(data, pos)
+            elif wire == 5:  # Fixed32
+                pos += 4
+            elif wire == 1:  # Fixed64
+                pos += 8
+            else:
+                break
+        
+        return result
+    
+    @staticmethod
+    def _extract_frame_id_and_lidar_configs(data: bytes) -> Tuple[Optional[str], Optional[dict]]:
+        """从 PointCloud2 消息中提取 frame_id 和 lidar_configs
+        
+        Proto定义 (pointcloud2.proto):
+          - header: field 1 (Header)
+          - lidar_configs: field 12 (LidarConfig)
+        
+        ⚠️ 重要：lidar_configs (field 12) 通常在消息末尾（在data blob之后）
+        
+        返回: (frame_id, lidar_configs)
+        """
+        frame_id = None
+        lidar_configs = None
+        
+        # 策略1：从开头解析找 frame_id（在header中，通常在前100字节）
+        pos = 0
+        max_header_search = min(len(data), 500)  # 只搜索前500字节找header
+        
+        while pos < max_header_search:
+            try:
+                tag, new_pos = PointCloudParser._decode_varint(data, pos)
+            except:
+                pos += 1
+                continue
+            if new_pos >= len(data):
+                break
+            field_num, wire = tag >> 3, tag & 7
+            
+            if wire == 2:  # Length-delimited
+                L, new_pos = PointCloudParser._decode_varint(data, new_pos)
+                if new_pos + L > len(data):
+                    break
+                chunk = data[new_pos:new_pos + L]
+                
+                if field_num == 1:  # header
+                    header = PointCloudParser._parse_header(chunk)
+                    frame_id = header.get('frame_id')
+                    if frame_id:
+                        break  # 找到frame_id后停止
+                pos = new_pos + L
+            elif wire == 0:  # Varint
+                _, pos = PointCloudParser._decode_varint(data, new_pos)
+            elif wire == 5:  # Fixed32
+                pos = new_pos + 4
+            elif wire == 1:  # Fixed64
+                pos = new_pos + 8
+            else:
+                pos += 1  # 跳过无效字节继续搜索
+        
+        # 策略2：从末尾搜索找 lidar_configs
+        # field 12, wire type 2 的 tag 是 (12 << 3) | 2 = 98 = 0x62
+        # lidar_configs 通常在消息最后 200 字节内
+        search_start = max(0, len(data) - 500)  # 从末尾500字节开始搜索
+        
+        for i in range(search_start, len(data) - 10):
+            if data[i] == 0x62:  # 可能是 field 12 tag
+                try:
+                    # 验证这是否是有效的 field 12
+                    length, next_pos = PointCloudParser._decode_varint(data, i + 1)
+                    # lidar_configs 长度通常在 50-500 字节
+                    if 20 < length < 1000 and next_pos + length <= len(data):
+                        chunk = data[next_pos:next_pos + length]
+                        # 尝试解析为 lidar_configs
+                        parsed = PointCloudParser._parse_lidar_configs(chunk)
+                        # 验证解析结果是否有效
+                        if parsed and (parsed.get('vehicle_to_sensing') is not None or parsed.get('configs')):
+                            lidar_configs = parsed
+                            break
+                except:
+                    continue
+        
+        return frame_id, lidar_configs
     
     @staticmethod
     def _parse_pointcloud2_wire(data: bytes):
@@ -1067,14 +1568,30 @@ class PointCloudParser:
             y_data = y_bytes.view(y_dtype).flatten().astype(np.float32) * y_scale
             z_data = z_bytes.view(z_dtype).flatten().astype(np.float32) * z_scale
             
-            # 提取intensity (offset 6, uint8)
+            # ✅ 关键修复：对齐C++ PointXYZIBT/PointXYZIRT 结构体
+            # 参考 /home/ludahai/codetree/repo/common/common/point.h:
+            # struct PointXYZIBT {
+            #   float x, y, z;           // 12 bytes (offset 0, 4, 8)
+            #   uint8_t intensity;       // 1 byte (offset 12)
+            #   uint8_t ring;            // 1 byte (offset 13)
+            #   uint16_t timestamp;      // 2 bytes (offset 14) - 单位: 2us
+            # };
+            # typedef PointXYZIBT PointXYZIRT;
+            # 总共 16 bytes
+            
+            # 提取intensity (offset 12, uint8)
             intensity_data = np.zeros(n, dtype=np.float32)
-            if step > 6:
+            if step >= 13:  # 确保有intensity字段
+                intensity_data = points_raw[:, 12].astype(np.float32)
+            elif step > 6:  # 兼容旧格式
                 intensity_data = points_raw[:, 6].astype(np.float32)
             
-            # 提取timestamp (offset 8-9, uint16)
+            # 提取timestamp (offset 14-15, uint16, 单位: 2us)
             timestamp_data = np.zeros(n, dtype=np.float32)
-            if step >= 10:
+            if step >= 16:  # PointXYZIBT/PointXYZIRT格式 (16 bytes)
+                ts_bytes = np.ascontiguousarray(points_raw[:, 14:16])
+                timestamp_data = ts_bytes.view(np.uint16).flatten().astype(np.float32)
+            elif step >= 10:  # 兼容旧格式
                 ts_bytes = np.ascontiguousarray(points_raw[:, 8:10])
                 timestamp_data = ts_bytes.view(np.uint16).flatten().astype(np.float32)
             
@@ -1103,15 +1620,123 @@ class PointCloudParser:
             return None
     
     @staticmethod
-    def parse_proto_pointcloud2(data: bytes) -> Optional[np.ndarray]:
+    def _decombine_pointcloud(points: np.ndarray, lidar_configs: dict, step: int, frame_id: str) -> np.ndarray:
+        """Decombine点云：将点云从Sensing系转回LiDAR系（对齐C++ DecombineProtoPointCloud）
+        
+        参考: modules/calib_utils/src/proto_instance.cpp:45-82
+        
+        C++逻辑:
+        1. 如果frame_id != "lidar_uncalibrated"，说明点云已经被转换到Sensing系
+        2. 对每个lidar的config，提取sensor_to_lidar（LiDAR→Sensing的外参）
+        3. 使用sensor_to_lidar的逆矩阵，将点云从Sensing系转回LiDAR系
+        4. 按ring范围分割点云，分别进行变换
+        
+        Args:
+            points: (N, 5) 点云 [x, y, z, intensity, timestamp] 或 (N, 6) [x, y, z, intensity, ring, timestamp]
+            lidar_configs: 解析后的lidar_configs字典
+            step: 每点的字节数
+            frame_id: 原始frame_id
+        
+        Returns:
+            变换后的点云（LiDAR系）
+        """
+        configs = lidar_configs.get('configs', [])
+        
+        if not configs:
+            # 没有config，无法decombine - 这不应该发生
+            # 因为 _parse_lidar_configs 应该总是返回有效的configs
+            return points
+        
+        # 判断点云是否包含ring信息（step=16表示有ring字段）
+        has_ring = (step == 16 and points.shape[1] >= 6)
+        
+        if not has_ring:
+            # 如果没有ring信息，只能使用第一个config的变换
+            if configs[0].get('sensor_to_lidar') is not None:
+                T_sensing_to_lidar = configs[0]['sensor_to_lidar']  # LiDAR→Sensing (从config读取)
+                T_lidar_to_sensing = np.linalg.inv(T_sensing_to_lidar)  # Sensing→LiDAR
+                
+                # 应用变换：将点从Sensing系转到LiDAR系
+                # C++对齐：DecombineProtoPointCloud 使用 extrinsics[j].inverse() 变换
+                xyz = points[:, :3]
+                xyz_homo = np.hstack([xyz, np.ones((xyz.shape[0], 1))])
+                xyz_transformed = (T_lidar_to_sensing @ xyz_homo.T).T[:, :3]
+                
+                points_out = points.copy()
+                points_out[:, :3] = xyz_transformed
+                
+                # 总是打印decombine结果（用单独的标志控制）
+                if not hasattr(PointCloudParser, '_decombine_logged'):
+                    PointCloudParser._decombine_logged = True
+                    print(f"  ✓ 已应用decombine变换 (无ring信息，使用config[0])")
+                    print(f"    T_lidar_to_sensing (LiDAR→Sensing) translation: [{T_lidar_to_sensing[0, 3]:.4f}, {T_lidar_to_sensing[1, 3]:.4f}, {T_lidar_to_sensing[2, 3]:.4f}]")
+                    print(f"    变换前点云范围: x=[{xyz[:, 0].min():.2f}, {xyz[:, 0].max():.2f}]")
+                    print(f"    变换后点云范围: x=[{xyz_transformed[:, 0].min():.2f}, {xyz_transformed[:, 0].max():.2f}]")
+                
+                return points_out
+            else:
+                return points
+        
+        # 有ring信息，按ring范围分割点云
+        ring_col = 4 if points.shape[1] == 6 else -1  # 假设ring在第5列（索引4）
+        
+        # 如果点云格式不支持ring，跳过decombine
+        if ring_col < 0 or points.shape[1] < 6:
+            return points
+        
+        rings = points[:, ring_col].astype(np.int32)
+        points_out = points.copy()
+        decombined_count = 0
+        
+        for cfg in configs:
+            ring_start = cfg['ring_id_start']
+            ring_end = cfg['ring_id_end']
+            sensor_to_lidar = cfg.get('sensor_to_lidar')
+            
+            if sensor_to_lidar is None:
+                continue
+            
+            # 找到属于这个lidar的点
+            mask = (rings >= ring_start) & (rings <= ring_end)
+            if not np.any(mask):
+                continue
+            
+            # 计算变换（Sensing→LiDAR = inverse(LiDAR→Sensing)）
+            T_lidar_to_sensing = np.linalg.inv(sensor_to_lidar)
+            
+            # 应用变换
+            xyz = points[mask, :3]
+            xyz_homo = np.hstack([xyz, np.ones((xyz.shape[0], 1))])
+            xyz_transformed = (T_lidar_to_sensing @ xyz_homo.T).T[:, :3]
+            
+            points_out[mask, :3] = xyz_transformed
+            decombined_count += np.sum(mask)
+        
+        if not PointCloudParser._lidar_configs_logged:
+            print(f"  ✓ 已按ring分割应用decombine变换")
+            print(f"    变换点数: {decombined_count}/{len(points)}")
+        
+        return points_out
+    
+    @staticmethod
+    def parse_proto_pointcloud2(data: bytes, apply_decombine: bool = True) -> Optional[np.ndarray]:
         """解析 PointCloud2 proto 数据
         
         参考: ~/develop/code/github/Self-Cali-GS/surround_calibration/data/lidar_utils.py
         
         ✅ 性能优化：使用NumPy向量化操作替代Python循环，大幅提升解析速度
+        ✅ 新增：支持lidar_configs解析和decombine处理（对齐C++ DecombineProtoPointCloud）
+        
+        Args:
+            data: protobuf消息bytes数据
+            apply_decombine: 是否应用decombine处理（如果点云在Sensing系，转回LiDAR系）
         """
         if data is None or len(data) < 16:
             return None
+        
+        # ✅ 新增：提取frame_id和lidar_configs（对齐C++）
+        frame_id = None
+        lidar_configs = None
         
         # 尝试多个候选位置（可能有不同的前缀）
         candidates = [data]
@@ -1134,6 +1759,10 @@ class PointCloudParser:
             if n < 50:
                 continue
             
+            # ✅ 新增：在找到有效点云数据后，提取frame_id和lidar_configs
+            if frame_id is None:
+                frame_id, lidar_configs = PointCloudParser._extract_frame_id_and_lidar_configs(to_parse)
+            
             # 构建 fields_map
             fields_map = {}
             for name, off, dt in flist:
@@ -1147,6 +1776,53 @@ class PointCloudParser:
             # ✅ 使用向量化快速解析（性能关键优化）
             points = PointCloudParser._parse_points_fast_numpy(raw, step, fields_map)
             if points is not None and len(points) >= 50:
+                # 首次解析时打印点云格式诊断信息
+                if not hasattr(PointCloudParser, '_format_logged'):
+                    PointCloudParser._format_logged = True
+                    print(f"\n📊 点云格式诊断:")
+                    print(f"  point_step: {step} bytes")
+                    print(f"  fields_map: {fields_map}")
+                    print(f"  point_count: {len(points)}")
+                    if step == 16:
+                        print(f"  ✅ 匹配 C++ PointXYZIBT/PointXYZIRT 格式 (16 bytes)")
+                        print(f"     structure: x(0-3), y(4-7), z(8-11), intensity(12), ring(13), timestamp(14-15)")
+                    elif step == 10:
+                        print(f"  ⚠️  旧格式点云 (10 bytes)，timestamp位置可能不同")
+                    else:
+                        print(f"  ⚠️  非标准点云格式 ({step} bytes)")
+                    
+                    # 打印前几个点的timestamp值用于验证
+                    if points.shape[1] >= 5:
+                        ts_sample = points[:5, 4]
+                        print(f"  timestamp样本(前5点): {ts_sample}")
+                        print(f"  timestamp范围: [{points[:, 4].min():.0f}, {points[:, 4].max():.0f}] (单位: 2us)")
+                        print(f"  扫描时长约: {points[:, 4].max() * 2 / 1000:.1f} ms")
+                
+                # ✅ 新增：打印frame_id和lidar_configs信息（对齐C++日志）
+                if not PointCloudParser._lidar_configs_logged:
+                    PointCloudParser._lidar_configs_logged = True
+                    print(f"\n=== PYTHON_CPP_COMPARE: PointCloud lidar_configs ===")
+                    print(f"  frame_id: {frame_id}")
+                    print(f"  has_lidar_configs: {'YES' if lidar_configs else 'NO'}")
+                    
+                    if lidar_configs:
+                        v2s = lidar_configs.get('vehicle_to_sensing')
+                        if v2s is not None:
+                            print(f"  lidar_configs.vehicle_to_sensing (Sensing->Vehicle):")
+                            print(f"    position: [{v2s[0, 3]:.6f}, {v2s[1, 3]:.6f}, {v2s[2, 3]:.6f}]")
+                        
+                        configs = lidar_configs.get('configs', [])
+                        print(f"  config_size: {len(configs)}")
+                        for i, cfg in enumerate(configs):
+                            s2l = cfg.get('sensor_to_lidar')
+                            print(f"    config[{i}]: ring=[{cfg['ring_id_start']}, {cfg['ring_id_end']}]")
+                            if s2l is not None:
+                                print(f"      sensor_to_lidar (LiDAR->Sensing) translation: [{s2l[0, 3]:.6f}, {s2l[1, 3]:.6f}, {s2l[2, 3]:.6f}]")
+                
+                # ✅ 新增：Decombine处理（对齐C++ DecombineProtoPointCloud）
+                if apply_decombine and frame_id and frame_id != 'lidar_uncalibrated' and lidar_configs:
+                    points = PointCloudParser._decombine_pointcloud(points, lidar_configs, step, frame_id)
+                
                 return points
         
         # Fallback: 尝试直接按float格式读取（如果wire format失败）
@@ -1207,6 +1883,7 @@ class BEVCalibDatasetPreparer:
         num_workers: int = 4,  # 并行处理的工作线程数
         max_frames: int = None,  # 最大处理帧数（用于测试）
         save_debug_samples: int = 0,  # 保存调试样本数量（未去畸变点云）
+        max_pose_gap: float = 0.5,  # 最大允许的pose间隔（秒），用于处理不连续bag数据
     ):
         self.bag_path = Path(bag_path)
         self.config_dir = Path(config_dir)
@@ -1220,6 +1897,7 @@ class BEVCalibDatasetPreparer:
         self.num_workers = num_workers
         self.max_frames = max_frames  # 最大处理帧数（用于测试）
         self.save_debug_samples = save_debug_samples  # 保存调试样本数量
+        self.max_pose_gap = max_pose_gap  # 最大允许的pose间隔
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1359,8 +2037,25 @@ class BEVCalibDatasetPreparer:
         - 输出：sensing_pose = (Vehicle→World) @ (Sensing→Vehicle) = Sensing→World
         
         含义：Sensing在World系中的位姿
+        
+        ⚠️ C++中时间戳单位：
+        - C++: pose时间戳是微秒(int64_t)，measurement_time()返回微秒
+        - Python: 这里已经转换为秒
         """
-        print(f"  转换位姿到Sensing坐标系...")
+        print(f"\n  转换位姿到Sensing坐标系...")
+        print(f"  === 位姿坐标系转换 (对齐C++) ===")
+        print(f"  T_vehicle_to_sensing (Sensing→Vehicle):")
+        print(f"    旋转:\n{self.T_vehicle_to_sensing[:3, :3]}")
+        print(f"    平移: {self.T_vehicle_to_sensing[:3, 3]}")
+        
+        # 打印转换前的第一个pose（便于与C++对比）
+        if self.pose_metadata:
+            pose0 = self.pose_metadata[0]
+            print(f"  转换前(Vehicle系)第一个pose:")
+            print(f"    timestamp(s): {pose0.timestamp:.6f}")
+            print(f"    timestamp(us): {int(pose0.timestamp * 1e6)}")  # 便于与C++对比
+            print(f"    position: {pose0.position}")
+            print(f"    orientation(quat): {pose0.orientation}")
         
         for i, pose in enumerate(self.pose_metadata):
             # 构建Vehicle系的pose（Vehicle→World）
@@ -1383,6 +2078,13 @@ class BEVCalibDatasetPreparer:
             r = R.from_matrix(R_sensing)
             pose.orientation = r.as_quat()  # [x, y, z, w]
             pose.position = t_sensing
+        
+        # 打印转换后的第一个pose
+        if self.pose_metadata:
+            pose0 = self.pose_metadata[0]
+            print(f"  转换后(Sensing系)第一个pose:")
+            print(f"    position: {pose0.position}")
+            print(f"    orientation(quat): {pose0.orientation}")
         
         print(f"  ✓ 已转换 {len(self.pose_metadata)} 个位姿到Sensing系")
     
@@ -1453,11 +2155,25 @@ class BEVCalibDatasetPreparer:
             [0, 0, 1]
         ])
         
-        print(f"✓ 变换矩阵已计算 (C++命名约定，从右往左读):")
-        print(f"  T_camera_to_sensing: Sensing → Camera (Tr矩阵，与C++一致)")
-        print(f"  T_sensing_to_camera: Camera → Sensing")
-        print(f"  T_vehicle_to_sensing: Sensing → Vehicle (已缓存)")
-        print(f"  注意: 点云保存在Sensing系，Tr是Sensing→Camera")
+        print(f"\n✓ 变换矩阵已计算 (C++命名约定，从右往左读):")
+        print(f"  === 坐标系变换矩阵 ===")
+        print(f"  T_sensing_to_camera (Camera→Sensing, 从config读取):")
+        print(f"    旋转:\n{T_sensing_to_camera[:3, :3]}")
+        print(f"    平移: {T_sensing_to_camera[:3, 3]}")
+        print(f"  T_camera_to_sensing (Sensing→Camera, Tr矩阵):")
+        print(f"    旋转:\n{self.T_camera_to_sensing[:3, :3]}")
+        print(f"    平移: {self.T_camera_to_sensing[:3, 3]}")
+        print(f"  T_sensing_to_lidar (LiDAR→Sensing, 从config读取):")
+        print(f"    旋转:\n{T_sensing_to_lidar[:3, :3]}")
+        print(f"    平移: {T_sensing_to_lidar[:3, 3]}")
+        print(f"  T_vehicle_to_sensing (Sensing→Vehicle):")
+        print(f"    旋转:\n{self.T_vehicle_to_sensing[:3, :3]}")
+        print(f"    平移: {self.T_vehicle_to_sensing[:3, 3]}")
+        print(f"  ")
+        print(f"  === 关键说明 ===")
+        print(f"  1. 点云保存在Sensing系（去畸变后）")
+        print(f"  2. 投影时使用 Tr = T_camera_to_sensing (Sensing→Camera)")
+        print(f"  3. 与C++ lidar_cam_fusion_manual 使用相同的变换链")
     
     def extract_data_from_bag(self):
         """从 rosbag 提取数据（流式处理+并行加速）"""
@@ -2436,7 +3152,8 @@ class BEVCalibDatasetPreparer:
                 # 注：调试信息只在verbose模式且第一帧时打印
                 points_undistorted = UndistortionUtils.undistort_pointcloud(
                     points_raw, cloud_ts, target_ts, self.pose_metadata,
-                    debug=(idx == 0 and self.verbose)
+                    debug=(idx == 0 and self.verbose),
+                    frame_idx=idx
                 )
                 
                 # ✅ 关键修复：如果去畸变失败（返回None），跳过该帧
@@ -2609,16 +3326,26 @@ class BEVCalibDatasetPreparer:
                         pc_idx += 1
                     pbar.update(1)
         
-        # 关键：过滤掉时间戳在pose范围之外的帧（参考您的指示）
+        # 关键：过滤掉无法进行位姿插值的帧
+        # 🔧 改进：支持不连续的bag数据（线上根据车速/场景过滤后的数据）
+        # 参考 C++ manual_sensor_calib.cpp 的 min_delta 逻辑
         if self.pose_metadata:
             pose_ts_min = self.pose_metadata[0].timestamp
             pose_ts_max = self.pose_metadata[-1].timestamp
             
-            # ✅ 允许一定的外推范围（最多1秒）
-            EXTRAPOLATION_MARGIN = 1.0  # 秒
+            # ✅ 两种检查方式：
+            # 1. max_pose_gap: 用于插值时检查相邻pose的间隔
+            # 2. max_pose_delta: 用于最近邻方式检查最近pose的时间差
+            # 参考C++ manual_sensor_calib.cpp: min_delta < 0.1e9 (100ms)
+            MAX_POSE_GAP = self.max_pose_gap  # 用于插值检查
+            MAX_POSE_DELTA = 0.15  # 150ms，用于最近邻检查（比C++的100ms稍宽松）
             
             synced_pairs_filtered = []
-            skipped_reasons = {'no_file': 0, 'out_of_range': 0}
+            skipped_reasons = {'no_file': 0, 'no_pose_coverage': 0, 'pose_too_far': 0}
+            
+            print(f"\n  检查pose覆盖（支持不连续bag数据）:")
+            print(f"    插值模式: 最大pose间隔 {MAX_POSE_GAP:.1f}s")
+            print(f"    最近邻模式: 最大时间差 {MAX_POSE_DELTA*1000:.0f}ms (参考C++ min_delta)")
             
             for img_idx, pc_idx in synced_pairs:
                 pc_meta = self.pc_metadata[pc_idx]
@@ -2652,27 +3379,57 @@ class BEVCalibDatasetPreparer:
                     else:
                         end_ts = pc_ts + 0.1  # 假设扫描时间为0.1秒
                     
-                    # ✅ 放宽检查：允许一定范围的外推
-                    min_bound = pose_ts_min - EXTRAPOLATION_MARGIN
-                    max_bound = pose_ts_max + EXTRAPOLATION_MARGIN
+                    # 🔧 改进：使用两种方式检查pose覆盖
+                    # 方式1：传统插值检查（要求时间戳在两个pose之间）
+                    can_interp_pc_start = UndistortionUtils.can_interpolate(
+                        self.pose_metadata, pc_ts, MAX_POSE_GAP)
+                    can_interp_pc_end = UndistortionUtils.can_interpolate(
+                        self.pose_metadata, end_ts, MAX_POSE_GAP)
+                    can_interp_img = UndistortionUtils.can_interpolate(
+                        self.pose_metadata, img_ts, MAX_POSE_GAP)
                     
-                    if (pc_ts >= min_bound and pc_ts <= max_bound and
-                        end_ts >= min_bound and end_ts <= max_bound and
-                        img_ts >= min_bound and img_ts <= max_bound):
+                    # 方式2：最近邻检查（参考C++ min_delta逻辑）
+                    # 只要有足够近的pose就可以使用
+                    can_nearest_pc_start = UndistortionUtils.can_interpolate_nearest(
+                        self.pose_metadata, pc_ts, MAX_POSE_DELTA)
+                    can_nearest_pc_end = UndistortionUtils.can_interpolate_nearest(
+                        self.pose_metadata, end_ts, MAX_POSE_DELTA)
+                    can_nearest_img = UndistortionUtils.can_interpolate_nearest(
+                        self.pose_metadata, img_ts, MAX_POSE_DELTA)
+                    
+                    # ✅ 只要满足任一方式即可
+                    can_process = (
+                        (can_interp_pc_start and can_interp_pc_end and can_interp_img) or
+                        (can_nearest_pc_start and can_nearest_pc_end and can_nearest_img)
+                    )
+                    
+                    if can_process:
                         synced_pairs_filtered.append((img_idx, pc_idx))
                     else:
-                        skipped_reasons['out_of_range'] += 1
+                        # 区分跳过原因
+                        if (pc_ts < pose_ts_min - MAX_POSE_DELTA or 
+                            end_ts > pose_ts_max + MAX_POSE_DELTA or 
+                            img_ts < pose_ts_min - MAX_POSE_DELTA or 
+                            img_ts > pose_ts_max + MAX_POSE_DELTA):
+                            skipped_reasons['no_pose_coverage'] += 1
+                        else:
+                            skipped_reasons['pose_too_far'] += 1
                         
                 except Exception as e:
                     skipped_reasons['no_file'] += 1
                     continue
             
             if len(synced_pairs_filtered) < len(synced_pairs):
-                print(f"\n  ⚠️  过滤时间戳超出pose范围的帧: {len(synced_pairs)} → {len(synced_pairs_filtered)}")
+                print(f"\n  ⚠️  过滤无法插值的帧: {len(synced_pairs)} → {len(synced_pairs_filtered)}")
                 if skipped_reasons['no_file'] > 0:
                     print(f"      - 文件不存在/读取失败: {skipped_reasons['no_file']}")
-                if skipped_reasons['out_of_range'] > 0:
-                    print(f"      - 超出pose范围: {skipped_reasons['out_of_range']}")
+                if skipped_reasons['no_pose_coverage'] > 0:
+                    print(f"      - 超出pose时间范围: {skipped_reasons['no_pose_coverage']}")
+                if skipped_reasons['pose_too_far'] > 0:
+                    print(f"      - 最近pose时间差>{MAX_POSE_DELTA*1000:.0f}ms: {skipped_reasons['pose_too_far']}")
+                    print(f"        💡 提示: 这些帧附近没有足够近的pose数据")
+            else:
+                print(f"    ✓ 所有 {len(synced_pairs)} 帧都有pose覆盖")
             synced_pairs = synced_pairs_filtered
         
         # ✅ 可选：基于target_fps进行降采样（如果同步帧数过多）
@@ -2756,9 +3513,11 @@ class BEVCalibDatasetPreparer:
                 pc_meta = self.pc_metadata[pc_idx]
                 
                 # 复制原始点云
+                # ⚠️ 关键修复：使用 pair_idx（帧索引）而不是 sample_idx 作为文件名
+                # 这样 debug_raw_pointclouds/000005_raw.bin 直接对应 velodyne/000005.bin
                 src_path = Path(pc_meta.file_path)
                 if src_path.exists():
-                    dst_path = debug_dir / f"{sample_idx:06d}_raw.bin"
+                    dst_path = debug_dir / f"{pair_idx:06d}_raw.bin"  # 使用 pair_idx
                     import shutil
                     shutil.copy2(src_path, dst_path)
                     
@@ -2766,7 +3525,7 @@ class BEVCalibDatasetPreparer:
                     img_meta = self.image_metadata[img_idx]
                     img_src = Path(img_meta.file_path)
                     if img_src.exists():
-                        img_dst = debug_dir / f"{sample_idx:06d}_image.jpg"
+                        img_dst = debug_dir / f"{pair_idx:06d}_image.jpg"  # 使用 pair_idx
                         shutil.copy2(img_src, img_dst)
             
             print(f"  ✓ 已保存 {len(sample_indices)} 个调试样本")
@@ -3238,6 +3997,10 @@ def main():
     parser.add_argument('--save_debug_samples', type=int, default=0,
                        help='保存用于调试的未去畸变点云样本数量（默认: 0，不保存）。'
                             '设置为10-20可保存均匀采样的样本用于可视化对比。')
+    parser.add_argument('--max_pose_gap', type=float, default=0.5,
+                       help='最大允许的pose间隔（秒）。用于处理不连续的bag数据。'
+                            '超过此间隔的时间段将被认为数据不连续，相关帧会被跳过。'
+                            '对于连续数据，默认0.5秒足够；对于不连续数据，可适当增大。')
     args = parser.parse_args()
     
     # 打印配置信息
@@ -3252,6 +4015,7 @@ def main():
     print(f"  目标帧率: {args.target_fps} fps")
     print(f"  批次大小: {args.batch_size}")
     print(f"  线程数: {args.num_workers}")
+    print(f"  最大pose间隔: {args.max_pose_gap}s（用于处理不连续bag数据）")
     
     total_start_time = time.time()
     
@@ -3268,6 +4032,7 @@ def main():
         num_workers=args.num_workers,
         max_frames=args.max_frames,
         save_debug_samples=args.save_debug_samples,
+        max_pose_gap=args.max_pose_gap,
     )
     
     preparer.extract_data_from_bag()
