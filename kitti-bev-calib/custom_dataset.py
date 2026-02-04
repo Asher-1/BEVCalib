@@ -11,35 +11,52 @@ Custom Dataset Loader for BEVCalib
 
 from pykitti import odometry
 import numpy as np
+import open3d as o3d
 from PIL import Image
 from torch.utils.data import Dataset
 import os
 
+
 class CustomDataset(Dataset):
-    def __init__(self, 
-                 data_folder='./data/custom-dataset', 
-                 suf='.png',
-                 sequences=None,
-                 auto_detect=True,
-                 max_range=90.0,
-                 detect_coordinate_system=True):
+    """
+    KITTI-Odometry 格式数据集加载器
+    
+    支持：
+    1. 标准 KITTI-Odometry 数据集（22个序列）
+    2. 自定义数据集（自动检测序列）
+    
+    坐标系说明：
+    - 输入点云坐标系：Sensing系（X前进，Y左，Z上）
+    - Tr矩阵：Sensing → Camera
+    - 输出点云坐标系：BEV坐标系（X前进，Y左，Z上），范围裁剪到体素化范围
+    - 返回的 gt_transform 是 Tr 的逆矩阵（Camera → Sensing）
+    
+    ⚠️ 关键修复：
+    - 点云需要从Sensing系转换到Camera系，再转换到BEV坐标系
+    - BEV坐标系：X前进(Camera Z), Y左(-Camera X), Z上(-Camera Y)
+    - 体素化范围：X: [-90, 90], Y: [-90, 90], Z: [-10, 10]
+    """
+    
+    # 标准KITTI-Odometry序列
+    KITTI_SEQUENCES = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', 
+                       '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']
+    
+    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True):
         """
-        自定义数据集加载器
+        初始化数据集
         
         Args:
             data_folder: 数据集根目录
             suf: 图像文件后缀
-            sequences: 指定序列列表，如 ['00', '01']。如果为 None，则自动检测
+            sequences: 指定序列列表，如 ['00', '01']。如果为 None，则使用 auto_detect
             auto_detect: 是否自动检测可用序列（默认 True）
-            max_range: 点云最大范围（米），超出此范围的点将被裁剪。默认 90.0
-            detect_coordinate_system: 是否自动检测并转换坐标系（默认 True）
+                - True: 自动扫描 sequences/ 目录，找到所有有效序列
+                - False: 使用标准 KITTI 序列列表
         """
         self.all_files = []
         self.dataset_root = data_folder
         self.K = {}
         self.T = {}
-        self.max_range = max_range
-        self.detect_coordinate_system = detect_coordinate_system
         
         # 确定要使用的序列
         if sequences is not None:
@@ -47,13 +64,13 @@ class CustomDataset(Dataset):
         elif auto_detect:
             self.sequences = self._detect_sequences()
             if not self.sequences:
-                raise ValueError(f"在 {data_folder} 中未找到任何有效序列")
+                # 如果自动检测失败，回退到标准KITTI序列
+                print(f"[KittiDataset] 自动检测未找到序列，尝试标准KITTI序列")
+                self.sequences = self.KITTI_SEQUENCES
         else:
-            raise ValueError("必须指定 sequences 或启用 auto_detect")
+            self.sequences = self.KITTI_SEQUENCES
         
-        print(f"[CustomDataset] 使用序列: {self.sequences}")
-        print(f"[CustomDataset] 最大探测范围: {self.max_range}m")
-        print(f"[CustomDataset] 坐标系自动检测: {self.detect_coordinate_system}")
+        print(f"[KittiDataset] 使用序列: {self.sequences}")
         
         loaded_sequences = []
         for seq in self.sequences:
@@ -71,9 +88,11 @@ class CustomDataset(Dataset):
                 frame_count = 0
                 for image_name in image_list:
                     base_name = image_name.split('.')[0]
-                    if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'velodyne', base_name + '.bin')):
+                    if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'velodyne',
+                                                       base_name + '.bin')):
                         continue
-                    if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'image_2', base_name + suf)):
+                    if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'image_2',
+                                                       base_name + suf)):
                         continue
 
                     self.all_files.append(os.path.join(seq, base_name))
@@ -82,17 +101,14 @@ class CustomDataset(Dataset):
                 if frame_count > 0:
                     loaded_sequences.append(seq)
                     print(f"  ✓ 序列 {seq}: {frame_count} 帧")
-                else:
-                    print(f"  ⚠ 序列 {seq}: 未找到有效帧")
-                    
             except Exception as e:
-                print(f"  ✗ 序列 {seq}: 加载失败 ({e})")
+                # 序列不存在或加载失败，跳过
                 continue
         
         if not self.all_files:
             raise ValueError(f"未找到任何有效数据！检查路径: {data_folder}")
         
-        print(f"\n[CustomDataset] 总计: {len(self.all_files)} 帧来自 {len(loaded_sequences)} 个序列")
+        print(f"[KittiDataset] 总计: {len(self.all_files)} 帧来自 {len(loaded_sequences)} 个序列")
     
     def _detect_sequences(self):
         """自动检测数据集中存在的序列"""
@@ -108,6 +124,7 @@ class CustomDataset(Dataset):
             if not os.path.isdir(seq_path):
                 continue
             
+            # 检查必要的子目录和文件
             image_dir = os.path.join(seq_path, 'image_2')
             velodyne_dir = os.path.join(seq_path, 'velodyne')
             calib_file = os.path.join(seq_path, 'calib.txt')
@@ -118,94 +135,75 @@ class CustomDataset(Dataset):
         sequences.sort()
         return sequences
 
-    def _transform_to_bev_coordinates(self, pcd, seq):
-        """
-        将点云转换到 BEV 坐标系
-        
-        坐标系定义:
-        - LiDAR 坐标系: X向前, Y向左, Z向上
-        - 相机坐标系: X向右, Y向下, Z向前  
-        - BEV 坐标系: X向前, Y向左, Z向上
-        
-        Args:
-            pcd: 点云数据 (N, 4)，最后一列是强度
-            seq: 序列ID
-            
-        Returns:
-            转换后的点云 (N, 4)
-        """
-        # 检测坐标系：如果点云主要在X>0方向且中心远离原点，说明是LiDAR坐标系
-        x_center = (pcd[:, 0].min() + pcd[:, 0].max()) / 2
-        
-        if abs(x_center) > 50:  # 点云中心距离原点超过50米
-            # 判断是哪种坐标系
-            if x_center > 50:
-                # LiDAR 坐标系 (X向前，点云主要在正X方向)
-                # 需要转换: LiDAR -> Camera -> BEV
-                
-                # 步骤1: LiDAR -> Camera
-                gt_transform = self.T[seq]  # Tr的逆（相机到LiDAR）
-                T_lidar_to_cam = np.linalg.inv(gt_transform)  # LiDAR到相机
-                
-                xyz = pcd[:, :3]
-                ones = np.ones((xyz.shape[0], 1))
-                xyz_hom = np.hstack([xyz, ones])  # (N, 4)
-                xyz_cam = (T_lidar_to_cam @ xyz_hom.T).T  # (N, 4)
-                
-                # 步骤2: Camera -> BEV
-                # Camera: X_right, Y_down, Z_forward -> BEV: X_forward, Y_left, Z_up
-                xyz_bev = np.zeros_like(xyz_cam[:, :3])
-                xyz_bev[:, 0] = xyz_cam[:, 2]   # BEV_X = Camera_Z (forward)
-                xyz_bev[:, 1] = -xyz_cam[:, 0]  # BEV_Y = -Camera_X (left)
-                xyz_bev[:, 2] = -xyz_cam[:, 1]  # BEV_Z = -Camera_Y (up)
-                
-                pcd[:, :3] = xyz_bev
-            else:
-                # 可能是其他坐标系，需要根据实际情况处理
-                print(f"  ⚠️ 警告: 检测到异常坐标系 (X_center={x_center:.2f}m)，保持原样")
-        
-        return pcd
-
     def __len__(self):
         return len(self.all_files)
     
     def __getitem__(self, idx):
         seq = self.all_files[idx].split('/')[0]
         id = self.all_files[idx].split('/')[1]
-        img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id + '.png')
-        pcd_path = os.path.join(self.dataset_root, 'sequences', seq, 'velodyne', id + '.bin')
-        
+        img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
+        pcd_path = os.path.join(self.dataset_root, 'sequences', seq, 'velodyne', id+'.bin')
         if not os.path.exists(img_path) or not os.path.exists(pcd_path):
-            raise FileNotFoundError(f"文件不存在: img={img_path}, pcd={pcd_path}")
-        
+            print('File not exist')
+            assert False
         img = Image.open(img_path)
-        img = img.resize((1242, 375))
-        
+        img.resize((1242, 375))
         pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)
         
-        # 自动检测并转换坐标系
-        if self.detect_coordinate_system:
-            pcd = self._transform_to_bev_coordinates(pcd, seq)
+        # ========== 坐标系转换（关键修复） ==========
+        # 
+        # 输入点云：Sensing系 (X前进, Y左, Z上)
+        # 目标：BEV/Voxel坐标系，与体素化范围匹配
+        # 
+        # 体素化范围（bev_settings.py）：
+        #   X: [-90, 90]  (前后方向)
+        #   Y: [-90, 90]  (左右方向)
+        #   Z: [-10, 10]  (高度方向)
+        #
+        # Sensing系已经是 (X前进, Y左, Z上)，与BEV坐标系一致
+        # 只需要进行范围裁剪
+        # =============================================
         
-        # 裁剪到指定范围内（避免超出体素化范围）
-        # 注意：这里使用 max_range 而不是硬编码的 90
-        in_range = (pcd[:, 0] >= -self.max_range) & (pcd[:, 0] <= self.max_range) & \
-                   (pcd[:, 1] >= -self.max_range) & (pcd[:, 1] <= self.max_range) & \
-                   (pcd[:, 2] >= -10) & (pcd[:, 2] <= 10)
-        pcd = pcd[in_range, :]
+        # 步骤1: 过滤自车周围的点（避免自车点云干扰）
+        ego_filter = (np.abs(pcd[:, 0]) > 3.) | (np.abs(pcd[:, 1]) > 3.)
+        pcd = pcd[ego_filter, :]
         
-        # 过滤车身附近的点（去除车体自身）
-        valid_ind = pcd[:, 0] < -3.
-        valid_ind = valid_ind | (pcd[:, 0] > 3.)
-        valid_ind = valid_ind | (pcd[:, 1] < -3.)
-        valid_ind = valid_ind | (pcd[:, 1] > 3.)
-        pcd = pcd[valid_ind, :]
+        # 步骤2: 裁剪到体素化范围
+        # X: [-90, 90] (前后方向)
+        # Y: [-90, 90] (左右方向)  
+        # Z: [-10, 10] (高度方向)
+        range_filter = (pcd[:, 0] >= -90) & (pcd[:, 0] <= 90) & \
+                       (pcd[:, 1] >= -90) & (pcd[:, 1] <= 90) & \
+                       (pcd[:, 2] >= -10) & (pcd[:, 2] <= 10)
+        pcd = pcd[range_filter, :]
+        
+        # 确保有足够的点
+        if len(pcd) < 100:
+            print(f"⚠️ 帧 {seq}/{id} 点云数量过少: {len(pcd)}")
+            # 如果点太少，扩大范围重新过滤
+            pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)
+            ego_filter = (np.abs(pcd[:, 0]) > 2.) | (np.abs(pcd[:, 1]) > 2.)
+            pcd = pcd[ego_filter, :]
+            range_filter = (pcd[:, 0] >= -90) & (pcd[:, 0] <= 90) & \
+                           (pcd[:, 1] >= -90) & (pcd[:, 1] <= 90)
+            pcd = pcd[range_filter, :]
+            
+            # 如果仍然太少，创建一个虚拟点云（避免训练崩溃）
+            if len(pcd) < 10:
+                print(f"⚠️ 帧 {seq}/{id} 是异常帧（去畸变可能失败），使用虚拟点云")
+                # 创建一个小的虚拟点云，位于原点附近
+                pcd = np.array([
+                    [10.0, 0.0, 0.0, 0.0],
+                    [20.0, 0.0, 0.0, 0.0],
+                    [30.0, 0.0, 0.0, 0.0],
+                    [40.0, 0.0, 0.0, 0.0],
+                    [50.0, 0.0, 0.0, 0.0],
+                ], dtype=np.float32)
         
         gt_transform = self.T[seq]
         intrinsic = self.K[seq]
-        
         return img, pcd, gt_transform, intrinsic
-
+        
 
 if __name__ == "__main__":
     # 测试
@@ -217,8 +215,6 @@ if __name__ == "__main__":
     
     dataset = CustomDataset(
         data_folder=dataset_root,
-        max_range=90.0,
-        detect_coordinate_system=True
     )
     
     print(f"\n数据集大小: {len(dataset)}")

@@ -9,18 +9,63 @@
 
 从 ROS bag 文件生成 KITTI-Odometry 格式的数据集，包括：
 - 图像提取与同步
-- 点云提取与去畸变
-- 位姿插值与转换
+- 点云提取与去畸变（参考C++实现）
+- 位姿插值与转换（李代数插值）
 - 标定文件生成
+
+**参数说明：**
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--bag_dir` | 必填 | ROS bag文件目录 |
+| `--config_dir` | 必填 | 配置文件目录（包含cameras.cfg, extrinsics.yaml等） |
+| `--output_dir` | 必填 | 输出数据集目录 |
+| `--camera_name` | traffic_2 | 相机名称 |
+| `--target_fps` | 10.0 | 目标帧率（用于降采样） |
+| `--num_workers` | 4 | 并行工作线程数 |
+| `--batch_size` | 200 | 批处理大小 |
+| `--max_frames` | None | 最大处理帧数（用于测试） |
+| `--save_debug_samples` | 0 | 保存调试样本数量（未去畸变点云，用于对比可视化） |
 
 **使用示例：**
 ```bash
+# 基本用法
 python prepare_custom_dataset.py \
   --bag_dir /path/to/bag/dir \
   --config_dir /path/to/config/dir \
   --output_dir /path/to/output/dir \
-  --camera_name camera_1 \
+  --camera_name traffic_2
+
+# 完整参数（推荐）
+python prepare_custom_dataset.py \
+  --bag_dir /path/to/bag/dir \
+  --config_dir /path/to/config/dir \
+  --output_dir /path/to/output/dir \
+  --camera_name traffic_2 \
+  --target_fps 10.0 \
+  --num_workers 8 \
+  --batch_size 200 \
+  --save_debug_samples 20
+
+# 快速测试（只处理100帧）
+python prepare_custom_dataset.py \
+  --bag_dir /path/to/bag/dir \
+  --config_dir /path/to/config/dir \
+  --output_dir /path/to/output/dir \
+  --camera_name traffic_2 \
   --max_frames 100
+```
+
+**输出目录结构：**
+```
+output_dir/
+├── sequences/00/
+│   ├── image_2/          # PNG图像 (000000.png, 000001.png, ...)
+│   ├── velodyne/         # 去畸变后的点云 (000000.bin, ...)
+│   ├── debug_raw_pointclouds/  # 未去畸变点云样本（如果启用--save_debug_samples）
+│   ├── calib.txt         # 标定文件
+│   └── times.txt         # 时间戳文件
+├── poses/00.txt          # 位姿文件
+└── temp/                 # 临时文件（可删除）
 ```
 
 **详细文档：** 参见 `../docs/自定义数据集制作Pipeline.md`
@@ -48,11 +93,12 @@ python visualize_projection.py \
   --dataset_root /path/to/dataset \
   --frame 0
 
-# 对比去畸变效果
+# 对比去畸变效果（使用debug_raw_pointclouds目录）
 python visualize_projection.py \
   --mode compare \
   --dataset_root /path/to/dataset \
-  --frame 0
+  --frame 0 \
+  --debug_sample 0
 
 # 批量对比多帧
 python visualize_projection.py \
@@ -61,6 +107,8 @@ python visualize_projection.py \
   --frame 0 \
   --num_frames 5
 ```
+
+**注意：** 对比去畸变效果需要在生成数据时使用 `--save_debug_samples` 参数保存未去畸变的点云样本。
 
 ---
 
@@ -146,15 +194,25 @@ python view_pointcloud.py temp/pointclouds/000000.ply --backend matplotlib
 
 ## 🔄 典型工作流程
 
-### 1. 生成数据集
+### 1. 生成数据集（完整流程）
 ```bash
+# 生成完整数据集（包含调试样本用于验证去畸变效果）
 python prepare_custom_dataset.py \
   --bag_dir /data/bag/dir \
   --config_dir /data/bag/dir/config \
   --output_dir /data/kitti_dataset \
   --camera_name traffic_2 \
-  --max_frames 100
+  --target_fps 10.0 \
+  --num_workers 8 \
+  --batch_size 200 \
+  --save_debug_samples 20
 ```
+
+**预期输出：**
+- 数据提取: ~2分钟
+- 数据同步: <1秒
+- 去畸变保存: ~4-5分钟
+- **总计: ~6-7分钟**
 
 ### 2. 验证数据集
 ```bash
@@ -172,11 +230,12 @@ python visualize_projection.py \
   --dataset_root /data/kitti_dataset \
   --frame 0
 
-# 对比去畸变效果
+# 对比去畸变效果（需要--save_debug_samples）
 python visualize_projection.py \
   --mode compare \
   --dataset_root /data/kitti_dataset \
-  --frame 0
+  --frame 0 \
+  --debug_sample 0
 ```
 
 ### 4. 查看点云
@@ -184,10 +243,16 @@ python visualize_projection.py \
 # 查看去畸变后的点云
 python view_pointcloud.py /data/kitti_dataset/sequences/00/velodyne/000000.bin
 
-# 对比去畸变前后
+# 对比去畸变前后（需要--save_debug_samples）
 python view_pointcloud.py \
-  /data/kitti_dataset/temp/pointclouds/000000.ply \
+  /data/kitti_dataset/sequences/00/debug_raw_pointclouds/000000_raw.bin \
   /data/kitti_dataset/sequences/00/velodyne/000000.bin
+```
+
+### 5. 开始训练
+```bash
+cd kitti-bev-calib
+python train_kitti.py --dataset_root /data/kitti_dataset
 ```
 
 ---

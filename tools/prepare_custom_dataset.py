@@ -260,6 +260,35 @@ class UndistortionUtils:
             # 没有位姿数据，无法去畸变
             return points_raw[:, :4]
         
+        # ✅ 检测点云是否已经在世界坐标系
+        # 传感器坐标系的点云范围通常在 ±200m 以内
+        # 世界坐标系的点云坐标可能非常大（取决于车辆位置）
+        xyz = points_raw[:, :3]
+        xyz_range = np.abs(xyz).max()
+        
+        if xyz_range > 250.0:  # 如果坐标超过250m，认为已经在世界坐标系
+            if debug:
+                print(f"⚠️  检测到点云已在世界坐标系（范围: {xyz_range:.1f}m），将转换回传感器坐标系")
+            
+            # 获取点云时刻的位姿（Sensing→World）
+            cloud_pose = UndistortionUtils.motion_interpolate(poses, cloud_timestamp)
+            if cloud_pose is None:
+                return None
+            
+            R_world_sensing, t_world_sensing = cloud_pose
+            # 世界坐标系 → 传感器坐标系
+            R_sensing_world = R_world_sensing.T
+            t_sensing_world = -R_world_sensing.T @ t_world_sensing
+            
+            # 转换点云到传感器坐标系
+            xyz_sensing = (R_sensing_world @ xyz.T).T + t_sensing_world
+            
+            # 更新点云数据
+            points_raw = np.hstack([xyz_sensing, points_raw[:, 3:]])
+            
+            if debug:
+                print(f"  转换后范围: X=[{xyz_sensing[:, 0].min():.1f}, {xyz_sensing[:, 0].max():.1f}]")
+        
         # 找到点云扫描的最大内部时间戳（单位：2微秒）
         # C++参考：math_utils.cpp:190-200
         max_inner_timestamp_2us = points_raw[:, 4].max()
@@ -273,16 +302,41 @@ class UndistortionUtils:
         target_pose = UndistortionUtils.motion_interpolate(poses, target_timestamp)
         
         if start_pose is None or end_pose is None or target_pose is None:
-            # 插值失败，返回原始点云（去掉timestamp）
-            # C++参考：math_utils.cpp:247-250
-            print(f"⚠️  去畸变失败：插值返回None")
-            print(f"  cloud_ts={cloud_timestamp:.6f}, end_ts={end_timestamp:.6f}, target_ts={target_timestamp:.6f}")
-            print(f"  start_pose={'有效' if start_pose else 'None'}, end_pose={'有效' if end_pose else 'None'}, target_pose={'有效' if target_pose else 'None'}")
-            return points_raw[:, :4]
+            # 插值失败，返回 None 表示该帧应该被跳过
+            # C++参考：math_utils.cpp:247-250 - 失败时跳过该帧
+            # 注意：不应该返回原始点云，因为没有正确的位姿插值会导致坐标错误
+            return None
         
         R_start, t_start = start_pose  # Sensing→World（已转换！）
         R_end, t_end = end_pose
         R_target, t_target = target_pose
+        
+        # ✅ 位姿合理性检查：检测位姿突变
+        # 正常情况下，start/end/target三个位姿应该非常接近（时间跨度通常<100ms）
+        # 如果位姿差异过大，说明数据有问题（如位姿跳变、时间戳错误等）
+        MAX_POSE_DISPLACEMENT = 5.0  # 最大允许位移（米）- 对应50m/s车速下的100ms
+        MAX_POSE_ROTATION = 0.5  # 最大允许旋转（弧度）- 约30度
+        
+        # 检查start到end的位移
+        displacement_se = np.linalg.norm(t_end - t_start)
+        # 检查start到target的位移
+        displacement_st = np.linalg.norm(t_target - t_start)
+        
+        # 检查旋转变化（使用旋转向量的模）
+        R_delta_se = R_start.T @ R_end
+        rotation_se = np.linalg.norm(R.from_matrix(R_delta_se).as_rotvec())
+        R_delta_st = R_start.T @ R_target
+        rotation_st = np.linalg.norm(R.from_matrix(R_delta_st).as_rotvec())
+        
+        if displacement_se > MAX_POSE_DISPLACEMENT or displacement_st > MAX_POSE_DISPLACEMENT:
+            if debug:
+                print(f"⚠️  位姿位移异常！start-end: {displacement_se:.2f}m, start-target: {displacement_st:.2f}m")
+            return None
+        
+        if rotation_se > MAX_POSE_ROTATION or rotation_st > MAX_POSE_ROTATION:
+            if debug:
+                print(f"⚠️  位姿旋转异常！start-end: {np.degrees(rotation_se):.1f}°, start-target: {np.degrees(rotation_st):.1f}°")
+            return None
         
         # 🔍 DEBUG: 打印pose信息
         if debug:
@@ -376,6 +430,31 @@ class UndistortionUtils:
         # 注意：去畸变后所有点都在target_timestamp时刻，原始timestamp已无意义
         # 输出格式：(N, 4) = [x, y, z, intensity]（符合KITTI标准）
         points_undistorted = np.hstack([xyz_undistorted, intensity])  # (N, 4)
+        
+        # ✅ 结果范围验证：检测去畸变异常
+        # 合理的传感器数据范围：
+        # - 激光雷达通常有效范围 200m
+        # - 去畸变不应该显著改变点云的位置，只做微小调整
+        # - 异常情况：位姿插值外推时可能产生极端变换
+        MAX_REASONABLE_RANGE = 250.0  # 最大合理距离 (米)
+        MAX_REASONABLE_HEIGHT = 50.0  # 最大合理高度 (米)
+        
+        x_min, x_max = xyz_undistorted[:, 0].min(), xyz_undistorted[:, 0].max()
+        y_min, y_max = xyz_undistorted[:, 1].min(), xyz_undistorted[:, 1].max()
+        z_min, z_max = xyz_undistorted[:, 2].min(), xyz_undistorted[:, 2].max()
+        
+        is_abnormal = (
+            x_min < -MAX_REASONABLE_RANGE or x_max > MAX_REASONABLE_RANGE or
+            y_min < -MAX_REASONABLE_RANGE or y_max > MAX_REASONABLE_RANGE or
+            z_min < -MAX_REASONABLE_HEIGHT or z_max > MAX_REASONABLE_HEIGHT
+        )
+        
+        if is_abnormal:
+            print(f"⚠️  去畸变结果异常，范围超限！")
+            print(f"    X: [{x_min:.2f}, {x_max:.2f}], Y: [{y_min:.2f}, {y_max:.2f}], Z: [{z_min:.2f}, {z_max:.2f}]")
+            print(f"    合理范围: XY ±{MAX_REASONABLE_RANGE}m, Z ±{MAX_REASONABLE_HEIGHT}m")
+            # 返回 None 表示该帧应该被跳过
+            return None
         
         # 🔍 DEBUG: 打印结果统计
         if debug:
@@ -898,7 +977,7 @@ class PointCloudParser:
     
     @staticmethod
     def _read_xyz_from_fields(buf: bytes, offset: int, step: int, fields_map: dict):
-        """从 buffer 中读取 x, y, z"""
+        """从 buffer 中读取 x, y, z（单点版本，保留兼容性）"""
         try:
             x_info = fields_map['x']
             y_info = fields_map['y']
@@ -929,10 +1008,107 @@ class PointCloudParser:
         return (_read_value(x_info), _read_value(y_info), _read_value(z_info))
     
     @staticmethod
+    def _parse_points_fast_numpy(raw: bytes, step: int, fields_map: dict, max_points: int = 500000) -> Optional[np.ndarray]:
+        """使用NumPy向量化操作快速解析点云数据
+        
+        ✅ 性能关键函数：使用numpy structured array和向量化操作
+        比Python循环快10-100倍
+        """
+        n = len(raw) // step
+        if n < 50:
+            return None
+        
+        n = min(n, max_points)
+        data_len = n * step
+        
+        # 获取字段信息
+        try:
+            x_off, x_fmt, x_scale = fields_map['x']
+            y_off, y_fmt, y_scale = fields_map['y']
+            z_off, z_fmt, z_scale = fields_map['z']
+        except KeyError:
+            return None
+        
+        # 格式到numpy dtype的映射
+        fmt_to_dtype = {
+            'h': np.int16,   # signed short (2 bytes)
+            'H': np.uint16,  # unsigned short (2 bytes)
+            'i': np.int32,   # signed int (4 bytes)
+            'I': np.uint32,  # unsigned int (4 bytes)
+            'f': np.float32, # float (4 bytes)
+            'd': np.float64, # double (8 bytes)
+        }
+        
+        dtype_sizes = {'h': 2, 'H': 2, 'i': 4, 'I': 4, 'f': 4, 'd': 8}
+        
+        try:
+            # 将原始数据转换为numpy数组
+            raw_array = np.frombuffer(raw[:data_len], dtype=np.uint8)
+            
+            # 重塑为 (n, step) 的2D数组，每行一个点
+            if len(raw_array) < n * step:
+                return None
+            points_raw = raw_array[:n * step].reshape(n, step)
+            
+            # 提取x, y, z（使用视图避免复制）
+            x_dtype = fmt_to_dtype.get(x_fmt, np.float32)
+            y_dtype = fmt_to_dtype.get(y_fmt, np.float32)
+            z_dtype = fmt_to_dtype.get(z_fmt, np.float32)
+            x_size = dtype_sizes.get(x_fmt, 4)
+            y_size = dtype_sizes.get(y_fmt, 4)
+            z_size = dtype_sizes.get(z_fmt, 4)
+            
+            # 使用contiguous array来提取数据（关键性能优化）
+            x_bytes = np.ascontiguousarray(points_raw[:, x_off:x_off+x_size])
+            y_bytes = np.ascontiguousarray(points_raw[:, y_off:y_off+y_size])
+            z_bytes = np.ascontiguousarray(points_raw[:, z_off:z_off+z_size])
+            
+            x_data = x_bytes.view(x_dtype).flatten().astype(np.float32) * x_scale
+            y_data = y_bytes.view(y_dtype).flatten().astype(np.float32) * y_scale
+            z_data = z_bytes.view(z_dtype).flatten().astype(np.float32) * z_scale
+            
+            # 提取intensity (offset 6, uint8)
+            intensity_data = np.zeros(n, dtype=np.float32)
+            if step > 6:
+                intensity_data = points_raw[:, 6].astype(np.float32)
+            
+            # 提取timestamp (offset 8-9, uint16)
+            timestamp_data = np.zeros(n, dtype=np.float32)
+            if step >= 10:
+                ts_bytes = np.ascontiguousarray(points_raw[:, 8:10])
+                timestamp_data = ts_bytes.view(np.uint16).flatten().astype(np.float32)
+            
+            # 过滤无效点（向量化操作）
+            valid_mask = (
+                np.isfinite(x_data) & np.isfinite(y_data) & np.isfinite(z_data) &
+                (np.abs(x_data) <= 500) & (np.abs(y_data) <= 500) & (np.abs(z_data) <= 100)
+            )
+            
+            valid_count = valid_mask.sum()
+            if valid_count < 50:
+                return None
+            
+            # 组合结果（向量化）
+            points = np.column_stack([
+                x_data[valid_mask],
+                y_data[valid_mask],
+                z_data[valid_mask],
+                intensity_data[valid_mask],
+                timestamp_data[valid_mask]
+            ])
+            
+            return points.astype(np.float32)
+            
+        except Exception as e:
+            return None
+    
+    @staticmethod
     def parse_proto_pointcloud2(data: bytes) -> Optional[np.ndarray]:
         """解析 PointCloud2 proto 数据
         
         参考: ~/develop/code/github/Self-Cali-GS/surround_calibration/data/lidar_utils.py
+        
+        ✅ 性能优化：使用NumPy向量化操作替代Python循环，大幅提升解析速度
         """
         if data is None or len(data) < 16:
             return None
@@ -968,39 +1144,10 @@ class PointCloudParser:
             if len(fields_map) != 3:
                 fields_map = {'x': (0, 'h', 0.01), 'y': (2, 'h', 0.01), 'z': (4, 'h', 0.01)}
             
-            # 提取所有点（包含intensity和timestamp）
-            # CompressedPoint 格式: x,y,z(int16), intensity(uint8), ring(uint8), timestamp(uint16)
-            # offset: 0-1(x), 2-3(y), 4-5(z), 6(intensity), 7(ring), 8-9(timestamp)
-            pts = []
-            for i in range(min(n, 500000)):  # 限制最大点数
-                base = i * step
-                xyz = PointCloudParser._read_xyz_from_fields(raw, base, step, fields_map)
-                if xyz is None:
-                    continue
-                x, y, z = xyz
-                
-                # 验证点坐标
-                if (np.isnan(x) or np.isnan(y) or np.isnan(z) or 
-                    np.isinf(x) or np.isinf(y) or np.isinf(z) or
-                    abs(x) > 500 or abs(y) > 500 or abs(z) > 100):
-                    continue
-                
-                # 读取intensity（offset 6，uint8）
-                intensity = 0.0
-                if base + 6 < len(raw):
-                    intensity = float(raw[base + 6])
-                
-                # 读取timestamp（offset 8-9，uint16）
-                timestamp_raw = 0
-                if base + 9 < len(raw):
-                    timestamp_raw = struct.unpack_from('<H', raw, base + 8)[0]
-                
-                # 返回 (x, y, z, intensity, timestamp)
-                # timestamp单位是2微秒（根据C++代码）
-                pts.append([x, y, z, intensity, float(timestamp_raw)])
-            
-            if len(pts) >= 50:
-                return np.array(pts, dtype=np.float32)
+            # ✅ 使用向量化快速解析（性能关键优化）
+            points = PointCloudParser._parse_points_fast_numpy(raw, step, fields_map)
+            if points is not None and len(points) >= 50:
+                return points
         
         # Fallback: 尝试直接按float格式读取（如果wire format失败）
         # 参考Self-Cali-GS: 尝试不同的起始偏移量
@@ -1059,6 +1206,7 @@ class BEVCalibDatasetPreparer:
         batch_size: int = 500,  # 每批处理的帧数（增加默认值以提升速度）
         num_workers: int = 4,  # 并行处理的工作线程数
         max_frames: int = None,  # 最大处理帧数（用于测试）
+        save_debug_samples: int = 0,  # 保存调试样本数量（未去畸变点云）
     ):
         self.bag_path = Path(bag_path)
         self.config_dir = Path(config_dir)
@@ -1071,6 +1219,7 @@ class BEVCalibDatasetPreparer:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.max_frames = max_frames  # 最大处理帧数（用于测试）
+        self.save_debug_samples = save_debug_samples  # 保存调试样本数量
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1305,10 +1454,10 @@ class BEVCalibDatasetPreparer:
         ])
         
         print(f"✓ 变换矩阵已计算 (C++命名约定，从右往左读):")
-        print(f"  T_camera_to_lidar: LiDAR → Camera (KITTI Tr矩阵)")
-        print(f"  T_lidar_to_camera: Camera → LiDAR")
-        print(f"  T_lidar_to_sensing: Sensing → LiDAR (去畸变用)")
+        print(f"  T_camera_to_sensing: Sensing → Camera (Tr矩阵，与C++一致)")
+        print(f"  T_sensing_to_camera: Camera → Sensing")
         print(f"  T_vehicle_to_sensing: Sensing → Vehicle (已缓存)")
+        print(f"  注意: 点云保存在Sensing系，Tr是Sensing→Camera")
     
     def extract_data_from_bag(self):
         """从 rosbag 提取数据（流式处理+并行加速）"""
@@ -1522,8 +1671,9 @@ class BEVCalibDatasetPreparer:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
         
-        # 线程锁保护元数据列表
+        # 线程锁保护元数据列表和计数器
         lock = threading.Lock()
+        counter_lock = threading.Lock()  # 专门用于计数器的锁
         
         def process_single_bag(bag_file: Path):
             """处理单个bag文件"""
@@ -1537,7 +1687,8 @@ class BEVCalibDatasetPreparer:
                     # 提取数据
                     self._extract_streaming_rosbags_to_lists(
                         bag_file, image_topic, possible_topics,
-                        temp_images, temp_pcs, temp_poses
+                        temp_images, temp_pcs, temp_poses,
+                        counter_lock=counter_lock
                     )
                     
                     # 合并到主列表（需要加锁）
@@ -1554,10 +1705,18 @@ class BEVCalibDatasetPreparer:
                 print(f"  错误处理 {bag_file.name}: {e}")
                 return 0, 0, 0
         
-        # 使用线程池并行处理
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+        # ✅ 优化：使用较少的并行度避免I/O竞争
+        # 点云解析是CPU密集型，但文件I/O是瓶颈
+        import gc
+        actual_workers = min(self.num_workers, 4)
+        
+        # 使用线程池并行处理（I/O密集型任务）
+        # 注意：点云解析是CPU密集型，但由于GIL，线程池效率有限
+        # 但进程池会导致内存问题，所以保持线程池
+        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
             futures = {executor.submit(process_single_bag, bf): bf for bf in bag_files}
             
+            completed = 0
             for future in tqdm(as_completed(futures), total=len(bag_files),
                              desc="  并行处理bag文件", unit="bag"):
                 bag_file = futures[future]
@@ -1566,6 +1725,11 @@ class BEVCalibDatasetPreparer:
                     print(f"  ✓ {bag_file.name}: {n_images} 图像, {n_pcs} 点云, {n_poses} 位姿")
                 except Exception as e:
                     print(f"  ✗ {bag_file.name}: 错误 - {e}")
+                
+                # 每处理10个bag文件，强制GC
+                completed += 1
+                if completed % 10 == 0:
+                    gc.collect()
     
     def _find_bag_files(self) -> List[Path]:
         """查找 bag 文件"""
@@ -1657,14 +1821,24 @@ class BEVCalibDatasetPreparer:
     
     def _extract_streaming_rosbags_to_lists(self, bag_file: Path, image_topic: Optional[str],
                                            possible_topics: List[str],
-                                           out_images: list, out_pcs: list, out_poses: list):
-        """使用 rosbags 流式提取（输出到指定列表）"""
-        from rosbags.rosbag1 import Reader
+                                           out_images: list, out_pcs: list, out_poses: list,
+                                           counter_lock=None):
+        """使用 rosbags 流式提取（输出到指定列表）
         
-        image_buffer = []
-        pc_buffer = []
+        注意：此函数直接将数据添加到 out_images, out_pcs, out_poses 列表。
+        使用bag文件名+局部计数器作为文件名，避免多线程竞争。
+        """
+        from rosbags.rosbag1 import Reader
+        import hashlib
         
         topics_to_check = [image_topic] if image_topic else possible_topics
+        
+        local_img_count = 0
+        local_pc_count = 0
+        local_pose_count = 0
+        
+        # 使用bag文件名的hash作为前缀，避免文件名冲突
+        bag_hash = hashlib.md5(bag_file.name.encode()).hexdigest()[:8]
         
         with Reader(str(bag_file)) as reader:
             available = list(reader.topics.keys())
@@ -1672,19 +1846,15 @@ class BEVCalibDatasetPreparer:
             
             # 检查位姿topic是否可用
             pose_topic_available = self.active_pose_topic and self.active_pose_topic in available
+            # 检查lidar topic是否可用
+            lidar_topic_available = self.lidar_topic in available
             
             msg_count = 0
             for connection, timestamp, rawdata in tqdm(reader.messages(), 
                                                       desc=f"  提取数据",
-                                                      unit="msg"):
-                # 🔥 提前终止检查：每10条消息检查一次（快速模式用更细粒度）
+                                                      unit="msg",
+                                                      leave=False):  # 不保留进度条
                 msg_count += 1
-                if self.max_frames is not None and msg_count % 10 == 0:
-                    img_count = len(self.image_metadata) + len(image_buffer)
-                    pc_count = len(self.pc_metadata) + len(pc_buffer)
-                    if img_count >= self.max_frames * 1.1 and pc_count >= self.max_frames * 1.1:
-                        print(f"\n  ⚡ 提前终止：已收集足够数据 (图像:{img_count}, 点云:{pc_count})")
-                        break
                 
                 # bag_record_time用作fallback（当header时间戳提取失败时）
                 bag_record_time = timestamp / 1e9
@@ -1693,61 +1863,67 @@ class BEVCalibDatasetPreparer:
                 if connection.topic in topics_to_check:
                     data = self._extract_string_msg(rawdata)
                     if data:
-                        # ✅ 关键修复：从header提取时间戳（参考C++: image_msg.header().timestamp_sec()）
                         header_ts = ProtobufUtils.extract_header_timestamp(data)
                         ts_sec = header_ts if header_ts is not None else bag_record_time
                         
                         image = self._decode_image_msg_from_bytes(data)
                         if image is not None:
-                            image_buffer.append((ts_sec, image))
+                            # 使用bag_hash+局部计数器作为文件名，避免冲突
+                            filename = f"{bag_hash}_{local_img_count:06d}.jpg"
+                            filepath = self.temp_image_dir / filename
+                            cv2.imwrite(str(filepath), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
                             
-                            # 批量保存
-                            if len(image_buffer) >= self.batch_size:
-                                self._save_image_batch(image_buffer)
-                                image_buffer.clear()
+                            out_images.append(ImageMetadata(
+                                timestamp=ts_sec,
+                                file_path=str(filepath)
+                            ))
+                            local_img_count += 1
+                            del image  # 立即释放
                 
                 # 提取点云
-                elif connection.topic == self.lidar_topic:
+                elif lidar_topic_available and connection.topic == self.lidar_topic:
                     data = self._extract_string_msg(rawdata)
                     if data:
-                        # ✅ 关键修复：从header提取时间戳（参考C++: cloud_msg->header().timestamp_sec()）
                         header_ts = ProtobufUtils.extract_header_timestamp(data)
                         ts_sec = header_ts if header_ts is not None else bag_record_time
                         
-                        # 尝试从首个点云消息提取 vehicle_to_sensing (Sensing→Vehicle)
+                        # 尝试从首个点云消息提取 vehicle_to_sensing
                         if self.vehicle_to_sensing_from_bag is None:
                             v2s = self._extract_vehicle_to_sensing_from_pc_msg(data)
                             if v2s is not None:
                                 self.vehicle_to_sensing_from_bag = v2s
                                 print(f"✓ 从bag点云消息中提取到 vehicle_to_sensing")
-                                print(f"   (C++命名: T_vehicle_to_sensing = Sensing→Vehicle)")
                         
                         points = PointCloudParser.parse_proto_pointcloud2(data)
                         if points is not None and points.shape[0] >= 50:
-                            pc_buffer.append((ts_sec, points))
+                            # 使用bag_hash+局部计数器作为文件名，避免冲突
+                            filename = f"{bag_hash}_{local_pc_count:06d}.bin"
+                            filepath = self.temp_pc_dir / filename
                             
-                            # 批量保存
-                            if len(pc_buffer) >= self.batch_size:
-                                self._save_pc_batch(pc_buffer)
-                                pc_buffer.clear()
+                            if points.shape[1] == 3:
+                                intensity = np.zeros((points.shape[0], 1), dtype=np.float32)
+                                points = np.hstack([points, intensity])
+                            
+                            points.astype(np.float32).tofile(str(filepath))
+                            
+                            out_pcs.append(PointCloudMetadata(
+                                timestamp=ts_sec,
+                                file_path=str(filepath)
+                            ))
+                            local_pc_count += 1
+                            del points  # 立即释放
                 
                 # 提取位姿
                 elif pose_topic_available and connection.topic == self.active_pose_topic:
                     data = self._extract_string_msg(rawdata)
                     if data:
-                        # 创建一个临时msg对象以重用_decode_pose_msg
                         class TempMsg:
                             def __init__(self, d):
                                 self.data = d
                         pose = self._decode_pose_msg(TempMsg(data), fallback_timestamp=bag_record_time)
                         if pose:
                             out_poses.append(pose)
-        
-        # 保存剩余的数据
-        if image_buffer:
-            self._save_image_batch(image_buffer)
-        if pc_buffer:
-            self._save_pc_batch(pc_buffer)
+                            local_pose_count += 1
     
     def _extract_streaming_rosbag(self, bag_file: Path, image_topic: Optional[str],
                                   possible_topics: List[str]):
@@ -1797,7 +1973,8 @@ class BEVCalibDatasetPreparer:
                             image = self._decode_image_msg_from_bytes(data)
                             if image is not None:
                                 image_buffer.append((ts_sec, image))
-                                if len(image_buffer) >= self.batch_size:
+                                # ✅ 内存优化：降低批量大小
+                                if len(image_buffer) >= min(self.batch_size, 50):
                                     self._save_image_batch(image_buffer)
                                     image_buffer.clear()
                 
@@ -1825,7 +2002,8 @@ class BEVCalibDatasetPreparer:
                         points = PointCloudParser.parse_proto_pointcloud2(data)
                         if points is not None and points.shape[0] >= 50:
                             pc_buffer.append((ts_sec, points))
-                            if len(pc_buffer) >= self.batch_size:
+                            # ✅ 内存优化：点云数据更大，更频繁地保存
+                            if len(pc_buffer) >= min(self.batch_size, 20):
                                 self._save_pc_batch(pc_buffer)
                                 pc_buffer.clear()
                 
@@ -1947,11 +2125,14 @@ class BEVCalibDatasetPreparer:
         timestamp = None
         
         try:
-            # 跳过DeepRoute的额外header: $$$$ + <4 bytes length>
+            # 跳过DeepRoute的额外header: $$$$ + <4 bytes length> + <header content>
             if data[:4] == b'$$$$':
                 if len(data) < 8:
                     return None, None, None
-                data = data[8:]  # 跳过4字节marker + 4字节length
+                header_len = struct.unpack('<I', data[4:8])[0]
+                if len(data) < 8 + header_len:
+                    return None, None, None
+                data = data[8 + header_len:]  # 跳过4字节marker + 4字节length + header内容
             # 方法1: 尝试JSON格式（某些bag使用JSON）
             try:
                 text = data.decode('utf-8', errors='ignore').strip()
@@ -2209,18 +2390,35 @@ class BEVCalibDatasetPreparer:
         """处理单帧数据（用于并行处理）"""
         idx, img_idx, pc_idx, image_dir, velodyne_dir = args
         
-        # 复制图像
+        # 复制图像（使用shutil.copy更快）
         src_img = Path(self.image_metadata[img_idx].file_path)
         dst_img = image_dir / f"{idx:06d}.png"
-        img = Image.open(src_img)
-        img.save(dst_img)
+        
+        try:
+            # 如果源文件是PNG，直接复制；否则转换
+            if src_img.suffix.lower() == '.png':
+                import shutil
+                shutil.copy2(str(src_img), str(dst_img))
+            else:
+                img = Image.open(src_img)
+                img.save(dst_img)
+        except Exception as e:
+            # 图像读取/保存失败，跳过该帧
+            if idx == 0:
+                print(f"⚠️  图像处理失败: {e}")
+            return None
         
         # 读取并去畸变点云
         src_pc = Path(self.pc_metadata[pc_idx].file_path)
         dst_pc = velodyne_dir / f"{idx:06d}.bin"
         
         # 读取原始点云
-        points_data = np.fromfile(str(src_pc), dtype=np.float32)
+        try:
+            points_data = np.fromfile(str(src_pc), dtype=np.float32)
+        except Exception as e:
+            if dst_img.exists():
+                dst_img.unlink()
+            return False
         
         # 判断是否有timestamp（5列）
         if len(points_data) % 5 == 0:
@@ -2234,23 +2432,22 @@ class BEVCalibDatasetPreparer:
                 cloud_ts = self.pc_metadata[pc_idx].timestamp  # LiDAR扫描开始时刻
                 target_ts = self.image_metadata[img_idx].timestamp  # 图像曝光时刻（目标对齐时刻）
                 
-                # 🔍 添加调试信息
-                if idx == 0:  # 只在第一帧打印
-                    print(f"\n🔍 去畸变调试信息（Frame {idx}） - 完全对齐C++:")
-                    print(f"  cloud_ts: {cloud_ts:.6f}")
-                    print(f"  target_ts: {target_ts:.6f}")
-                    print(f"  时间差: {abs(target_ts - cloud_ts)*1000:.1f}ms")
-                    print(f"  假设：LiDAR系 = Sensing系 (iso_vehicle_lidar = Identity)")
-                    print(f"  poses是Sensing→World变换（Sensing在World系中的位姿）")
-                
                 # 点云去畸变（poses已经是Sensing系，LiDAR系=Sensing系）
+                # 注：调试信息只在verbose模式且第一帧时打印
                 points_undistorted = UndistortionUtils.undistort_pointcloud(
                     points_raw, cloud_ts, target_ts, self.pose_metadata,
-                    debug=(idx == 0)  # 只在第一帧启用详细调试
+                    debug=(idx == 0 and self.verbose)
                 )
                 
-                # 🔍 打印去畸变前后的点云范围
-                if idx == 0:
+                # ✅ 关键修复：如果去畸变失败（返回None），跳过该帧
+                if points_undistorted is None:
+                    # 删除已保存的图像
+                    if dst_img.exists():
+                        dst_img.unlink()
+                    return None  # 返回 None 表示该帧被跳过
+                
+                # 🔍 打印去畸变前后的点云范围（仅verbose模式）
+                if idx == 0 and self.verbose:
                     print(f"\n  去畸变前点云范围:")
                     print(f"    X: [{points_raw[:, 0].min():.2f}, {points_raw[:, 0].max():.2f}]")
                     print(f"    Y: [{points_raw[:, 1].min():.2f}, {points_raw[:, 1].max():.2f}]")
@@ -2259,16 +2456,11 @@ class BEVCalibDatasetPreparer:
                     print(f"    X: [{points_undistorted[:, 0].min():.2f}, {points_undistorted[:, 0].max():.2f}]")
                     print(f"    Y: [{points_undistorted[:, 1].min():.2f}, {points_undistorted[:, 1].max():.2f}]")
                     print(f"    Z: [{points_undistorted[:, 2].min():.2f}, {points_undistorted[:, 2].max():.2f}]")
-                    
-                    # 检查点云是否有异常大的变化
-                    max_shift = np.abs(points_undistorted[:, :3] - points_raw[:, :3]).max()
-                    print(f"  最大位移: {max_shift:.2f}m")
-                    if max_shift > 10.0:
-                        print(f"  ⚠️  警告：位移过大（>{max_shift:.1f}m），可能存在问题！")
             else:
                 # 没有pose数据，直接使用前4列
                 points_undistorted = points_raw[:, :4]
-                print(f"  ⚠️  警告：没有pose数据, 数据异常，直接使用前4列")
+                if idx == 0 and self.verbose:
+                    print(f"  ⚠️  警告：没有pose数据, 直接使用前4列")
         elif len(points_data) % 4 == 0:
             # (N, 4): x, y, z, intensity，无timestamp
             points_raw = points_data.reshape(-1, 4)
@@ -2276,32 +2468,34 @@ class BEVCalibDatasetPreparer:
         else:
             return False  # 格式异常
         
-        # ✅ 关键修复：将点云从Sensing系转换到LiDAR系
-        # KITTI-Odometry标准要求点云在LiDAR系，这样投影时可以直接使用Tr（LiDAR→Camera）
-        # 变换链：Sensing系 → LiDAR系
-        # P_lidar = T_lidar_to_sensing @ P_sensing
+        # ✅ 关键修复：点云保持在Sensing系（与C++实现一致）
+        # 
+        # C++实现参考：manual_sensor_calib.cpp
+        # - 点云去畸变后在 Sensing 坐标系
+        # - 投影时使用 Sensing→Camera 变换
+        # - 这样可以直接使用 kitti_dataset.py，无需额外的坐标转换
+        #
+        # 变换链：
+        # - 点云在Sensing系：P_sensing（去畸变后）
+        # - 变换到Camera系：P_camera = T_sensing_to_camera * P_sensing
+        # - 投影到图像：p = K * P_camera
+        #
+        # 注意：Tr矩阵也需要相应修改为 Sensing→Camera
         
-        # 转换点云到LiDAR系（使用C++命名约定）
-        points_homo = np.hstack([points_undistorted[:, :3], np.ones((points_undistorted.shape[0], 1))])
-        points_lidar = (self.T_lidar_to_sensing @ points_homo.T).T  # (N, 4)
+        # 直接使用去畸变后的点云（Sensing系）
+        points_final = points_undistorted
         
-        # 组合为最终点云：[x, y, z, intensity]（LiDAR系）
-        points_final = np.hstack([points_lidar[:, :3], points_undistorted[:, 3:4]])
+        # 仅在第一帧且verbose模式打印坐标系信息
+        # if idx == 0 and self.verbose:
+        #     print(f"\n  点云坐标系: Sensing系（与C++一致）")
         
-        if idx == 0 and self.verbose:
-            print(f"\n  转换到LiDAR系:")
-            print(f"    去畸变后（Sensing系）范围:")
-            print(f"      X: [{points_undistorted[:, 0].min():.2f}, {points_undistorted[:, 0].max():.2f}]")
-            print(f"      Y: [{points_undistorted[:, 1].min():.2f}, {points_undistorted[:, 1].max():.2f}]")
-            print(f"      Z: [{points_undistorted[:, 2].min():.2f}, {points_undistorted[:, 2].max():.2f}]")
-            print(f"    转换后（LiDAR系）范围:")
-            print(f"      X: [{points_final[:, 0].min():.2f}, {points_final[:, 0].max():.2f}]")
-            print(f"      Y: [{points_final[:, 1].min():.2f}, {points_final[:, 1].max():.2f}]")
-            print(f"      Z: [{points_final[:, 2].min():.2f}, {points_final[:, 2].max():.2f}]")
-        
-        # 保存点云（LiDAR系，符合KITTI标准）
+        # 保存点云（Sensing系，与C++一致）
         # 格式：(N, 4) = [x, y, z, intensity]
         points_final.astype(np.float32).tofile(str(dst_pc))
+        
+        # ✅ 内存优化：显式删除大数组
+        del points_data, points_raw, points_undistorted, points_final
+        
         return True
     
     def sync_and_save(self, sequence_id: str = "00"):
@@ -2420,28 +2614,65 @@ class BEVCalibDatasetPreparer:
             pose_ts_min = self.pose_metadata[0].timestamp
             pose_ts_max = self.pose_metadata[-1].timestamp
             
+            # ✅ 允许一定的外推范围（最多1秒）
+            EXTRAPOLATION_MARGIN = 1.0  # 秒
+            
             synced_pairs_filtered = []
+            skipped_reasons = {'no_file': 0, 'out_of_range': 0}
+            
             for img_idx, pc_idx in synced_pairs:
-                pc_ts = self.pc_metadata[pc_idx].timestamp
-                # 检查点云时间戳是否在pose范围内
-                # 注意：还要考虑点云扫描的end_timestamp
-                temp_pc_file = self.temp_dir / 'pointclouds' / f'{pc_idx:06d}.bin'
-                if temp_pc_file.exists():
-                    points_raw = np.fromfile(temp_pc_file, dtype=np.float32).reshape(-1, 5)
-                    if points_raw.shape[0] > 0 and points_raw.shape[1] >= 5:
+                pc_meta = self.pc_metadata[pc_idx]
+                pc_ts = pc_meta.timestamp
+                img_ts = self.image_metadata[img_idx].timestamp
+                
+                # ✅ 修复：使用 pc_metadata 中存储的实际文件路径
+                temp_pc_file = Path(pc_meta.file_path)
+                
+                if not temp_pc_file.exists():
+                    skipped_reasons['no_file'] += 1
+                    continue
+                
+                # 读取点云获取扫描时间范围
+                try:
+                    points_raw = np.fromfile(str(temp_pc_file), dtype=np.float32)
+                    if len(points_raw) % 5 == 0:
+                        points_raw = points_raw.reshape(-1, 5)
+                    elif len(points_raw) % 4 == 0:
+                        points_raw = points_raw.reshape(-1, 4)
+                        # 没有timestamp列，假设扫描时间为0.1秒
+                        end_ts = pc_ts + 0.1
+                    else:
+                        skipped_reasons['no_file'] += 1
+                        continue
+                    
+                    if points_raw.shape[1] >= 5:
                         max_inner_ts_us = points_raw[:, 4].max()
-                        delta_time_us = max_inner_ts_us * 2
+                        delta_time_us = max_inner_ts_us * 2  # 单位是2微秒
                         end_ts = pc_ts + delta_time_us * 1e-6
+                    else:
+                        end_ts = pc_ts + 0.1  # 假设扫描时间为0.1秒
+                    
+                    # ✅ 放宽检查：允许一定范围的外推
+                    min_bound = pose_ts_min - EXTRAPOLATION_MARGIN
+                    max_bound = pose_ts_max + EXTRAPOLATION_MARGIN
+                    
+                    if (pc_ts >= min_bound and pc_ts <= max_bound and
+                        end_ts >= min_bound and end_ts <= max_bound and
+                        img_ts >= min_bound and img_ts <= max_bound):
+                        synced_pairs_filtered.append((img_idx, pc_idx))
+                    else:
+                        skipped_reasons['out_of_range'] += 1
                         
-                        # start, end, target 都需要在pose范围内
-                        img_ts = self.image_metadata[img_idx].timestamp
-                        if (pc_ts >= pose_ts_min and pc_ts <= pose_ts_max and
-                            end_ts >= pose_ts_min and end_ts <= pose_ts_max and
-                            img_ts >= pose_ts_min and img_ts <= pose_ts_max):
-                            synced_pairs_filtered.append((img_idx, pc_idx))
+                except Exception as e:
+                    skipped_reasons['no_file'] += 1
+                    continue
             
             if len(synced_pairs_filtered) < len(synced_pairs):
                 print(f"\n  ⚠️  过滤时间戳超出pose范围的帧: {len(synced_pairs)} → {len(synced_pairs_filtered)}")
+                if skipped_reasons['no_file'] > 0:
+                    print(f"      - 文件不存在/读取失败: {skipped_reasons['no_file']}")
+                if skipped_reasons['out_of_range'] > 0:
+                    print(f"      - 超出pose范围: {skipped_reasons['out_of_range']}")
             synced_pairs = synced_pairs_filtered
         
         # ✅ 可选：基于target_fps进行降采样（如果同步帧数过多）
@@ -2504,6 +2735,44 @@ class BEVCalibDatasetPreparer:
         print(f"  耗时: {timedelta(seconds=int(sync_time))}")
         print(f"  速度: {len(synced_pairs) / sync_time:.2f} 对/秒")
         
+        # ========================================================================
+        # 保存调试样本（未去畸变的点云，用于可视化对比）
+        # ========================================================================
+        if self.save_debug_samples > 0 and len(synced_pairs) > 0:
+            debug_dir = seq_dir / 'debug_raw_pointclouds'
+            debug_dir.mkdir(exist_ok=True)
+            
+            # 均匀采样
+            sample_interval = max(1, len(synced_pairs) // self.save_debug_samples)
+            sample_indices = list(range(0, len(synced_pairs), sample_interval))[:self.save_debug_samples]
+            
+            print(f"\n📸 保存调试样本（未去畸变点云）:")
+            print(f"  样本数量: {len(sample_indices)}")
+            print(f"  采样间隔: 每 {sample_interval} 帧")
+            print(f"  保存位置: {debug_dir}")
+            
+            for sample_idx, pair_idx in enumerate(tqdm(sample_indices, desc="  保存调试样本")):
+                img_idx, pc_idx = synced_pairs[pair_idx]
+                pc_meta = self.pc_metadata[pc_idx]
+                
+                # 复制原始点云
+                src_path = Path(pc_meta.file_path)
+                if src_path.exists():
+                    dst_path = debug_dir / f"{sample_idx:06d}_raw.bin"
+                    import shutil
+                    shutil.copy2(src_path, dst_path)
+                    
+                    # 同时保存对应的图像
+                    img_meta = self.image_metadata[img_idx]
+                    img_src = Path(img_meta.file_path)
+                    if img_src.exists():
+                        img_dst = debug_dir / f"{sample_idx:06d}_image.jpg"
+                        shutil.copy2(img_src, img_dst)
+            
+            print(f"  ✓ 已保存 {len(sample_indices)} 个调试样本")
+            print(f"  💡 提示: 去畸变后的点云将保存在 velodyne/ 目录")
+            print(f"     可对比 debug_raw_pointclouds/ 和 velodyne/ 查看去畸变效果")
+        
         # 保存最终数据集（并行处理）
         print(f"\n{'='*80}")
         print(f"阶段 3/3: 去畸变并保存 (使用 {self.num_workers} 个线程)")
@@ -2511,30 +2780,117 @@ class BEVCalibDatasetPreparer:
         
         save_start_time = time.time()
         
-        # 准备并行任务参数
+        # ✅ 优化：直接在保存时处理去畸变，跳过预验证步骤
+        # 预验证太慢，改为在保存时检测并跳过失败帧
+        valid_pairs = synced_pairs  # 直接使用所有配对，在保存时过滤
+        skipped_count = 0  # 将在保存阶段统计
+        
+        # 使用原始配对，在保存时过滤
+        synced_pairs = valid_pairs
+        
+        # 保存帧（去畸变和保存合并处理）
+        print(f"\n  去畸变并保存...")
+        
+        # ✅ 内存优化：限制并行度，避免OOM
+        # 每个点云约 200MB (100万点 * 5 * 4字节 * 10倍处理开销)
+        # 8个并行 = 1.6GB 内存使用，安全阈值
+        actual_workers = min(self.num_workers, 8)
+        print(f"  使用 {actual_workers} 个并行工作线程 (内存安全模式)")
+        
+        # 准备任务（使用临时索引，后续重新编号）
         tasks = [
-            (idx, img_idx, pc_idx, image_dir, velodyne_dir)
-            for idx, (img_idx, pc_idx) in enumerate(synced_pairs)
+            (tmp_idx, img_idx, pc_idx, image_dir, velodyne_dir)
+            for tmp_idx, (img_idx, pc_idx) in enumerate(synced_pairs)
         ]
         
-        # 使用线程池并行处理（I/O密集型任务，线程池更合适）
+        # ✅ 内存优化：分批处理，每批处理后强制GC
+        import gc
+        batch_size = 200  # 每批200帧
         results = []
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = [executor.submit(self._process_single_frame, task) for task in tasks]
-            for future in tqdm(futures, desc="  处理进度", total=len(tasks)):
-                results.append(future.result())
+        
+        for batch_start in range(0, len(tasks), batch_size):
+            batch_end = min(batch_start + batch_size, len(tasks))
+            batch_tasks = tasks[batch_start:batch_end]
+            
+            # 使用线程池并行处理当前批次
+            with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+                futures = [executor.submit(self._process_single_frame, task) for task in batch_tasks]
+                for future in tqdm(futures, desc=f"  批次 {batch_start//batch_size + 1}/{(len(tasks)-1)//batch_size + 1}", 
+                                   total=len(batch_tasks), leave=False):
+                    result = future.result()
+                    results.append(result)
+            
+            # 强制垃圾回收
+            gc.collect()
+        
+        # 检查是否有跳过的帧，如果有则需要重新编号
+        skipped_indices = [i for i, r in enumerate(results) if r is None or r is False]
+        if skipped_indices:
+            print(f"\n  重新编号（跳过 {len(skipped_indices)} 帧）...")
+            # 收集成功的帧
+            success_indices = [i for i, r in enumerate(results) if r is True]
+            
+            # ✅ 修复：使用临时目录避免文件覆盖问题
+            import tempfile
+            import shutil
+            
+            # 创建临时目录
+            temp_rename_dir = self.temp_dir / 'rename_temp'
+            temp_rename_dir.mkdir(exist_ok=True)
+            temp_img_dir = temp_rename_dir / 'images'
+            temp_pc_dir = temp_rename_dir / 'pointclouds'
+            temp_img_dir.mkdir(exist_ok=True)
+            temp_pc_dir.mkdir(exist_ok=True)
+            
+            # 第一步：将成功的帧移动到临时目录并重新编号
+            for new_idx, old_idx in enumerate(tqdm(success_indices, desc="  重编号(1/2)")):
+                old_img = image_dir / f"{old_idx:06d}.png"
+                old_pc = velodyne_dir / f"{old_idx:06d}.bin"
+                new_img = temp_img_dir / f"{new_idx:06d}.png"
+                new_pc = temp_pc_dir / f"{new_idx:06d}.bin"
+                
+                if old_img.exists():
+                    shutil.move(str(old_img), str(new_img))
+                if old_pc.exists():
+                    shutil.move(str(old_pc), str(new_pc))
+            
+            # 第二步：清空原目录中的残留文件
+            for f in image_dir.glob('*.png'):
+                f.unlink()
+            for f in velodyne_dir.glob('*.bin'):
+                f.unlink()
+            
+            # 第三步：将重新编号的文件移回原目录
+            for f in tqdm(list(temp_img_dir.glob('*.png')), desc="  重编号(2/2)", leave=False):
+                shutil.move(str(f), str(image_dir / f.name))
+            for f in temp_pc_dir.glob('*.bin'):
+                shutil.move(str(f), str(velodyne_dir / f.name))
+            
+            # 清理临时目录
+            shutil.rmtree(str(temp_rename_dir))
+            
+            # 更新 synced_pairs 为只包含成功的帧
+            synced_pairs = [synced_pairs[i] for i in success_indices]
+            
+            print(f"  ✓ 重新编号完成: {len(success_indices)} 帧")
         
         save_time = time.time() - save_start_time
         
-        failed_count = sum(1 for r in results if not r)
+        # 统计结果
+        success_count = sum(1 for r in results if r is True)
+        failed_count = sum(1 for r in results if r is False)
+        skipped_in_save = sum(1 for r in results if r is None)
         
         print(f"\n✓ 去畸变和保存完成:")
-        print(f"  成功: {len(results) - failed_count} 帧")
+        print(f"  成功: {success_count} 帧")
         if failed_count > 0:
-            print(f"  失败: {failed_count} 帧")
+            print(f"  格式错误: {failed_count} 帧")
+        if skipped_in_save > 0:
+            print(f"  去畸变失败跳过: {skipped_in_save} 帧")
         print(f"  耗时: {timedelta(seconds=int(save_time))}")
-        print(f"  速度: {len(results) / save_time:.2f} 帧/秒")
-        print(f"  平均: {save_time / len(results):.2f} 秒/帧")
+        if len(results) > 0:
+            print(f"  速度: {len(results) / save_time:.2f} 帧/秒")
+            print(f"  平均: {save_time / len(results):.2f} 秒/帧")
         
         # 保存标定文件
         self._save_calib_file(seq_dir)
@@ -2569,8 +2925,10 @@ class BEVCalibDatasetPreparer:
         print(f"  临时文件: {self.temp_dir} (已保留)")
         
         print(f"\n📊 统计信息:")
-        print(f"  图像: {len(synced_pairs)} 张")
-        print(f"  点云: {len(synced_pairs)} 帧")
+        print(f"  有效图像: {success_count} 张")
+        print(f"  有效点云: {success_count} 帧")
+        if skipped_count > 0:
+            print(f"  去畸变失败跳过: {skipped_count} 帧 (不保存)")
         if self.pose_metadata:
             print(f"  位姿: {len(self.pose_metadata)} 个")
         
@@ -2591,26 +2949,25 @@ class BEVCalibDatasetPreparer:
         print(f"  保存效率: {len(synced_pairs) / save_time:.2f} 帧/秒")
     
     def _save_calib_file(self, seq_dir: Path):
-        """保存标定文件（KITTI-Odometry标准格式）
+        """保存标定文件（与C++实现一致）
         
         参考：
-        - manual_sensor_calib.cpp:1585-1626
+        - manual_sensor_calib.cpp: lidar_cam_fusion_manual()
         - 坐标系文档：P_A = T^A_B * P_B
         
-        **KITTI标准**：
-        - Velodyne系：x=forward, y=left, z=up（前左上，与我们的LiDAR系一致）
-        - Camera系：x=right, y=down, z=forward（右下前，通用定义）
-        - Tr矩阵：**LiDAR → Camera**（将Velodyne点云变换到Camera坐标系）
+        **与C++一致的坐标系**：
+        - 点云在Sensing系（去畸变后）
+        - Tr矩阵：**Sensing → Camera**（将Sensing系点云变换到Camera坐标系）
         
         **坐标变换链**：
-        - 点云在LiDAR系：P_lidar（去畸变后已转换到LiDAR系）
-        - 变换到Camera系：P_camera = T_lidar_to_camera * P_lidar
+        - 点云在Sensing系：P_sensing（去畸变后）
+        - 变换到Camera系：P_camera = T_sensing_to_camera * P_sensing
         - 投影到图像：p = K * P_camera（P_camera.z > 0时可见）
         
         **关键修复**：
-        - 去畸变后的点云已从Sensing系转换到LiDAR系
-        - 符合KITTI标准，投影时直接使用Tr（LiDAR→Camera）
-        - 不需要额外的扩展字段
+        - 点云保持在Sensing系（与C++一致）
+        - Tr矩阵是 Sensing→Camera（与C++一致）
+        - 可以直接使用 kitti_dataset.py，无需 custom_dataset.py
         """
         calib_path = seq_dir / 'calib.txt'
         
@@ -2618,10 +2975,11 @@ class BEVCalibDatasetPreparer:
         P2 = np.zeros((3, 4))
         P2[:3, :3] = self.K
         
-        # Tr: Velodyne到cam0的变换矩阵（LiDAR → Camera）
-        # C++命名约定：T_camera_to_lidar（从右往左读：LiDAR → Camera）
-        T_velo_to_cam0 = self.T_camera_to_lidar  # LiDAR → Camera（KITTI标准）
-        T_velo_to_cam0_3x4 = T_velo_to_cam0[:3, :]  # 只取前3行（KITTI标准：3x4矩阵）
+        # Tr: Sensing到Camera的变换矩阵（Sensing → Camera）
+        # C++命名约定：T_camera_to_sensing（从右往左读：Sensing → Camera）
+        # 注意：这里使用 T_camera_to_sensing，它是 Sensing→Camera 变换
+        T_sensing_to_cam = self.T_camera_to_sensing  # Sensing → Camera
+        T_sensing_to_cam_3x4 = T_sensing_to_cam[:3, :]  # 只取前3行（KITTI标准：3x4矩阵）
         
         # D: 畸变系数（参考C++实现，投影时需要）
         # 支持两种模型：
@@ -2656,9 +3014,9 @@ class BEVCalibDatasetPreparer:
                 f.write(" ".join([f"{val:.12e}" for val in P2.flatten()]))
                 f.write("\n")
             
-            # Tr: 3x4矩阵（12个数）
+            # Tr: 3x4矩阵（12个数）- Sensing → Camera
             f.write("Tr: ")
-            f.write(" ".join([f"{val:.12e}" for val in T_velo_to_cam0_3x4.flatten()]))
+            f.write(" ".join([f"{val:.12e}" for val in T_sensing_to_cam_3x4.flatten()]))
             f.write("\n")
             
             # D: 畸变系数
@@ -2672,9 +3030,9 @@ class BEVCalibDatasetPreparer:
             # 保存相机模型类型（用于投影时选择正确的去畸变方法）
             f.write(f"camera_model: {model_type}\n")
         
-        print(f"标定文件已保存: {calib_path} (KITTI-Odometry格式 + 畸变系数)")
-        print(f"  ✓ 点云坐标系: LiDAR系（已从Sensing系转换）")
-        print(f"  ✓ 投影变换: Tr (LiDAR→Camera)")
+        print(f"标定文件已保存: {calib_path} (与C++一致 + 畸变系数)")
+        print(f"  ✓ 点云坐标系: Sensing系（与C++一致）")
+        print(f"  ✓ 投影变换: Tr (Sensing→Camera)")
         
         # 根据模型类型打印畸变系数
         if model_type == 'fisheye':
@@ -2877,6 +3235,9 @@ def main():
                        help='并行处理的线程数（默认: 4）')
     parser.add_argument('--max_frames', type=int, default=None,
                        help='最大处理帧数，用于测试（默认: None，处理所有帧）')
+    parser.add_argument('--save_debug_samples', type=int, default=0,
+                       help='保存用于调试的未去畸变点云样本数量（默认: 0，不保存）。'
+                            '设置为10-20可保存均匀采样的样本用于可视化对比。')
     args = parser.parse_args()
     
     # 打印配置信息
@@ -2906,6 +3267,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         max_frames=args.max_frames,
+        save_debug_samples=args.save_debug_samples,
     )
     
     preparer.extract_data_from_bag()
@@ -2922,8 +3284,6 @@ def main():
     print(f"     python validate_kitti_odometry.py --dataset_root {args.output_dir}")
     print(f"\n  2. 可视化去畸变效果:")
     print(f"     python visualize_undistortion.py {args.output_dir} --frame 0")
-    print(f"\n  3. 投影点云到图像:")
-    print(f"     python project_points_to_image.py --dataset_root {args.output_dir} --frame 0")
     print(f"\n  4. 开始训练:")
     print(f"     python kitti-bev-calib/train_kitti.py --dataset_root {args.output_dir}")
     print(f"\n{'='*80}\n")
