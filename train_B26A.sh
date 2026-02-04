@@ -111,8 +111,8 @@ case $MODE in
         python kitti-bev-calib/train_kitti.py \
             --log_dir "$LOG_DIR" \
             --dataset_root "$DATASET_ROOT" \
-            --label B26A_20_1.5 \
-            --batch_size 4 \
+            --label B26A_scratch \
+            --batch_size 2 \
             --num_epochs 500 \
             --save_ckpt_per_epoches 40 \
             --angle_range_deg 20 \
@@ -123,8 +123,7 @@ case $MODE in
             --scheduler 1 \
             --lr 1e-4 \
             --step_size 80 \
-            --use_custom_dataset 1 \
-            --max_range 90.0
+            --use_custom_dataset 0
         ;;
     
     finetune)
@@ -155,18 +154,17 @@ case $MODE in
             --deformable 0 \
             --bev_encoder 1 \
             --xyz_only 1 \
-            --use_custom_dataset 1 \
-            --max_range 90.0
+            --use_custom_dataset 0
         ;;
     
     resume)
         echo "Resuming from last checkpoint..."
         
         # Find the last checkpoint
-        LAST_CKPT=$(find "$LOG_DIR/checkpoints" -name "*.pth" -type f -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" ")
+        LAST_CKPT=$(find "$LOG_DIR" -name "*.pth" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -f2- -d" ")
         
         if [ -z "$LAST_CKPT" ]; then
-            echo "❌ Error: No checkpoint found in $LOG_DIR/checkpoints"
+            echo "❌ Error: No checkpoint found in $LOG_DIR"
             echo "Cannot resume training."
             exit 1
         fi
@@ -178,7 +176,7 @@ case $MODE in
             --log_dir "$LOG_DIR" \
             --dataset_root "$DATASET_ROOT" \
             --pretrain_ckpt "$LAST_CKPT" \
-            --label B26A_20_1.5 \
+            --label B26A_resume \
             --batch_size 8 \
             --num_epochs 150 \
             --save_ckpt_per_epoches 15 \
@@ -190,8 +188,7 @@ case $MODE in
             --scheduler 1 \
             --lr 1e-4 \
             --step_size 50 \
-            --use_custom_dataset 1 \
-            --max_range 90.0
+            --use_custom_dataset 0
         ;;
     
     *)

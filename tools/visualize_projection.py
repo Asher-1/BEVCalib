@@ -88,7 +88,9 @@ def load_calib(calib_file: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, str
         calib_file: 标定文件路径
     
     Returns:
-        Tr: (4, 4) LiDAR→Camera变换矩阵
+        Tr: (4, 4) 点云坐标系→Camera变换矩阵
+            - 对于标准KITTI: LiDAR→Camera
+            - 对于自定义数据集: Sensing→Camera（与C++一致）
         K: (3, 3) 相机内参矩阵
         D: (N,) 畸变系数 (pinhole: 5个, fisheye: 4个)
         camera_model: 相机模型 ('pinhole' 或 'fisheye')
@@ -143,29 +145,30 @@ def load_calib(calib_file: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, str
 def project_points_to_camera(points: np.ndarray, 
                              Tr: np.ndarray,
                              min_depth: float = 0.0,  # 对齐C++：不过滤近点
-                             max_depth: float = 100.0,  # 对齐C++ distance_filter_threshold_
-                             use_fov_filter: bool = True,  # ✅ 改为True，对齐C++！
+                             max_depth: float = 200.0,  # ✅ 修复：增大到200m，避免过滤远处点云
+                             use_fov_filter: bool = True,  # ✅ 对齐C++
+                             use_distance_filter: bool = False,  # ✅ 新增：默认关闭距离过滤（对齐C++）
                              K: Optional[np.ndarray] = None,
                              D: Optional[np.ndarray] = None,
                              image_size: Optional[tuple] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     将LiDAR点云转换到相机坐标系并过滤（完全对齐C++实现）
     
-    参考: C++ manual_sensor_calib.cpp: lidar_cam_fusion_manual()
-          - 步骤1: 3D距离过滤
-            double distance = sqrt(point.x^2 + point.y^2 + point.z^2);
-            if (distance <= max_distance) { ... }
-          - 步骤2: FOV过滤
-            double theta = abs(atan2(pc.segment(0, 2).norm(), pc(2)));
-            if (pc(2) > 0 && theta < 0.5 * fov) { ... }
+    参考: C++ math_utils.cpp: lidar_cam_fusion_manual()
+          - 只使用FOV过滤，不使用距离过滤！
+          - double theta = abs(atan2(pc.segment(0, 2).norm(), pc(2)));
+          - if (pc(2) > 0 && theta < 0.5 * fov) { ... }
+    
+    ⚠️ 关键修复：C++版本的lidar_cam_fusion_manual()不使用距离过滤！
+       只有filter_pointcloud_by_distance()才使用距离过滤，但投影时不调用它。
     
     Args:
         points: (N, 3) 或 (N, 4) LiDAR坐标系下的点云 [x, y, z] 或 [x, y, z, intensity]
         Tr: (4, 4) LiDAR→Camera变换矩阵
         min_depth: 最小3D距离（默认0.0，不过滤近点）
-        max_depth: 最大3D距离（默认100.0，对齐C++）
-                  注意：这是3D欧几里得距离，不是Z深度！
+        max_depth: 最大3D距离（默认200.0，增大以保留远处点云）
         use_fov_filter: 是否使用FOV过滤（默认True，对齐C++）
+        use_distance_filter: 是否使用距离过滤（默认False，对齐C++）
         K: (3, 3) 内参矩阵（FOV过滤时需要）
         D: (N,) 畸变系数（FOV过滤时需要）
         image_size: (height, width) 图像尺寸（FOV过滤时需要）
@@ -188,21 +191,19 @@ def project_points_to_camera(points: np.ndarray,
     # C++参考: pc = rot * p + trans
     pts_cam = (Tr @ pts_3d_homo.T).T  # (N, 4)
     
-    # ✅ 步骤2: 过滤相机后方的点 + 距离过滤（完全对齐C++）
-    # C++参考: filter_pointcloud_by_distance()
-    #   double distance = sqrt(point.x * point.x + point.y * point.y + point.z * point.z);
-    #   if (distance <= max_distance) { ... }
-    # C++默认: distance_filter_threshold_ = 100.0 (line 424)
+    # ✅ 步骤2: 过滤相机后方的点（必须）
+    # C++参考: if (pc(2) > 0 && theta < 0.5 * fov) { ... }
+    valid_mask = pts_cam[:, 2] > 0
     
-    # 计算3D欧几里得距离（对齐C++）
-    distances_3d = np.sqrt(pts_cam[:, 0]**2 + pts_cam[:, 1]**2 + pts_cam[:, 2]**2)
+    # ✅ 步骤3: 可选的距离过滤（默认关闭，对齐C++）
+    if use_distance_filter:
+        # 计算3D欧几里得距离
+        distances_3d = np.sqrt(pts_cam[:, 0]**2 + pts_cam[:, 1]**2 + pts_cam[:, 2]**2)
+        valid_mask = valid_mask & (distances_3d <= max_depth)
+        if min_depth > 0:
+            valid_mask = valid_mask & (distances_3d >= min_depth)
     
-    # 过滤：相机前方 + 3D距离范围内
-    valid_mask = (pts_cam[:, 2] > 0) & (distances_3d <= max_depth)
-    
-    if min_depth > 0:
-        valid_mask = valid_mask & (distances_3d >= min_depth)
-    
+    # ✅ 步骤4: FOV过滤（对齐C++）
     if use_fov_filter and K is not None and D is not None and image_size is not None:
         # 计算FOV角度（对齐C++实现）
         fov_rad = get_camera_fov(K, D, image_size)
@@ -396,15 +397,18 @@ def project_and_render(points: np.ndarray,
                       D: np.ndarray,
                       camera_model: str = 'pinhole',
                       min_depth: float = 0.0,
-                      max_depth: float = 100.0,
-                      use_fov_filter: bool = True,  # ✅ 改为True，对齐C++
+                      max_depth: float = 200.0,  # ✅ 修复：增大到200m
+                      use_fov_filter: bool = True,  # ✅ 对齐C++
+                      use_distance_filter: bool = False,  # ✅ 新增：默认关闭距离过滤
                       point_radius: int = 3,
-                      unit_depth: float = 2.0,  # ✅ 新增：对齐C++的颜色映射
+                      unit_depth: float = 2.0,  # ✅ 对齐C++的颜色映射
                       verbose: bool = True) -> Tuple[np.ndarray, int]:
     """
     完整的投影和渲染流程（一站式接口，完全对齐C++）
     
-    参考: C++ manual_sensor_calib.cpp: lidar_cam_fusion_manual()
+    参考: C++ math_utils.cpp: lidar_cam_fusion_manual()
+    
+    ⚠️ 关键修复：C++版本只使用FOV过滤，不使用距离过滤！
     
     Args:
         points: (N, 3) 或 (N, 4) LiDAR点云
@@ -413,9 +417,10 @@ def project_and_render(points: np.ndarray,
         Tr: (4, 4) LiDAR→Camera变换矩阵
         D: (M,) 畸变系数
         camera_model: 相机模型 ('pinhole' 或 'fisheye')
-        min_depth: 最小3D距离（默认0.0，对齐C++）
-        max_depth: 最大3D距离（默认100.0，对齐C++）
+        min_depth: 最小3D距离（默认0.0）
+        max_depth: 最大3D距离（默认200.0，增大以保留远处点云）
         use_fov_filter: 是否使用FOV过滤（默认True，对齐C++）
+        use_distance_filter: 是否使用距离过滤（默认False，对齐C++）
         point_radius: 点的半径
         unit_depth: 颜色映射的单位深度（默认2.0米，对齐C++）
         verbose: 是否打印信息
@@ -426,9 +431,9 @@ def project_and_render(points: np.ndarray,
     """
     h, w = image.shape[:2]
     
-    # 步骤1: 转换到相机坐标系
+    # 步骤1: 转换到相机坐标系（对齐C++：只使用FOV过滤）
     pts_cam, depths, valid_mask = project_points_to_camera(
-        points, Tr, min_depth, max_depth, use_fov_filter, K, D, (h, w)
+        points, Tr, min_depth, max_depth, use_fov_filter, use_distance_filter, K, D, (h, w)
     )
     
     if len(pts_cam) == 0:
@@ -524,7 +529,7 @@ def visualize_single_projection(dataset_root: Path,
         print(f"  D (畸变系数/针孔): k1={D[0]:.6f}, k2={D[1]:.6f}, p1={D[2]:.6f}, p2={D[3]:.6f}, k3={D[4]:.6f}")
     else:
         print(f"  D (畸变系数): {D}")
-    print(f"  点云坐标系: LiDAR系（KITTI标准）")
+    print(f"  点云坐标系: Sensing系（与C++一致）或LiDAR系（KITTI标准）")
     
     # 4. 投影点云到图像（完全对齐C++）
     img_with_points, num_valid = project_and_render(
@@ -577,15 +582,17 @@ def visualize_single_projection(dataset_root: Path,
 def compare_undistortion(dataset_root: Path,
                          sequence_id: str,
                          frame_idx: int,
-                         temp_dir: Optional[Path] = None) -> bool:
+                         temp_dir: Optional[Path] = None,
+                         debug_sample_idx: Optional[int] = None) -> bool:
     """
     对比去畸变前后的效果
     
     Args:
         dataset_root: 数据集根目录
         sequence_id: 序列ID
-        frame_idx: 帧索引
-        temp_dir: 临时目录（存储去畸变前的点云）
+        frame_idx: 帧索引（去畸变后的帧索引）
+        temp_dir: 临时目录（存储去畸变前的点云，旧版本）
+        debug_sample_idx: 调试样本索引（新版本，使用debug_raw_pointclouds目录）
     
     Returns:
         bool: True表示继续，False表示退出
@@ -603,8 +610,13 @@ def compare_undistortion(dataset_root: Path,
     print(f"✓ 加载标定参数")
     print(f"  相机模型: {camera_model}")
     
-    # 2. 加载图像
+    # 2. 加载去畸变后的点云和图像
+    pc_after_path = seq_dir / 'velodyne' / f'{frame_idx:06d}.bin'
     image_path = seq_dir / 'image_2' / f'{frame_idx:06d}.png'
+    
+    if not pc_after_path.exists():
+        print(f"❌ 去畸变后点云不存在: {pc_after_path}")
+        return False
     if not image_path.exists():
         print(f"❌ 图像不存在: {image_path}")
         return False
@@ -612,51 +624,85 @@ def compare_undistortion(dataset_root: Path,
     image = cv2.imread(str(image_path))
     print(f"✓ 加载图像: {image.shape}")
     
-    # 3. 加载去畸变后的点云（最终数据）
-    pc_after_path = seq_dir / 'velodyne' / f'{frame_idx:06d}.bin'
-    if not pc_after_path.exists():
-        print(f"❌ 去畸变后点云不存在: {pc_after_path}")
-        return False
-    
     pc_after = np.fromfile(str(pc_after_path), dtype=np.float32).reshape(-1, 4)
     print(f"✓ 加载去畸变后点云: {pc_after.shape}")
     print(f"  X: [{pc_after[:, 0].min():.2f}, {pc_after[:, 0].max():.2f}]")
     print(f"  Y: [{pc_after[:, 1].min():.2f}, {pc_after[:, 1].max():.2f}]")
     print(f"  Z: [{pc_after[:, 2].min():.2f}, {pc_after[:, 2].max():.2f}]")
     
-    # 4. 尝试加载去畸变前的点云（临时文件）
+    # 3. 尝试加载去畸变前的点云（支持两种路径格式）
     pc_before = None
-    if temp_dir is None:
-        temp_dir = dataset_root / 'temp'
+    image_before = None
     
-    if temp_dir.exists():
-        temp_pc_files = sorted((temp_dir / 'pointclouds').glob('*.bin'))
-        if frame_idx < len(temp_pc_files):
-            pc_before_path = temp_pc_files[frame_idx]
+    # 方式1：新版本 - debug_raw_pointclouds目录（均匀采样的调试样本）
+    debug_dir = seq_dir / 'debug_raw_pointclouds'
+    if debug_dir.exists():
+        # 使用debug_sample_idx或frame_idx作为索引
+        sample_idx = debug_sample_idx if debug_sample_idx is not None else frame_idx
+        
+        # 列出所有调试样本
+        debug_files = sorted(debug_dir.glob('*_raw.bin'))
+        if sample_idx < len(debug_files):
+            pc_before_path = debug_files[sample_idx]
             pc_before_data = np.fromfile(str(pc_before_path), dtype=np.float32)
             
-            # 判断格式
+            # 判断格式（可能是N×5或N×4）
             if len(pc_before_data) % 5 == 0:
                 pc_before = pc_before_data.reshape(-1, 5)[:, :4]
-                print(f"✓ 加载去畸变前点云: {pc_before.shape} (从 N×5 格式)")
+                print(f"✓ 加载去畸变前点云 (调试样本 {sample_idx}): {pc_before.shape} (N×5格式)")
             elif len(pc_before_data) % 4 == 0:
                 pc_before = pc_before_data.reshape(-1, 4)
-                print(f"✓ 加载去畸变前点云: {pc_before.shape}")
+                print(f"✓ 加载去畸变前点云 (调试样本 {sample_idx}): {pc_before.shape}")
+            
+            # 同时加载对应的原始图像
+            image_before_path = debug_dir / f'{sample_idx:06d}_image.jpg'
+            if image_before_path.exists():
+                image_before = cv2.imread(str(image_before_path))
+                print(f"✓ 加载去畸变前图像: {image_before.shape}")
             
             if pc_before is not None:
                 print(f"  X: [{pc_before[:, 0].min():.2f}, {pc_before[:, 0].max():.2f}]")
                 print(f"  Y: [{pc_before[:, 1].min():.2f}, {pc_before[:, 1].max():.2f}]")
                 print(f"  Z: [{pc_before[:, 2].min():.2f}, {pc_before[:, 2].max():.2f}]")
+        else:
+            print(f"⚠️  调试样本索引 {sample_idx} 超出范围（共 {len(debug_files)} 个样本）")
+    
+    # 方式2：旧版本 - temp/pointclouds目录
+    if pc_before is None:
+        if temp_dir is None:
+            temp_dir = dataset_root / 'temp'
+        
+        if temp_dir.exists() and (temp_dir / 'pointclouds').exists():
+            temp_pc_files = sorted((temp_dir / 'pointclouds').glob('*.bin'))
+            if frame_idx < len(temp_pc_files):
+                pc_before_path = temp_pc_files[frame_idx]
+                pc_before_data = np.fromfile(str(pc_before_path), dtype=np.float32)
+                
+                # 判断格式
+                if len(pc_before_data) % 5 == 0:
+                    pc_before = pc_before_data.reshape(-1, 5)[:, :4]
+                    print(f"✓ 加载去畸变前点云 (temp): {pc_before.shape} (N×5格式)")
+                elif len(pc_before_data) % 4 == 0:
+                    pc_before = pc_before_data.reshape(-1, 4)
+                    print(f"✓ 加载去畸变前点云 (temp): {pc_before.shape}")
+                
+                if pc_before is not None:
+                    print(f"  X: [{pc_before[:, 0].min():.2f}, {pc_before[:, 0].max():.2f}]")
+                    print(f"  Y: [{pc_before[:, 1].min():.2f}, {pc_before[:, 1].max():.2f}]")
+                    print(f"  Z: [{pc_before[:, 2].min():.2f}, {pc_before[:, 2].max():.2f}]")
     
     if pc_before is None:
         print(f"⚠️  未找到去畸变前的点云，只显示去畸变后的结果")
     
-    # 5. 投影点云到图像（完全对齐C++）
+    # 使用去畸变前的图像（如果有），否则使用去畸变后的图像
+    display_image = image_before if image_before is not None else image
+    
+    # 4. 投影点云到图像（完全对齐C++）
     print(f"\n投影点云到图像...")
     
     # 去畸变后
     print(f"  [去畸变后]")
-    img_after, _ = project_and_render(
+    img_after, num_after = project_and_render(
         pc_after, image, K, Tr, D,
         camera_model=camera_model,
         min_depth=0.0, max_depth=200.0, use_fov_filter=True,  # ✅ FOV过滤
@@ -666,21 +712,29 @@ def compare_undistortion(dataset_root: Path,
     # 去畸变前
     if pc_before is not None:
         print(f"  [去畸变前]")
-        img_before, _ = project_and_render(
-            pc_before, image, K, Tr, D,
+        img_before, num_before = project_and_render(
+            pc_before, display_image, K, Tr, D,
             camera_model=camera_model,
             min_depth=0.0, max_depth=200.0, use_fov_filter=True,  # ✅ FOV过滤
             point_radius=4, unit_depth=2.0, verbose=True
         )
     else:
-        img_before = image.copy()
-        cv2.putText(img_before, "No undistorted data", (50, 50),
+        img_before = display_image.copy()
+        num_before = 0
+        cv2.putText(img_before, "No raw pointcloud data", (50, 50),
                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
     
-    # 6. 并排显示
+    # 5. 并排显示
     font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(img_before, "Before Undistortion", (20, 40), font, 1.2, (0, 255, 0), 2)
-    cv2.putText(img_after, "After Undistortion", (20, 40), font, 1.2, (0, 255, 0), 2)
+    
+    # 添加标题和统计信息
+    cv2.putText(img_before, f"Before Undistortion ({num_before} pts)", (20, 40), font, 1.2, (0, 255, 0), 2)
+    cv2.putText(img_after, f"After Undistortion ({num_after} pts)", (20, 40), font, 1.2, (0, 255, 0), 2)
+    
+    if pc_before is not None:
+        # 显示点云范围差异
+        cv2.putText(img_before, f"X:[{pc_before[:,0].min():.1f},{pc_before[:,0].max():.1f}]", (20, 80), font, 0.8, (255, 255, 0), 2)
+        cv2.putText(img_after, f"X:[{pc_after[:,0].min():.1f},{pc_after[:,0].max():.1f}]", (20, 80), font, 0.8, (255, 255, 0), 2)
     
     # 缩小图像以便并排显示
     scale = 0.5
@@ -693,10 +747,19 @@ def compare_undistortion(dataset_root: Path,
     # 横向拼接
     comparison = np.hstack([img_before_small, img_after_small])
     
-    # 7. 显示和保存
+    # 6. 显示和保存
     output_path = dataset_root / f'undistortion_comparison_{frame_idx:06d}.jpg'
     cv2.imwrite(str(output_path), comparison)
     print(f"\n✓ 对比图已保存: {output_path}")
+    
+    # 打印对比总结
+    if pc_before is not None:
+        print(f"\n📊 对比总结:")
+        print(f"  去畸变前投影点数: {num_before}")
+        print(f"  去畸变后投影点数: {num_after}")
+        if num_before > 0:
+            improvement = (num_after - num_before) / num_before * 100
+            print(f"  变化: {improvement:+.1f}%")
     
     # 显示窗口
     cv2.namedWindow('Undistortion Comparison', cv2.WINDOW_NORMAL)
@@ -770,6 +833,8 @@ def main():
                        help='对比帧数 (仅compare模式，默认: 1)')
     parser.add_argument('--temp_dir', type=str, default=None,
                        help='临时目录 (仅compare模式，存储去畸变前的点云)')
+    parser.add_argument('--debug_sample', type=int, default=None,
+                       help='调试样本索引 (仅compare模式，使用debug_raw_pointclouds目录)')
     
     args = parser.parse_args()
     
@@ -783,7 +848,7 @@ def main():
         # 对比模式
         temp_dir = Path(args.temp_dir) if args.temp_dir else None
         if args.num_frames == 1:
-            compare_undistortion(dataset_root, args.sequence, args.frame, temp_dir)
+            compare_undistortion(dataset_root, args.sequence, args.frame, temp_dir, args.debug_sample)
         else:
             batch_compare(dataset_root, args.sequence, args.frame, args.num_frames, temp_dir)
     
