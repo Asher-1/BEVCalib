@@ -43,7 +43,8 @@ if ! python -c "import torch" &> /dev/null; then
 fi
 
 # Dataset configuration
-DATASET_ROOT="/home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data"
+# DATASET_ROOT="/home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data"
+DATASET_ROOT="/mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data"
 LOG_DIR="./logs/B26A_model"
 KITTI_PRETRAIN="./ckpt/kitti.pth"
 

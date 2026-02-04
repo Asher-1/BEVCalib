@@ -197,14 +197,14 @@ python view_pointcloud.py temp/pointclouds/000000.ply --backend matplotlib
 ### 1. 生成数据集（完整流程）
 ```bash
 # 生成完整数据集（包含调试样本用于验证去畸变效果）
-python prepare_custom_dataset.py \
-  --bag_dir /data/bag/dir \
-  --config_dir /data/bag/dir/config \
-  --output_dir /data/kitti_dataset \
+python tools/prepare_custom_dataset.py \
+  --bag_dir /mnt/drtraining/user/dahailu/data/bevcalib/bags/unimportant \
+  --config_dir /mnt/drtraining/user/dahailu/data/bevcalib/config \
+  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
   --camera_name traffic_2 \
   --target_fps 10.0 \
-  --num_workers 8 \
-  --batch_size 200 \
+  --num_workers 32 \
+  --batch_size 800 \
   --save_debug_samples 20
 ```
 
