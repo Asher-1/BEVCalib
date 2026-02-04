@@ -7,11 +7,10 @@ Pillow==11.2.1
 pykitti==0.3.1
 scipy==1.15.3
 setuptools==65.5.1
-spconv==2.3.8
 torch==2.0.1 --extra-index-url https://download.pytorch.org/whl/cu118
 torchvision==0.15.2 --extra-index-url https://download.pytorch.org/whl/cu118
 transformers==4.29.1
-spconv-cu118
+spconv-cu118==2.3.8
 tensorboard
 wandb  # if failed, then manually install: pip install --only-binary :all: wandb
 pandas

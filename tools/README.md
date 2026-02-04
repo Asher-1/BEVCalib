@@ -25,6 +25,7 @@
 | `--batch_size` | 200 | 批处理大小 |
 | `--max_frames` | None | 最大处理帧数（用于测试） |
 | `--save_debug_samples` | 0 | 保存调试样本数量（未去畸变点云，用于对比可视化） |
+| `--max_pose_gap` | 0.5 | 最大允许的pose间隔（秒），用于处理不连续bag数据 |
 
 **使用示例：**
 ```bash

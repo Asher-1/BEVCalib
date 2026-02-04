@@ -587,6 +587,14 @@ def compare_undistortion(dataset_root: Path,
     """
     对比去畸变前后的效果
     
+    ⚠️ 重要索引说明：
+    - frame_idx: 最终数据集中的帧索引（velodyne/000000.bin对应的索引）
+    - debug_sample_idx: debug_raw_pointclouds目录中的样本索引
+    - temp_pc_files: temp/pointclouds目录中的原始点云文件
+    
+    由于去畸变过程中会跳过一些帧，temp目录中的文件索引可能不等于最终帧索引！
+    需要通过时间戳或其他方式进行匹配。
+    
     Args:
         dataset_root: 数据集根目录
         sequence_id: 序列ID
@@ -610,6 +618,11 @@ def compare_undistortion(dataset_root: Path,
     print(f"✓ 加载标定参数")
     print(f"  相机模型: {camera_model}")
     
+    # 打印Tr矩阵（关键：这是Sensing→Camera变换）
+    print(f"  Tr (Sensing→Camera):")
+    print(f"    旋转:\n{Tr[:3, :3]}")
+    print(f"    平移: {Tr[:3, 3]}")
+    
     # 2. 加载去畸变后的点云和图像
     pc_after_path = seq_dir / 'velodyne' / f'{frame_idx:06d}.bin'
     image_path = seq_dir / 'image_2' / f'{frame_idx:06d}.png'
@@ -625,7 +638,7 @@ def compare_undistortion(dataset_root: Path,
     print(f"✓ 加载图像: {image.shape}")
     
     pc_after = np.fromfile(str(pc_after_path), dtype=np.float32).reshape(-1, 4)
-    print(f"✓ 加载去畸变后点云: {pc_after.shape}")
+    print(f"✓ 加载去畸变后点云 (Sensing坐标系): {pc_after.shape}")
     print(f"  X: [{pc_after[:, 0].min():.2f}, {pc_after[:, 0].max():.2f}]")
     print(f"  Y: [{pc_after[:, 1].min():.2f}, {pc_after[:, 1].max():.2f}]")
     print(f"  Z: [{pc_after[:, 2].min():.2f}, {pc_after[:, 2].max():.2f}]")
@@ -633,29 +646,34 @@ def compare_undistortion(dataset_root: Path,
     # 3. 尝试加载去畸变前的点云（支持两种路径格式）
     pc_before = None
     image_before = None
+    actual_sample_idx = None  # 实际使用的样本索引
     
-    # 方式1：新版本 - debug_raw_pointclouds目录（均匀采样的调试样本）
+    # 方式1：新版本 - debug_raw_pointclouds目录（调试样本，文件名对应帧索引）
     debug_dir = seq_dir / 'debug_raw_pointclouds'
     if debug_dir.exists():
-        # 使用debug_sample_idx或frame_idx作为索引
-        sample_idx = debug_sample_idx if debug_sample_idx is not None else frame_idx
-        
         # 列出所有调试样本
         debug_files = sorted(debug_dir.glob('*_raw.bin'))
-        if sample_idx < len(debug_files):
-            pc_before_path = debug_files[sample_idx]
+        
+        print(f"\n📋 debug_raw_pointclouds目录: {len(debug_files)} 个样本")
+        
+        # 直接使用帧索引查找对应的调试样本文件
+        # 文件名格式：{frame_idx:06d}_raw.bin
+        pc_before_path = debug_dir / f'{frame_idx:06d}_raw.bin'
+        image_before_path = debug_dir / f'{frame_idx:06d}_image.jpg'
+        
+        if pc_before_path.exists():
+            actual_sample_idx = frame_idx
             pc_before_data = np.fromfile(str(pc_before_path), dtype=np.float32)
             
             # 判断格式（可能是N×5或N×4）
             if len(pc_before_data) % 5 == 0:
                 pc_before = pc_before_data.reshape(-1, 5)[:, :4]
-                print(f"✓ 加载去畸变前点云 (调试样本 {sample_idx}): {pc_before.shape} (N×5格式)")
+                print(f"✓ 加载去畸变前点云 (帧 {frame_idx}): {pc_before.shape} (N×5格式)")
             elif len(pc_before_data) % 4 == 0:
                 pc_before = pc_before_data.reshape(-1, 4)
-                print(f"✓ 加载去畸变前点云 (调试样本 {sample_idx}): {pc_before.shape}")
+                print(f"✓ 加载去畸变前点云 (帧 {frame_idx}): {pc_before.shape}")
             
             # 同时加载对应的原始图像
-            image_before_path = debug_dir / f'{sample_idx:06d}_image.jpg'
             if image_before_path.exists():
                 image_before = cv2.imread(str(image_before_path))
                 print(f"✓ 加载去畸变前图像: {image_before.shape}")
@@ -665,7 +683,8 @@ def compare_undistortion(dataset_root: Path,
                 print(f"  Y: [{pc_before[:, 1].min():.2f}, {pc_before[:, 1].max():.2f}]")
                 print(f"  Z: [{pc_before[:, 2].min():.2f}, {pc_before[:, 2].max():.2f}]")
         else:
-            print(f"⚠️  调试样本索引 {sample_idx} 超出范围（共 {len(debug_files)} 个样本）")
+            print(f"⚠️  帧 {frame_idx} 没有对应的调试样本")
+            print(f"   可用的调试样本帧: {[int(f.stem.replace('_raw', '')) for f in debug_files]}")
     
     # 方式2：旧版本 - temp/pointclouds目录
     if pc_before is None:
@@ -674,6 +693,11 @@ def compare_undistortion(dataset_root: Path,
         
         if temp_dir.exists() and (temp_dir / 'pointclouds').exists():
             temp_pc_files = sorted((temp_dir / 'pointclouds').glob('*.bin'))
+            
+            # ⚠️ 重要：temp目录中的文件可能因为跳帧而不对应
+            print(f"\n📋 temp/pointclouds目录: {len(temp_pc_files)} 个文件")
+            print(f"   ⚠️ 注意：由于去畸变会跳过一些帧，索引可能不对应！")
+            
             if frame_idx < len(temp_pc_files):
                 pc_before_path = temp_pc_files[frame_idx]
                 pc_before_data = np.fromfile(str(pc_before_path), dtype=np.float32)
@@ -693,6 +717,7 @@ def compare_undistortion(dataset_root: Path,
     
     if pc_before is None:
         print(f"⚠️  未找到去畸变前的点云，只显示去畸变后的结果")
+        print(f"   💡 提示：运行prepare_custom_dataset.py时添加 --save_debug_samples 10 来保存调试样本")
     
     # 使用去畸变前的图像（如果有），否则使用去畸变后的图像
     display_image = image_before if image_before is not None else image
