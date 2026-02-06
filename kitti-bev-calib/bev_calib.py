@@ -69,9 +69,10 @@ class BEVCalib(nn.Module):
                  num_layers = 2,
                  deformable = True,
                  bev_encoder = False,
+                 img_shape = None,  # (H, W) - 输入图像尺寸，动态传入
                 ):
         super(BEVCalib, self).__init__()
-        self.img_branch = Cam2BEV()
+        self.img_branch = Cam2BEV(img_shape=img_shape)
         self.pc_branch = Lidar2BEV()
         self.bev_encoder_use = bev_encoder
         if self.bev_encoder_use:

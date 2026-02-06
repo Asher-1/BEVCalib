@@ -22,28 +22,48 @@ def parse_args():
     parser.add_argument("--xyz_only", type=int, default=1)
     parser.add_argument("--angle_range_deg", type=float, default=20.0)
     parser.add_argument("--trans_range", type=float, default=1.5)
+    # 图像尺寸参数
+    parser.add_argument("--use_custom_dataset", type=int, default=0, help="使用自定义数据集模式 (1=是, 0=否)")
+    parser.add_argument("--target_width", type=int, default=None, help="目标图像宽度")
+    parser.add_argument("--target_height", type=int, default=None, help="目标图像高度")
     return parser.parse_args()
 
-def collate_fn(batch):
-    target_size = (704, 256)
-    processed_data = [crop_and_resize(item[0], target_size, item[3], False) for item in batch]
-    imgs = [item[0] for item in processed_data]
-    intrinsics = [item[1] for item in processed_data]
 
-    gt_T_to_camera = [item[2] for item in batch]
-    pcs = []
-    masks = []
-    max_num_points = 0
-    for item in batch:
-        max_num_points = max(max_num_points, item[1].shape[0])
-    for item in batch:
-        pc = item[1]
-        masks.append(np.concatenate([np.ones(pc.shape[0]), np.zeros(max_num_points - pc.shape[0])], axis=0))
-        if pc.shape[0] < max_num_points:
-            pc = np.concatenate([pc, np.full((max_num_points - pc.shape[0], pc.shape[1]), 999999)], axis=0)
-        pcs.append(pc)
+def get_target_size(use_custom_dataset, target_width=None, target_height=None):
+    """根据数据集类型获取目标图像尺寸"""
+    if target_width is not None and target_height is not None:
+        return (target_width, target_height)
+    
+    if use_custom_dataset:
+        # 自定义4K数据集: 640x360 (16:9)
+        return (target_width or 640, target_height or 360)
+    else:
+        # KITTI: 704x256
+        return (target_width or 704, target_height or 256)
 
-    return imgs, pcs, masks, gt_T_to_camera, intrinsics
+def make_collate_fn(target_size):
+    """创建带有指定 target_size 的 collate_fn"""
+    def collate_fn(batch):
+        processed_data = [crop_and_resize(item[0], target_size, item[3], False) for item in batch]
+        imgs = [item[0] for item in processed_data]
+        intrinsics = [item[1] for item in processed_data]
+
+        gt_T_to_camera = [item[2] for item in batch]
+        pcs = []
+        masks = []
+        max_num_points = 0
+        for item in batch:
+            max_num_points = max(max_num_points, item[1].shape[0])
+        for item in batch:
+            pc = item[1]
+            masks.append(np.concatenate([np.ones(pc.shape[0]), np.zeros(max_num_points - pc.shape[0])], axis=0))
+            if pc.shape[0] < max_num_points:
+                pc = np.concatenate([pc, np.full((max_num_points - pc.shape[0], pc.shape[1]), 999999)], axis=0)
+            pcs.append(pc)
+
+        return imgs, pcs, masks, gt_T_to_camera, intrinsics
+    
+    return collate_fn
 
 def crop_and_resize(item, size, intrinsics, crop=True):
     img = cv2.cvtColor(np.array(item), cv2.COLOR_RGB2BGR)
@@ -99,6 +119,17 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
 
+    # 获取目标图像尺寸
+    target_size = get_target_size(
+        use_custom_dataset=args.use_custom_dataset > 0,
+        target_width=args.target_width,
+        target_height=args.target_height
+    )
+    print(f"📐 目标图像尺寸: {target_size[0]}x{target_size[1]} (宽x高)")
+
+    # 创建 collate_fn
+    collate_fn = make_collate_fn(target_size)
+
     dataset = KittiDataset(args.dataset_root)
     gen = torch.Generator().manual_seed(114514)
     split_size = int(0.8 * len(dataset))
@@ -114,9 +145,15 @@ def main():
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # img_shape 格式为 (H, W)，而 target_size 是 (W, H)
+    img_shape = (target_size[1], target_size[0])
+    print(f"🔧 网络输入尺寸 (H, W): {img_shape}")
+    
     model = BEVCalib(
         deformable=False,      
         bev_encoder=True,
+        img_shape=img_shape
     ).to(device)
 
     ckpt = torch.load(args.ckpt_path, map_location=device)

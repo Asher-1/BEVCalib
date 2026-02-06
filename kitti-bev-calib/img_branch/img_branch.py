@@ -25,12 +25,17 @@ def gen_dx_bx(xbound, ybound, zbound):
 class LSS(nn.Module):
     ### Adapted from https://github.com/nv-tlabs/lift-splat-shoot
     def __init__(self, 
-                 transformedImgShape = (3, 256, 704),
-                 featureShape = (256, 32, 88),
+                 transformedImgShape = None,  # (C, H, W) - 动态传入
+                 featureShape = None,         # (C, fH, fW) - 动态传入，fH=H/8, fW=W/8
                  d_conf = d_conf,
                  out_channels = 128,
                  ):
         super(LSS, self).__init__()
+        # 默认值保持向后兼容
+        if transformedImgShape is None:
+            transformedImgShape = (3, 256, 704)
+        if featureShape is None:
+            featureShape = (256, transformedImgShape[1] // 8, transformedImgShape[2] // 8)
         _, self.orfH, self.orfW = transformedImgShape
         self.fC, self.fH, self.fW = featureShape
         self.d_st, self.d_end, self.d_step = d_conf
@@ -108,12 +113,17 @@ class LSS(nn.Module):
 class GaussianLSS(nn.Module):
     ### Adapted from https://github.com/nv-tlabs/lift-splat-shoot
     def __init__(self, 
-                 transformedImgShape = (3, 256, 704),
-                 featureShape = (256, 32, 88),
+                 transformedImgShape = None,  # (C, H, W) - 动态传入
+                 featureShape = None,         # (C, fH, fW) - 动态传入，fH=H/8, fW=W/8
                  d_conf = d_conf,
                  out_channels = 128,
                  ):
         super(GaussianLSS, self).__init__()
+        # 默认值保持向后兼容
+        if transformedImgShape is None:
+            transformedImgShape = (3, 256, 704)
+        if featureShape is None:
+            featureShape = (256, transformedImgShape[1] // 8, transformedImgShape[2] // 8)
         _, self.orfH, self.orfW = transformedImgShape
         self.fC, self.fH, self.fW = featureShape
         self.d_st, self.d_end, self.d_step = d_conf
@@ -191,13 +201,23 @@ class GaussianLSS(nn.Module):
 class Cam2BEV(nn.Module):
     def __init__(self, 
                  output_indices = [1, 2, 3], 
-                 featureShape = (256, 32, 88), 
+                 img_shape = None,             # (H, W) - 输入图像尺寸，动态传入
                  encoder_out_channels = 256,
                  FPN_in_channels = [192, 384, 768], 
                  FPN_out_channels = 256,
                  ):
         super(Cam2BEV, self).__init__()
-        self.lss = LSS()
+        # 根据 img_shape 计算 transformedImgShape 和 featureShape
+        if img_shape is None:
+            img_shape = (256, 704)  # 默认值保持向后兼容 (H, W)
+        
+        img_H, img_W = img_shape
+        transformedImgShape = (3, img_H, img_W)
+        featureShape = (encoder_out_channels, img_H // 8, img_W // 8)
+        
+        print(f"[Cam2BEV] 输入图像尺寸: {img_W}x{img_H}, 特征尺寸: {featureShape[2]}x{featureShape[1]}")
+        
+        self.lss = LSS(transformedImgShape=transformedImgShape, featureShape=featureShape)
         self.CamEncode = SwinT_tiny_Encoder(output_indices, featureShape, encoder_out_channels, FPN_in_channels, FPN_out_channels)
         dx, bx, nx = gen_dx_bx(xbound=xbound, ybound=ybound, zbound=zbound)
         self.dx = nn.Parameter(dx, requires_grad = False)

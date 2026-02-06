@@ -201,7 +201,7 @@ python view_pointcloud.py temp/pointclouds/000000.ply --backend matplotlib
 python tools/prepare_custom_dataset.py \
   --bag_dir /mnt/drtraining/user/dahailu/data/bevcalib/bags/unimportant \
   --config_dir /mnt/drtraining/user/dahailu/data/bevcalib/config \
-  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
+  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix \
   --camera_name traffic_2 \
   --target_fps 10.0 \
   --num_workers 32 \
