@@ -138,16 +138,66 @@ huggingface-cli download cisl-hf/BEVCalib --revision kitti-bev-calib --local-dir
 ```
 
 ## Evaluation
-Please run the following command to evaluate the model:
+
+### inference_kitti.py 参数说明
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--dataset_root` | str | 必填 | 数据集根目录路径 |
+| `--ckpt_path` | str | 必填 | 训练好的模型检查点路径 |
+| `--log_dir` | str | `./logs/inference` | 推理日志保存目录 |
+| `--batch_size` | int | 1 | 批量大小 |
+| `--xyz_only` | int | 1 | 是否只使用xyz坐标 (1=是, 0=否) |
+| `--angle_range_deg` | float | 20.0 | 扰动角度范围 (度) |
+| `--trans_range` | float | 1.5 | 扰动平移范围 (米) |
+
+### 使用示例
+
+**评估 KITTI 数据集:**
 ```bash
 python kitti-bev-calib/inference_kitti.py \
-         --log_dir ./logs/kitti \
-         --dataset_root ~/develop/data/slam_data/KITTI/kitti-odometry \
-         --ckpt_path ./ckpt/kitti.pth \
-         --angle_range_deg 20.0 \
-         --trans_range 1.5 \
-         --batch_size 16
+    --log_dir ./logs/inference \
+    --dataset_root /path/to/kitti-odometry \
+    --ckpt_path ./ckpt/kitti.pth \
+    --angle_range_deg 20.0 \
+    --trans_range 1.5 \
+    --batch_size 16
 ```
+
+**评估自定义数据集 (B26A):**
+```bash
+# 查看可用的检查点
+ls ./logs/B26A_model_B26A_fix/B26A_scratch/checkpoint/
+
+# 使用最新的检查点进行评估
+python kitti-bev-calib/inference_kitti.py \
+    --log_dir ./logs/inference_origin \
+    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix \
+    --ckpt_path ./code/BEVCalib/logs/B26A_model_B26A_origin/B26A_scratch/checkpoint/ckpt_500.pth \
+    --angle_range_deg 20.0 \
+    --trans_range 1.5 \
+    --batch_size 16
+```
+
+**快速获取最新检查点并评估:**
+```bash
+# 找到最新的检查点
+LATEST_CKPT=$(ls -t ./logs/B26A_model_*/*/checkpoint/ckpt_*.pth 2>/dev/null | head -1)
+echo "Latest checkpoint: $LATEST_CKPT"
+
+# 运行评估
+python kitti-bev-calib/inference_kitti.py \
+    --dataset_root /path/to/dataset \
+    --ckpt_path $LATEST_CKPT
+```
+
+### 输出说明
+
+评估完成后会输出以下指标:
+- **Translation Loss**: 平移损失 (米)
+- **Rotation Loss**: 旋转损失 (度)
+- **Translation xyz error**: X/Y/Z 各轴平移误差 (米)
+- **Rotation ypr error**: Yaw/Pitch/Roll 各轴旋转误差 (度)
 
 ## Training
 
@@ -175,18 +225,79 @@ python kitti-bev-calib/train_kitti.py \
 
 **Quick Start (B26A Dataset):**
 ```bash
-# Train from scratch
-nohup bash train_B26A.sh scratch > logs/train_B26A_scratch_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+# Train from scratch (basic usage)
+bash train_B26A.sh scratch > logs/train_B26A_scratch_$(date 
++%Y%m%d_%H%M%S).log 2>&1 &
 
-# use tensorboard
+# Train with specific GPU and TensorBoard port
+nohup bash train_B26A.sh scratch --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data --log_suffix B26A_origin --cuda_device 4 --tensorboard_port 6006  > logs/train_B26A_scratch_$(date +%Y%m%d_%H%M%S)_origin.log 2>&1 &
+
+# train2
+nohup bash train_B26A.sh scratch --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix --log_suffix B26A_fix --cuda_device 5 --tensorboard_port 6007  > logs/train_B26A_scratch_$(date +%Y%m%d_%H%M%S)_fix.log 2>&1 &
+
+# train3
+nohup bash train_B26A.sh scratch --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix --log_suffix B26A_opt --cuda_device 6 --tensorboard_port 6008  > logs/train_B26A_scratch_$(date +%Y%m%d_%H%M%S)_opt.log 2>&1 &
+
+# train4 - scratch
+nohup bash train_B26A.sh scratch --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix --log_suffix B26A_finetune --cuda_device 7 --tensorboard_port 6009  > logs/train_B26A_finetune_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# stop trainnning 
+pkill -9 -f "train_kitti.py" && pkill -9 -f "train_B26A.sh" 
+
+# Train with custom dataset path and log suffix
+bash train_B26A.sh scratch \
+    --dataset_root /path/to/your/dataset \
+    --cuda_device 0 \
+    --log_suffix my_experiment
+
+# Use tensorboard to monitor training
 tensorboard --logdir ./logs/B26A_model --port 6006
 
 # Fine-tune from KITTI pretrained model
-bash train_B26A.sh finetune
+bash train_B26A.sh finetune --cuda_device 0
 
 # Resume from last checkpoint
-bash train_B26A.sh resume
+bash train_B26A.sh resume --cuda_device 0
 ```
+
+**🚀 Multi-Terminal Parallel Training:**
+
+The script now supports training multiple datasets in parallel across different terminals with automatic port and GPU management:
+
+```bash
+# Terminal 1: Train dataset1 on GPU 0
+bash train_B26A.sh scratch \
+    --cuda_device 0 \
+    --dataset_root /path/to/dataset1 \
+    --log_suffix dataset1 \
+    --tensorboard_port 6006
+
+# Terminal 2: Train dataset2 on GPU 1
+bash train_B26A.sh scratch \
+    --cuda_device 1 \
+    --dataset_root /path/to/dataset2 \
+    --log_suffix dataset2 \
+    --tensorboard_port 6007
+
+# Terminal 3: Fine-tune dataset3 on GPU 2
+bash train_B26A.sh finetune \
+    --cuda_device 2 \
+    --dataset_root /path/to/dataset3 \
+    --log_suffix dataset3 \
+    --tensorboard_port 6008
+```
+
+**Script Options:**
+- `--cuda_device ID`: Specify CUDA device ID (e.g., 0, 1, 2). If not specified, uses all available GPUs.
+- `--tensorboard_port PORT`: Specify TensorBoard port (default: 6006, auto-increments if in use).
+- `--dataset_root PATH`: Custom dataset root directory.
+- `--log_suffix SUFFIX`: Add suffix to log directory (useful for distinguishing multiple runs).
+
+**Features:**
+- ✅ **Automatic port detection**: Finds available TensorBoard ports automatically
+- ✅ **GPU isolation**: Each training instance can use a specific GPU
+- ✅ **Log separation**: Use `--log_suffix` to keep logs organized
+- ✅ **Port conflict detection**: Warns if specified port is already in use
 
 **Manual Command:**
 ```bash
@@ -229,6 +340,8 @@ python kitti-bev-calib/train_kitti.py \
 - Change `--angle_range_deg` and `--trans_range` to train under different noise settings
 - Use `--pretrain_ckpt` to load a pretrained model for fine-tuning
 - The dataset loader automatically detects all sequences in the dataset
+- For parallel training, ensure each terminal uses a different GPU (`--cuda_device`) and TensorBoard port (`--tensorboard_port`)
+- Use `--log_suffix` to distinguish logs from different training runs
 
 **📚 Documentation:**
 - [TRAINING_GUIDE.md](TRAINING_GUIDE.md) - Detailed training parameters and recommendations

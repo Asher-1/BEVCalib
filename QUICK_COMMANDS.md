@@ -85,22 +85,42 @@ python kitti-bev-calib/train_kitti.py \
 
 ## 📊 评估
 
+### inference_kitti.py 参数
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--dataset_root` | 必填 | 数据集根目录 |
+| `--ckpt_path` | 必填 | 检查点路径 |
+| `--log_dir` | `./logs/inference` | 日志目录 |
+| `--batch_size` | 1 | 批量大小 |
+| `--angle_range_deg` | 20.0 | 扰动角度范围 |
+| `--trans_range` | 1.5 | 扰动平移范围 |
+
 ### KITTI 数据集
 ```bash
 python kitti-bev-calib/inference_kitti.py \
-    --log_dir ./logs/kitti \
     --dataset_root /path/to/kitti-odometry \
     --ckpt_path ./ckpt/kitti.pth \
-    --batch_size 16
+    --angle_range_deg 20.0 \
+    --trans_range 1.5
 ```
 
-### 自定义数据集
+### 自定义数据集 (B26A)
 ```bash
+# 1. 查看可用的检查点
+ls ./logs/B26A_model_*/*/checkpoint/
+
+# 2. 评估指定检查点 (替换为实际路径)
 python kitti-bev-calib/inference_kitti.py \
-    --log_dir ./logs/B26A_eval \
-    --dataset_root /home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data \
-    --ckpt_path ./logs/B26A_model/checkpoints/best_model.pth \
-    --batch_size 4
+    --dataset_root /path/to/bevcalib_training_data \
+    --ckpt_path ./logs/B26A_model_B26A_fix/B26A_scratch/checkpoint/ckpt_500.pth \
+    --angle_range_deg 20.0 \
+    --trans_range 1.5
+
+# 3. 快速评估最新检查点
+LATEST_CKPT=$(ls -t ./logs/B26A_model_*/*/checkpoint/ckpt_*.pth | head -1)
+python kitti-bev-calib/inference_kitti.py \
+    --dataset_root /path/to/bevcalib_training_data \
+    --ckpt_path $LATEST_CKPT
 ```
 
 ---
