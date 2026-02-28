@@ -139,6 +139,225 @@ huggingface-cli download cisl-hf/BEVCalib --revision kitti-bev-calib --local-dir
 
 ## Evaluation
 
+### evaluate_checkpoint.py - Checkpoint 评估工具
+
+评估已保存的 checkpoint，生成详细的误差报告和可视化结果。
+
+#### 功能特性
+- ✅ 在验证集上评估模型性能
+- ✅ 生成详细的误差统计（平移、旋转、RPY分解）
+- ✅ 为每个样本生成可视化图像（Init/GT/Pred 三列对比）
+- ✅ 保存外参矩阵和误差报告（文本文件）
+- ✅ 支持自定义扰动范围
+- ✅ 支持批量处理（可限制评估样本数）
+
+#### 参数说明
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--ckpt_path` | str | 必填 | Checkpoint 文件路径 (*.pth) |
+| `--dataset_root` | str | 必填 | 数据集根目录路径 |
+| `--angle_range_deg` | float | 20.0 | 评估时的扰动角度范围 (度) |
+| `--trans_range` | float | 1.5 | 评估时的扰动平移范围 (米) |
+| `--target_width` | int | 640 | 目标图像宽度 |
+| `--target_height` | int | 360 | 目标图像高度 |
+| `--batch_size` | int | 8 | Batch size |
+| `--max_batches` | int | 5 | 最多评估的batch数（0=全部，5=快速测试）|
+| `--validate_sample_ratio` | float | 0.1 | 验证集比例（0.0-1.0）|
+| `--deformable` | int | 0 | 是否使用 deformable attention (与训练时保持一致) |
+| `--bev_encoder` | int | 1 | 是否使用 BEV encoder (与训练时保持一致) |
+| `--xyz_only` | int | 1 | 是否只使用 XYZ 坐标 (与训练时保持一致) |
+| `--vis_points` | int | 80000 | 可视化的最大点数 |
+| `--vis_point_radius` | int | 1 | 可视化点的半径（像素）|
+
+#### 使用示例
+
+**基础用法：**
+```bash
+python evaluate_checkpoint.py \
+    --ckpt_path logs/model/checkpoint/ckpt_100.pth \
+    --dataset_root ./data/custom_dataset \
+    --angle_range_deg 20.0 \
+    --trans_range 1.5
+```
+
+**自定义数据集评估（B26A）：**
+```bash
+python evaluate_checkpoint.py \
+    --ckpt_path logs/B26A_model_small_3deg_v6.5/checkpoint/ckpt_500.pth \
+    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix \
+    --angle_range_deg 3.0 \
+    --trans_range 0.15 \
+    --target_width 640 \
+    --target_height 360 \
+    --batch_size 8 \
+    --max_batches 10
+```
+
+**快速测试（少量样本）：**
+```bash
+python evaluate_checkpoint.py \
+    --ckpt_path logs/model/checkpoint/ckpt_100.pth \
+    --dataset_root ./dataset \
+    --max_batches 2
+```
+
+**完整评估（所有验证集）：**
+```bash
+python evaluate_checkpoint.py \
+    --ckpt_path logs/model/checkpoint/ckpt_100.pth \
+    --dataset_root ./dataset \
+    --max_batches 0  # 0 表示评估全部
+```
+
+#### 输出结果
+
+评估完成后会在 checkpoint 同级目录生成评估文件夹：
+```
+logs/model/checkpoint/
+├── ckpt_100.pth
+└── ckpt_100_eval/                    # 评估结果目录
+    ├── sample_0000_projection.png    # 可视化图像（3列：Init/GT/Pred）
+    ├── sample_0001_projection.png
+    ├── sample_0002_projection.png
+    ├── ...
+    └── extrinsics_and_errors.txt     # 详细误差报告
+```
+
+**extrinsics_and_errors.txt 内容示例：**
+```
+Checkpoint: epoch_100
+Evaluation on validation set (perturbation: 20.0deg, 1.5m)
+================================================================================
+
+Ground Truth Extrinsics (LiDAR → Camera):
+  ...4×4 矩阵...
+
+================================================================================
+
+Sample 0000
+--------------------------------------------------------------------------------
+
+Predicted Extrinsics (LiDAR → Camera):
+  ...4×4 矩阵...
+
+Translation Errors (in LiDAR coordinate system):
+  Total:   0.015234 m
+  X (Fwd): 0.008123 m
+  Y (Lat): 0.003456 m
+  Z (Ht):  0.012890 m
+
+Rotation Errors (axis-angle):
+  Total:       0.234567 deg
+  Roll (X):    0.123456 deg
+  Pitch (Y):   0.089012 deg
+  Yaw (Z):     0.178901 deg
+
+================================================================================
+...更多样本...
+
+================================================================================
+AVERAGE ERRORS ACROSS ALL SAMPLES
+================================================================================
+
+Total samples evaluated: 40
+
+Average Translation Errors (in LiDAR coordinate system):
+  Total:   0.012345 ± 0.006789 m
+  X (Fwd): 0.007890 ± 0.004321 m
+  Y (Lat): 0.003210 ± 0.001987 m
+  Z (Ht):  0.010234 ± 0.005678 m
+
+Average Rotation Errors (axis-angle):
+  Total:       0.198765 ± 0.089012 deg
+  Roll (X):    0.098765 ± 0.045678 deg
+  Pitch (Y):   0.067890 ± 0.032109 deg
+  Yaw (Z):     0.134567 ± 0.056789 deg
+
+================================================================================
+```
+
+#### 终端输出示例
+
+```
+================================================================================
+评估 Checkpoint: logs/model/checkpoint/ckpt_100.pth
+================================================================================
+
+1. 加载模型配置...
+   ✓ 从 checkpoint 加载参数
+   ✓ 训练噪声: 20.0°, 1.5m
+   ✓ 评估噪声: 20.0°, 1.5m
+
+2. 创建模型...
+   ✓ 模型结构: BEVCalib
+   ✓ Deformable Attention: 否
+   ✓ BEV Encoder: 是
+
+3. 加载数据集...
+   ✓ 自动检测到 1 个序列: ['00']
+   ✓ 数据集: 1234 个样本
+   ✓ 验证集: 123 个样本
+
+4. 开始评估...
+   输出目录: logs/model/checkpoint/ckpt_100_eval
+   扰动参数: 20.0°, 1.5m
+   
+   处理样本 0... ✓ (Trans: 0.0152m, Rot: 0.23°)
+   处理样本 1... ✓ (Trans: 0.0134m, Rot: 0.19°)
+   处理样本 2... ✓ (Trans: 0.0167m, Rot: 0.28°)
+   ...
+
+5. 评估完成！
+   ✓ 总样本数: 40
+   ✓ 平均平移误差: 0.0123 ± 0.0068 m
+   ✓ 平均旋转误差: 0.199 ± 0.089 deg
+   ✓ 结果已保存到: logs/model/checkpoint/ckpt_100_eval
+   
+================================================================================
+```
+
+#### 提示与技巧
+
+**1. 快速测试 vs 完整评估**
+```bash
+# 快速测试（2个batch，约16个样本）
+--max_batches 2
+
+# 完整评估（所有验证集）
+--max_batches 0
+```
+
+**2. 调整扰动范围**
+```bash
+# 小扰动（精度测试）
+--angle_range_deg 3.0 --trans_range 0.15
+
+# 大扰动（鲁棒性测试）
+--angle_range_deg 20.0 --trans_range 1.5
+```
+
+**3. 查看可视化结果**
+```bash
+# 使用图像查看器打开
+eog logs/model/checkpoint/ckpt_100_eval/sample_0000_projection.png
+
+# 或批量查看
+cd logs/model/checkpoint/ckpt_100_eval
+ls sample_*.png
+```
+
+**4. 分析误差报告**
+```bash
+# 查看汇总统计
+tail -30 logs/model/checkpoint/ckpt_100_eval/extrinsics_and_errors.txt
+
+# 查看具体样本
+grep "Sample 0000" -A 30 logs/model/checkpoint/ckpt_100_eval/extrinsics_and_errors.txt
+```
+
+---
+
 ### inference_kitti.py 参数说明
 
 | 参数 | 类型 | 默认值 | 说明 |

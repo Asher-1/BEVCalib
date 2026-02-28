@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from kitti_dataset import KittiDataset
+from custom_dataset import CustomDataset
 from bev_calib import BEVCalib
 from torch.utils.tensorboard import SummaryWriter
 import argparse
@@ -44,11 +45,14 @@ def get_target_size(use_custom_dataset, target_width=None, target_height=None):
 def make_collate_fn(target_size):
     """创建带有指定 target_size 的 collate_fn"""
     def collate_fn(batch):
-        processed_data = [crop_and_resize(item[0], target_size, item[3], False) for item in batch]
+        # item结构: (img, pcd, gt_transform, intrinsic, distortion)
+        # 去畸变 + 缩放在 crop_and_resize 中完成
+        processed_data = [crop_and_resize(item[0], target_size, item[3], False, item[4]) for item in batch]
         imgs = [item[0] for item in processed_data]
         intrinsics = [item[1] for item in processed_data]
 
         gt_T_to_camera = [item[2] for item in batch]
+        
         pcs = []
         masks = []
         max_num_points = 0
@@ -65,8 +69,13 @@ def make_collate_fn(target_size):
     
     return collate_fn
 
-def crop_and_resize(item, size, intrinsics, crop=True):
+def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
+    """
+    图像预处理: 缩放 → 更新内参
+    注意: 不再应用cv2.undistort (B26A相机输出已去畸变图像)
+    """
     img = cv2.cvtColor(np.array(item), cv2.COLOR_RGB2BGR)
+    
     h, w = img.shape[:2]
     if crop:
         mid_width = w // 2
@@ -130,7 +139,12 @@ def main():
     # 创建 collate_fn
     collate_fn = make_collate_fn(target_size)
 
-    dataset = KittiDataset(args.dataset_root)
+    # 选择数据集类型
+    if args.use_custom_dataset > 0:
+        dataset = CustomDataset(args.dataset_root)
+    else:
+        dataset = KittiDataset(args.dataset_root)
+    
     gen = torch.Generator().manual_seed(114514)
     split_size = int(0.8 * len(dataset))
     _, val_dataset = random_split(dataset, [split_size, len(dataset) - split_size],
@@ -250,5 +264,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

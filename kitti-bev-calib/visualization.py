@@ -8,6 +8,12 @@ import numpy as np
 import cv2
 from typing import Tuple, Optional, Dict
 import math
+import sys
+from pathlib import Path
+
+# 导入标准外参评估工具
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.evaluate_extrinsics import evaluate_sensor_extrinsic
 
 
 def rotation_matrix_to_euler_angles(R: np.ndarray) -> np.ndarray:
@@ -39,60 +45,49 @@ def rotation_matrix_to_euler_angles(R: np.ndarray) -> np.ndarray:
 
 def compute_pose_errors(pred_T: np.ndarray, gt_T: np.ndarray) -> Dict[str, float]:
     """
-    计算预测变换矩阵与真值之间的误差
+    计算预测变换矩阵与真值之间的误差 (使用标准 evaluate_sensor_extrinsic 方法)
+    
+    ⚠️ 坐标系说明:
+    - T矩阵: LiDAR→Camera 变换 (4x4)
+    - T[:3, 3]: Camera在LiDAR坐标系中的位置
+    - T[:3, :3]: LiDAR→Camera 的旋转矩阵
+    
+    evaluate_sensor_extrinsic 直接计算误差，无需额外坐标系转换:
+    - axis_pos_error = (t_pred - t_gt) * 100  # 已经在LiDAR坐标系
+    - axis_angle_error: 轴角误差向量 (度)
     
     Args:
-        pred_T: (4, 4) 预测的变换矩阵
-        gt_T: (4, 4) 真值变换矩阵
+        pred_T: (4, 4) 预测的变换矩阵 (LiDAR → Camera)
+        gt_T: (4, 4) 真值变换矩阵 (LiDAR → Camera)
     
     Returns:
-        dict: 包含各项误差指标
+        dict: 包含各项误差指标 (LiDAR坐标系)
             - trans_error: 平移总误差 (m)
-            - x_error, y_error, z_error: 各轴平移误差 (m)
+            - fwd_error, lat_error, ht_error: LiDAR X/Y/Z 方向平移误差 (m)
             - rot_error: 旋转总误差 (deg)
-            - roll_error, pitch_error, yaw_error: 各轴旋转误差 (deg)
+            - roll_error, pitch_error, yaw_error: 轴角误差分量 (deg)
+    
+    ✅ 与 C++ Eigen 实现完全一致
+    ✅ 与 evaluate_extrinsics.py 标准方法一致
     """
-    # 提取平移向量
-    pred_t = pred_T[:3, 3]
-    gt_t = gt_T[:3, 3]
+    # 使用标准方法计算误差
+    angle_error, axis_angle_error, pos_error, axis_pos_error = \
+        evaluate_sensor_extrinsic(pred_T, gt_T)
     
-    # 平移误差
-    trans_diff = pred_t - gt_t
-    x_error = abs(trans_diff[0])
-    y_error = abs(trans_diff[1])
-    z_error = abs(trans_diff[2])
-    trans_error = np.linalg.norm(trans_diff)
-    
-    # 提取旋转矩阵
-    pred_R = pred_T[:3, :3]
-    gt_R = gt_T[:3, :3]
-    
-    # 计算相对旋转矩阵 (误差旋转矩阵)
-    # R_diff 表示从 gt_R 到 pred_R 的旋转差异
-    R_diff = pred_R @ gt_R.T
-    
-    # 总旋转误差 (使用旋转矩阵的迹计算角度-轴表示的角度)
-    trace = np.trace(R_diff)
-    trace = np.clip(trace, -1.0, 3.0)
-    rot_error = np.rad2deg(np.arccos((trace - 1) / 2))
-    
-    # 将误差旋转矩阵转换为RPY欧拉角
-    # 这样得到的才是真正的RPY误差分量
-    euler_error = rotation_matrix_to_euler_angles(R_diff)
-    
-    roll_error = np.abs(np.rad2deg(euler_error[0]))
-    pitch_error = np.abs(np.rad2deg(euler_error[1]))
-    yaw_error = np.abs(np.rad2deg(euler_error[2]))
-    
+    # 返回结果，保持与原接口兼容
+    # 注意: axis_pos_error 已经在 LiDAR 坐标系中，单位为 cm
     return {
-        'trans_error': trans_error,
-        'x_error': x_error,
-        'y_error': y_error,
-        'z_error': z_error,
-        'rot_error': rot_error,
-        'roll_error': roll_error,
-        'pitch_error': pitch_error,
-        'yaw_error': yaw_error,
+        # 平移误差 (转换为米)
+        'trans_error': pos_error / 100.0,  # cm → m
+        'fwd_error': abs(axis_pos_error[0]) / 100.0,   # LiDAR X (前向) cm→m
+        'lat_error': abs(axis_pos_error[1]) / 100.0,   # LiDAR Y (横向) cm→m
+        'ht_error': abs(axis_pos_error[2]) / 100.0,    # LiDAR Z (高度) cm→m
+        
+        # 旋转误差 (度)
+        'rot_error': angle_error,  # 总旋转误差
+        'roll_error': abs(axis_angle_error[0]),   # 轴角误差 X 分量
+        'pitch_error': abs(axis_angle_error[1]),  # 轴角误差 Y 分量
+        'yaw_error': abs(axis_angle_error[2]),    # 轴角误差 Z 分量
     }
 
 
@@ -110,7 +105,7 @@ def compute_batch_pose_errors(pred_T_batch: torch.Tensor, gt_T_batch: torch.Tens
     B = pred_T_batch.shape[0]
     
     errors = {
-        'trans_error': 0, 'x_error': 0, 'y_error': 0, 'z_error': 0,
+        'trans_error': 0, 'fwd_error': 0, 'lat_error': 0, 'ht_error': 0,
         'rot_error': 0, 'roll_error': 0, 'pitch_error': 0, 'yaw_error': 0,
     }
     
@@ -138,7 +133,7 @@ def project_points_to_image(
     debug: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    将点云投影到图像平面
+    将点云投影到图像平面 (纯针孔模型，需要输入已去畸变的图像)
     
     Args:
         points: (N, 3) 或 (N, 4) LiDAR坐标系下的点云
@@ -307,19 +302,6 @@ def create_projection_comparison(
 ) -> np.ndarray:
     """
     创建GT与预测投影对比可视化图像
-    
-    Args:
-        image: (H, W, 3) BGR图像
-        points: (N, 3) 点云
-        gt_T: (4, 4) 真值变换矩阵
-        pred_T: (4, 4) 预测变换矩阵
-        K: (3, 3) 相机内参矩阵
-        pose_errors: 姿态误差字典
-        max_points: 最大投影点数
-        point_radius: 点半径
-    
-    Returns:
-        comparison_image: (H, W*2, 3) 对比图像 (左=GT绿色, 右=Pred红色)
     """
     h, w = image.shape[:2]
     
@@ -357,28 +339,23 @@ def create_projection_comparison(
     font_scale = 0.5
     font_thickness = 1
     
-    # GT图像标注
     cv2.putText(gt_image, "GT (Green)", (10, 20), font, font_scale, (0, 255, 0), font_thickness)
     cv2.putText(gt_image, f"Points: {len(gt_pts_2d)}", (10, 40), font, font_scale, (255, 255, 255), font_thickness)
     
-    # Pred图像标注
     cv2.putText(pred_image, "Pred (Red)", (10, 20), font, font_scale, (0, 0, 255), font_thickness)
     cv2.putText(pred_image, f"Points: {len(pred_pts_2d)}", (10, 40), font, font_scale, (255, 255, 255), font_thickness)
     
-    # 添加误差信息
     error_texts = [
         f"Trans: {pose_errors['trans_error']:.3f}m",
-        f"X: {pose_errors['x_error']:.3f}m Y: {pose_errors['y_error']:.3f}m Z: {pose_errors['z_error']:.3f}m",
+        f"Fwd:{pose_errors['fwd_error']:.3f} Lat:{pose_errors['lat_error']:.3f} Ht:{pose_errors['ht_error']:.3f}m",
         f"Rot: {pose_errors['rot_error']:.2f}deg",
-        f"R: {pose_errors['roll_error']:.2f} P: {pose_errors['pitch_error']:.2f} Y: {pose_errors['yaw_error']:.2f}deg",
+        f"R:{pose_errors['roll_error']:.2f} P:{pose_errors['pitch_error']:.2f} Y:{pose_errors['yaw_error']:.2f}deg",
     ]
     
     for i, text in enumerate(error_texts):
         cv2.putText(pred_image, text, (10, 60 + i * 18), font, font_scale, (0, 255, 255), font_thickness)
     
-    # 拼接图像
     comparison = np.hstack([gt_image, pred_image])
-    
     return comparison
 
 
@@ -395,55 +372,32 @@ def create_overlay_comparison(
     """
     创建GT与预测投影叠加可视化图像
     GT用绿色，Pred用红色，重叠区域表示误差小
-    
-    Args:
-        image: (H, W, 3) BGR图像
-        points: (N, 3) 点云
-        gt_T: (4, 4) 真值变换矩阵
-        pred_T: (4, 4) 预测变换矩阵
-        K: (3, 3) 相机内参矩阵
-        pose_errors: 姿态误差字典
-        max_points: 最大投影点数
-        point_radius: 点半径
-    
-    Returns:
-        overlay_image: (H, W, 3) 叠加图像
     """
     h, w = image.shape[:2]
     
-    # 随机采样点云
     if len(points) > max_points:
         indices = np.random.choice(len(points), max_points, replace=False)
         points_sampled = points[indices]
     else:
         points_sampled = points
     
-    # 投影GT
     gt_pts_2d, gt_depths, _ = project_points_to_image(
         points_sampled, gt_T, K, (h, w)
     )
-    
-    # 投影预测
     pred_pts_2d, pred_depths, _ = project_points_to_image(
         points_sampled, pred_T, K, (h, w)
     )
     
-    # 创建叠加图像
     overlay = image.copy()
-    
-    # 先绘制GT (绿色)
     overlay = render_projected_points(
         overlay, gt_pts_2d, gt_depths,
         color_mode='fixed_green', point_radius=point_radius
     )
-    
-    # 再绘制Pred (红色，较小的点)
     overlay = render_projected_points(
         overlay, pred_pts_2d, pred_depths,
         color_mode='fixed_red', point_radius=max(1, point_radius - 1)
     )
     
-    # 添加图例和误差信息
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.5
     font_thickness = 1
@@ -451,7 +405,7 @@ def create_overlay_comparison(
     cv2.putText(overlay, "Overlay: GT(Green) + Pred(Red)", (10, 20), font, font_scale, (255, 255, 255), font_thickness)
     
     error_texts = [
-        f"Trans Error: {pose_errors['trans_error']:.3f}m | X:{pose_errors['x_error']:.3f} Y:{pose_errors['y_error']:.3f} Z:{pose_errors['z_error']:.3f}",
+        f"Trans Error: {pose_errors['trans_error']:.3f}m | Fwd:{pose_errors['fwd_error']:.3f} Lat:{pose_errors['lat_error']:.3f} Ht:{pose_errors['ht_error']:.3f}",
         f"Rot Error: {pose_errors['rot_error']:.2f}deg | R:{pose_errors['roll_error']:.2f} P:{pose_errors['pitch_error']:.2f} Y:{pose_errors['yaw_error']:.2f}",
     ]
     
@@ -475,7 +429,7 @@ def create_init_gt_pred_comparison(
     创建初始值、GT、预测值三路对比图像
     
     Args:
-        image: (H, W, 3) BGR图像
+        image: (H, W, 3) BGR图像 (已去畸变)
         points: (N, 3) 点云
         init_T: (4, 4) 初始变换矩阵
         gt_T: (4, 4) 真值变换矩阵
@@ -500,11 +454,18 @@ def create_init_gt_pred_comparison(
     init_errors = compute_pose_errors(init_T, gt_T)
     pred_errors = compute_pose_errors(pred_T, gt_T)
     
+    # 提取GT外参的真值 (XYZ平移和RPY旋转)
+    gt_trans = gt_T[:3, 3]
+    gt_euler = rotation_matrix_to_euler_angles(gt_T[:3, :3])
+    gt_roll_deg = np.rad2deg(gt_euler[0])
+    gt_pitch_deg = np.rad2deg(gt_euler[1])
+    gt_yaw_deg = np.rad2deg(gt_euler[2])
+    
     # 投影初始值 (使用深度着色)
     init_pts_2d, init_depths, _ = project_points_to_image(points_sampled, init_T, K, (h, w), min_depth=0.1, max_depth=200.0, debug=False)
     init_image = render_projected_points(image, init_pts_2d, init_depths, color_mode='depth', point_radius=point_radius, max_depth=100.0)
     
-    # 投影GT (使用深度着色) - 首次调用时输出调试信息
+    # 投影GT (使用深度着色)
     gt_pts_2d, gt_depths, _ = project_points_to_image(points_sampled, gt_T, K, (h, w), min_depth=0.1, max_depth=200.0, debug=False)
     gt_image = render_projected_points(image, gt_pts_2d, gt_depths, color_mode='depth', point_radius=point_radius, max_depth=100.0)
     
@@ -528,31 +489,33 @@ def create_init_gt_pred_comparison(
         cv2.rectangle(img, (pos[0]-2, pos[1]-text_h-2), (pos[0]+text_w+2, pos[1]+4), (0, 0, 0), -1)
         cv2.putText(img, text, pos, font, font_scale, color, font_thickness)
     
-    # 初始值图像 - 详细误差
+    # 初始值图像 (Sensing坐标系)
     y = 16
     put_text_with_bg(init_image, f"Init | Pts:{len(init_pts_2d)}", (5, y), (100, 200, 255))
     y += line_height
     put_text_with_bg(init_image, f"Trans:{init_errors['trans_error']:.3f}m", (5, y), (255, 255, 255))
     y += line_height
-    put_text_with_bg(init_image, f"X:{init_errors['x_error']:.3f} Y:{init_errors['y_error']:.3f} Z:{init_errors['z_error']:.3f}m", (5, y), (0, 255, 255))
+    put_text_with_bg(init_image, f"Fwd:{init_errors['fwd_error']:.3f} Lat:{init_errors['lat_error']:.3f} Ht:{init_errors['ht_error']:.3f}m", (5, y), (0, 255, 255))
     y += line_height
     put_text_with_bg(init_image, f"Rot:{init_errors['rot_error']:.2f}deg", (5, y), (255, 255, 255))
     y += line_height
     put_text_with_bg(init_image, f"R:{init_errors['roll_error']:.2f} P:{init_errors['pitch_error']:.2f} Y:{init_errors['yaw_error']:.2f}", (5, y), (0, 255, 255))
     
-    # GT图像
+    # GT图像 - 显示外参真值
     y = 16
     put_text_with_bg(gt_image, f"GT (Reference) | Pts:{len(gt_pts_2d)}", (5, y), (0, 255, 0))
     y += line_height
-    put_text_with_bg(gt_image, "Ground Truth", (5, y), (255, 255, 255))
+    put_text_with_bg(gt_image, f"X:{gt_trans[0]:.3f} Y:{gt_trans[1]:.3f} Z:{gt_trans[2]:.3f}m", (5, y), (0, 255, 255))
+    y += line_height
+    put_text_with_bg(gt_image, f"R:{gt_roll_deg:.2f} P:{gt_pitch_deg:.2f} Y:{gt_yaw_deg:.2f}deg", (5, y), (0, 255, 255))
     
-    # 预测图像 - 详细误差
+    # 预测图像 (Sensing坐标系)
     y = 16
     put_text_with_bg(pred_image, f"Pred | Pts:{len(pred_pts_2d)}", (5, y), (100, 100, 255))
     y += line_height
     put_text_with_bg(pred_image, f"Trans:{pred_errors['trans_error']:.3f}m", (5, y), (255, 255, 255))
     y += line_height
-    put_text_with_bg(pred_image, f"X:{pred_errors['x_error']:.3f} Y:{pred_errors['y_error']:.3f} Z:{pred_errors['z_error']:.3f}m", (5, y), (0, 255, 255))
+    put_text_with_bg(pred_image, f"Fwd:{pred_errors['fwd_error']:.3f} Lat:{pred_errors['lat_error']:.3f} Ht:{pred_errors['ht_error']:.3f}m", (5, y), (0, 255, 255))
     y += line_height
     put_text_with_bg(pred_image, f"Rot:{pred_errors['rot_error']:.2f}deg", (5, y), (255, 255, 255))
     y += line_height
@@ -581,7 +544,7 @@ def visualize_batch_projection(
     可视化一个batch中的多个样本
     
     Args:
-        images: (B, H, W, 3) BGR图像
+        images: (B, H, W, 3) BGR图像 (已去畸变)
         points_batch: (B, N, 3) 点云
         init_T_batch: (B, 4, 4) 初始变换矩阵
         gt_T_batch: (B, 4, 4) 真值变换矩阵
@@ -670,4 +633,3 @@ def prepare_image_for_tensorboard(image_bgr: np.ndarray) -> np.ndarray:
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     image_rgb_chw = image_rgb.transpose(2, 0, 1)
     return image_rgb_chw
-

@@ -73,7 +73,121 @@ output_dir/
 
 ---
 
-### 2. visualize_projection.py
+### 2. batch_prepare_trips.py
+**批量处理多个 trip 数据集**
+
+从多个 trip 目录批量生成 KITTI-Odometry 格式的训练数据集，每个 trip 对应一个独立的 sequence。
+
+**主要功能：**
+- 🚀 自动遍历 trips 目录下的所有行程
+- 📦 每个 trip 自动分配 sequence ID（00, 01, 02, ...）
+- 🎯 只提取主 lidar（frame_id: "atx_202"）数据
+- 📝 生成完整的处理日志
+- 🔄 支持失败重试（跳过失败的 trip 继续处理）
+
+**参数说明：**
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--trips_dir` | 必填 | trips 根目录（包含所有行程的目录） |
+| `--output_dir` | 必填 | 输出数据集目录 |
+| `--camera_name` | traffic_2 | 相机名称 |
+| `--target_fps` | 10.0 | 目标帧率 |
+| `--start_sequence` | 0 | 起始 sequence ID |
+
+**使用示例：**
+```bash
+# 激活环境
+source /opt/conda/etc/profile.d/conda.sh && conda activate bevcalib
+
+# 批量处理所有 trips
+python batch_prepare_trips.py \
+  --trips_dir /path/to/trips \
+  --output_dir /path/to/output \
+  --camera_name traffic_2 \
+  --target_fps 10.0 \
+  --start_sequence 0
+
+# 实际示例
+python batch_prepare_trips.py \
+  --trips_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips \
+  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
+  --camera_name traffic_2 \
+  --target_fps 10.0
+```
+
+**输入目录结构：**
+```
+trips_dir/
+├── YR-B26A1-1_20251117_031232/    # Trip 1 → Sequence 00
+│   ├── bags/
+│   │   ├── unimportant/           # 或 important/
+│   │   │   └── *.bag
+│   └── config/
+│       ├── cameras.cfg
+│       ├── lidars.cfg
+│       └── extrinsics.yaml
+├── YR-C061-5_20260227_061027/     # Trip 2 → Sequence 01
+│   ├── bags/
+│   └── config/
+└── ...
+```
+
+**输出目录结构：**
+```
+output_dir/
+├── sequences/
+│   ├── 00/                        # 第一个 trip
+│   │   ├── image_2/
+│   │   ├── velodyne/
+│   │   ├── calib.txt
+│   │   └── times.txt
+│   ├── 01/                        # 第二个 trip
+│   │   ├── image_2/
+│   │   └── ...
+│   └── ...
+├── poses/
+│   ├── 00.txt
+│   ├── 01.txt
+│   └── ...
+├── temp/                          # 临时文件
+└── batch_processing_*.log         # 批量处理日志
+```
+
+**监控处理进度：**
+```bash
+# 使用监控脚本（实时显示日志）
+bash monitor_batch_processing.sh
+
+# 或手动查看日志
+tail -f /path/to/output_dir/batch_processing_*.log
+```
+
+**停止批量处理：**
+```bash
+# 使用停止脚本（交互式确认）
+bash stop_batch_processing.sh
+
+# 或手动停止
+pkill -9 -f batch_prepare_trips.py
+pkill -9 -f prepare_custom_dataset.py
+```
+
+**日志说明：**
+- 实时显示处理进度
+- 自动生成时间戳日志文件
+- 记录每个 trip 的处理结果
+- 显示成功/失败统计
+
+**注意事项：**
+1. 确保使用 `bevcalib` conda 环境
+2. 每个 trip 目录必须包含 `bags/` 和 `config/` 子目录
+3. 配置文件中必须包含 `frame_id: "atx_202"` 的主 lidar
+4. 处理时间取决于 bag 文件大小和数量
+5. 失败的 trip 会被跳过，不影响其他 trip 的处理
+
+---
+
+### 3. visualize_projection.py
 **点云投影可视化工具**
 
 支持两种模式：
@@ -113,7 +227,64 @@ python visualize_projection.py \
 
 ---
 
-### 3. validate_kitti_odometry.py
+### 4. batch_generate_projections.py
+**批量生成点云投影可视化图像**
+
+快速批量生成大量帧的点云投影可视化图像，用于验证投影效果和数据质量。
+
+**主要功能：**
+- 🚀 自动均匀采样指定数量的帧
+- 📊 显示投影统计信息（成功率、平均投影点数）
+- 🎨 使用深度着色（jet colormap）
+- ⚡ 使用无头模式（Agg backend），适合服务器环境
+- 📝 进度条实时显示
+
+**参数说明：**
+| 参数 | 说明 |
+|------|------|
+| `--dataset_root` | 数据集根目录 |
+| `--sequence` | 序列号（如 "00", "01"） |
+| `--output_dir` | 输出目录 |
+| `--num_samples` | 生成样本数量（默认: 100） |
+| `--start_frame` | 起始帧（默认: 0） |
+| `--end_frame` | 结束帧（默认: None，自动检测） |
+
+**使用示例：**
+```bash
+# 激活环境
+source /opt/conda/etc/profile.d/conda.sh && conda activate bevcalib
+
+# 为 Sequence 00 生成 100 张投影图像
+python batch_generate_projections.py \
+  --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
+  --sequence 00 \
+  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data/temp/projection_visualizations \
+  --num_samples 100
+
+# 只生成前 500 帧中的 50 张图像
+python batch_generate_projections.py \
+  --dataset_root /path/to/dataset \
+  --sequence 00 \
+  --output_dir /path/to/output \
+  --num_samples 50 \
+  --start_frame 0 \
+  --end_frame 500
+```
+
+**输出：**
+- 图像文件命名: `seq{序号}_frame{帧号:06d}.png`
+- 例如: `seq00_frame000000.png`, `seq00_frame000015.png`, ...
+- 统计信息: 成功生成数量、平均投影点数
+
+**典型用途：**
+- 快速验证整个数据集的投影质量
+- 检查标定文件是否正确
+- 发现数据异常帧
+- 生成数据集可视化样本
+
+---
+
+### 5. validate_kitti_odometry.py
 **KITTI-Odometry 格式验证器**
 
 严格验证数据集是否符合 KITTI-Odometry 标准格式。
@@ -135,7 +306,7 @@ python validate_kitti_odometry.py /path/to/dataset --sequence 00
 
 ---
 
-### 4. visualize_kitti_structure.py
+### 6. visualize_kitti_structure.py
 **数据集结构可视化工具**
 
 快速浏览数据集的整体结构和统计信息。
@@ -160,7 +331,7 @@ python visualize_kitti_structure.py /path/to/dataset --sequence 00 01 02
 
 ---
 
-### 5. view_pointcloud.py
+### 7. view_pointcloud.py
 **点云查看工具**
 
 支持查看 PLY 和 BIN 格式的点云文件。
@@ -195,12 +366,32 @@ python view_pointcloud.py temp/pointclouds/000000.ply --backend matplotlib
 
 ## 🔄 典型工作流程
 
-### 1. 生成数据集（完整流程）
+### 1a. 批量生成数据集（推荐用于多个 trips）
+```bash
+# 激活环境
+source /opt/conda/etc/profile.d/conda.sh && conda activate bevcalib
+
+# 批量处理所有 trips
+cd /mnt/drtraining/user/dahailu/code/BEVCalib/tools
+python batch_prepare_trips.py \
+  --trips_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips \
+  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
+  --camera_name traffic_2 \
+  --target_fps 10.0
+```
+
+**预期输出：**
+- 自动处理所有 trip 目录
+- 每个 trip 对应一个 sequence（00, 01, 02...）
+- 生成完整的批量处理日志
+- 处理时间取决于 trip 数量和大小
+
+### 1b. 生成单个数据集（完整流程）
 ```bash
 # 生成完整数据集（包含调试样本用于验证去畸变效果）
 python tools/prepare_custom_dataset.py \
-  --bag_dir /mnt/drtraining/user/dahailu/data/bevcalib/bags/unimportant \
-  --config_dir /mnt/drtraining/user/dahailu/data/bevcalib/config \
+  --bag_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips/YR-B26A1-1_20251117_031232/data \
+  --config_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips/YR-B26A1-1_20251117_031232/configs \
   --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix \
   --camera_name traffic_2 \
   --target_fps 10.0 \

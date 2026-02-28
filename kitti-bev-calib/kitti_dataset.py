@@ -83,12 +83,10 @@ class KittiDataset(Dataset):
             try:
                 odom = odometry(data_folder, seq)
                 calib = odom.calib
-                # 注意: pykitti的T_cam2_velo实际上是 velo->cam 的变换矩阵
-                # 变换点云到相机坐标系: P_cam = T_cam2_velo @ P_velo
-                # 不需要取逆！
-                T_velo_to_cam = calib.T_cam2_velo
+                T_cam02_velo_np = calib.T_cam2_velo
+                T_velo2_cam0_np = np.linalg.inv(T_cam02_velo_np)
                 self.K[seq] = calib.K_cam2
-                self.T[seq] = T_velo_to_cam
+                self.T[seq] = T_velo2_cam0_np
                 
                 image_list = os.listdir(os.path.join(self.dataset_root, 'sequences', seq, 'image_2'))
                 image_list.sort()
@@ -207,7 +205,8 @@ class KittiDataset(Dataset):
         
         gt_transform = self.T[seq]
         intrinsic = self.K[seq]
-        return img, pcd, gt_transform, intrinsic
+        distortion = None  # KITTI原始数据集假设已去畸变
+        return img, pcd, gt_transform, intrinsic, distortion
     
     def validate_data_utilization(self, sample_ratio=0.1, min_utilization=0.3, min_valid_ratio=0.9, verbose=True):
         """

@@ -223,11 +223,19 @@ class Cam2BEV(nn.Module):
         self.dx = nn.Parameter(dx, requires_grad = False)
         self.bx = nn.Parameter(bx, requires_grad = False)
         self.nx = nn.Parameter(nx, requires_grad = False)
-        self.proj_head = ProjectionHead(embedding_dim=self.lss.out_channels)
+        # BEV pool 输出 (B, C, nZ, nX, nY)，经 unbind+cat 后通道变为 C*nZ
+        # 当 nZ=1 (旧配置zbound步长=20): embedding_dim = 128*1 = 128
+        # 当 nZ=5 (新配置zbound步长=4):  embedding_dim = 128*5 = 640
+        # ProjectionHead 将 C*nZ 维特征映射到固定的 projection_dim=128
+        # 这样多Z层的高度信息被编码到128维输出中，下游网络维度不变
+        nz = nx[2].item()
+        proj_embedding_dim = self.lss.out_channels * nz
+        self.proj_head = ProjectionHead(embedding_dim=proj_embedding_dim)
         self.out_channels = self.proj_head.projection_dim
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1))
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1))
         print(f"cam bev resolution: {nx[0].item()} x {nx[1].item()} x {nx[2].item()}")
+        print(f"[Cam2BEV] Z体素数: {nz}, ProjectionHead输入维度: {proj_embedding_dim} → {self.out_channels}")
 
     def bev_pool(self, img_depth_feature, geometry):
         img_pc = img_depth_feature

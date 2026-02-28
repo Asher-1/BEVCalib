@@ -5,6 +5,19 @@
 支持两种模式：
 1. project: 单纯的点云投影到图像
 2. compare: 对比去畸变前后的效果
+
+📌 重要说明 - Tr 矩阵约定：
+----------------------------------
+- calib.txt 中的 Tr 矩阵遵循 KITTI 标准格式：
+  ✓ Tr = Camera → Sensing/Velodyne (3×4 或 4×4 矩阵)
+  
+- 投影使用时需要反向变换：
+  ✓ P_camera = inv(Tr) @ P_sensing
+  ✓ 本工具的 project_points_to_camera() 函数会自动处理取逆
+  
+- 用户无需关心：
+  ✓ 只需提供正确的 calib.txt 文件
+  ✓ 工具会自动处理所有变换细节
 """
 
 import numpy as np
@@ -88,12 +101,18 @@ def load_calib(calib_file: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, str
         calib_file: 标定文件路径
     
     Returns:
-        Tr: (4, 4) 点云坐标系→Camera变换矩阵
-            - 对于标准KITTI: LiDAR→Camera
-            - 对于自定义数据集: Sensing→Camera（与C++一致）
+        Tr: (4, 4) Camera→点云坐标系 变换矩阵（KITTI标准格式）
+            - 对于标准KITTI: Camera → Velodyne
+            - 对于自定义数据集: Camera → Sensing（现已符合KITTI标准）
+            - 使用时需要取逆: P_camera = inv(Tr) @ P_lidar
         K: (3, 3) 相机内参矩阵
         D: (N,) 畸变系数 (pinhole: 5个, fisheye: 4个)
         camera_model: 相机模型 ('pinhole' 或 'fisheye')
+    
+    注意:
+        - 此函数直接返回calib.txt中的Tr，未取逆
+        - KITTI标准定义：Tr = Camera → Velodyne
+        - 实际投影时需要使用 inv(Tr) 得到 Velodyne → Camera
     """
     calib = {}
     with open(calib_file, 'r') as f:
@@ -164,7 +183,7 @@ def project_points_to_camera(points: np.ndarray,
     
     Args:
         points: (N, 3) 或 (N, 4) LiDAR坐标系下的点云 [x, y, z] 或 [x, y, z, intensity]
-        Tr: (4, 4) LiDAR→Camera变换矩阵
+        Tr: (4, 4) Camera→LiDAR变换矩阵（KITTI标准格式，来自calib.txt）
         min_depth: 最小3D距离（默认0.0，不过滤近点）
         max_depth: 最大3D距离（默认200.0，增大以保留远处点云）
         use_fov_filter: 是否使用FOV过滤（默认True，对齐C++）
@@ -177,6 +196,10 @@ def project_points_to_camera(points: np.ndarray,
         pts_cam: (M, 3) 相机坐标系下的点云 [x, y, z]
         depths: (M,) Z深度值（用于颜色映射）
         valid_mask: (N,) 有效点的mask
+    
+    注意:
+        - 输入的Tr是KITTI标准格式（Camera→LiDAR）
+        - 函数内部会取逆得到LiDAR→Camera用于投影
     """
     # 提取xyz
     if points.shape[1] >= 3:
@@ -188,8 +211,10 @@ def project_points_to_camera(points: np.ndarray,
     pts_3d_homo = np.hstack([pts_3d, np.ones((pts_3d.shape[0], 1))])
     
     # ✅ 步骤1: LiDAR坐标系 → 相机坐标系
+    # KITTI标准：Tr = Camera→LiDAR，所以需要取逆得到 LiDAR→Camera
     # C++参考: pc = rot * p + trans
-    pts_cam = (Tr @ pts_3d_homo.T).T  # (N, 4)
+    Tr_lidar_to_cam = np.linalg.inv(Tr)  # LiDAR→Camera
+    pts_cam = (Tr_lidar_to_cam @ pts_3d_homo.T).T  # (N, 4)
     
     # ✅ 步骤2: 过滤相机后方的点（必须）
     # C++参考: if (pc(2) > 0 && theta < 0.5 * fov) { ... }
@@ -414,7 +439,7 @@ def project_and_render(points: np.ndarray,
         points: (N, 3) 或 (N, 4) LiDAR点云
         image: 输入图像
         K: (3, 3) 相机内参矩阵
-        Tr: (4, 4) LiDAR→Camera变换矩阵
+        Tr: (4, 4) Camera→LiDAR变换矩阵（KITTI标准格式）
         D: (M,) 畸变系数
         camera_model: 相机模型 ('pinhole' 或 'fisheye')
         min_depth: 最小3D距离（默认0.0）
@@ -618,10 +643,11 @@ def compare_undistortion(dataset_root: Path,
     print(f"✓ 加载标定参数")
     print(f"  相机模型: {camera_model}")
     
-    # 打印Tr矩阵（关键：这是Sensing→Camera变换）
-    print(f"  Tr (Sensing→Camera):")
+    # 打印Tr矩阵（KITTI标准格式：Camera → Sensing）
+    print(f"  Tr (Camera→Sensing, KITTI标准):")
     print(f"    旋转:\n{Tr[:3, :3]}")
     print(f"    平移: {Tr[:3, 3]}")
+    print(f"  注意：投影时会自动取逆得到 Sensing→Camera")
     
     # 2. 加载去畸变后的点云和图像
     pc_after_path = seq_dir / 'velodyne' / f'{frame_idx:06d}.bin'

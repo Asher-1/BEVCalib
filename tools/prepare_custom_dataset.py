@@ -1213,11 +1213,13 @@ class PointCloudParser:
         """解析单个 LidarConfig.Config 消息
         
         Proto定义 (config.proto):
+          - frame_id: field 1 (string)
           - ring_id_start: field 27 (int32)
           - ring_id_end: field 28 (int32)
           - sensor_to_lidar: field 26 (repeated Transformation3)
         """
         result = {
+            'frame_id': None,
             'ring_id_start': 0,
             'ring_id_end': 255,
             'sensor_to_lidar': None  # Transformation3
@@ -1243,7 +1245,12 @@ class PointCloudParser:
                 chunk = data[pos:pos + L]
                 pos += L
                 
-                if field_num == 26:  # sensor_to_lidar (repeated)
+                if field_num == 1:  # frame_id (string)
+                    try:
+                        result['frame_id'] = chunk.decode('utf-8', errors='ignore')
+                    except:
+                        pass
+                elif field_num == 26:  # sensor_to_lidar (repeated)
                     # 只取第一个sensor_to_lidar
                     if result['sensor_to_lidar'] is None:
                         result['sensor_to_lidar'] = PointCloudParser._parse_transformation3(chunk)
@@ -1257,21 +1264,28 @@ class PointCloudParser:
         return result
     
     @staticmethod
-    def _parse_lidar_configs(data: bytes) -> dict:
+    def _parse_lidar_configs(data: bytes, main_lidar_frame_id: str = "atx_202") -> dict:
         """解析 LidarConfig 消息
         
         Proto定义 (config.proto):
           - vehicle_to_sensing: field 1 (Transformation3)
           - config: field 2 (repeated Config)
         
+        Args:
+            data: protobuf消息bytes数据
+            main_lidar_frame_id: 主lidar的frame_id，只保留该lidar的配置（默认"atx_202"）
+        
         返回:
           {
             'vehicle_to_sensing': 4x4 ndarray (Sensing→Vehicle),
             'configs': [
-              {'ring_id_start': int, 'ring_id_end': int, 'sensor_to_lidar': 4x4 ndarray},
+              {'frame_id': str, 'ring_id_start': int, 'ring_id_end': int, 'sensor_to_lidar': 4x4 ndarray},
               ...
             ]
           }
+        
+        注意：
+          如果存在多个lidar，只保留frame_id为main_lidar_frame_id的配置
         """
         result = {
             'vehicle_to_sensing': None,
@@ -1296,7 +1310,9 @@ class PointCloudParser:
                     result['vehicle_to_sensing'] = PointCloudParser._parse_transformation3(chunk)
                 elif field_num == 2:  # config (repeated)
                     config = PointCloudParser._parse_lidar_config_single(chunk)
-                    result['configs'].append(config)
+                    # ✅ 过滤：只保留主lidar的配置
+                    if main_lidar_frame_id is None or config.get('frame_id') == main_lidar_frame_id:
+                        result['configs'].append(config)
             elif wire == 0:  # Varint
                 _, pos = PointCloudParser._decode_varint(data, pos)
             elif wire == 5:  # Fixed32
@@ -1309,16 +1325,22 @@ class PointCloudParser:
         return result
     
     @staticmethod
-    def _extract_frame_id_and_lidar_configs(data: bytes) -> Tuple[Optional[str], Optional[dict]]:
+    def _extract_frame_id_and_lidar_configs(data: bytes, main_lidar_frame_id: str = "atx_202") -> Tuple[Optional[str], Optional[dict]]:
         """从 PointCloud2 消息中提取 frame_id 和 lidar_configs
         
         Proto定义 (pointcloud2.proto):
           - header: field 1 (Header)
           - lidar_configs: field 12 (LidarConfig)
         
+        Args:
+            data: protobuf消息bytes数据
+            main_lidar_frame_id: 主lidar的frame_id，只保留该lidar的配置（默认"atx_202"）
+        
         ⚠️ 重要：lidar_configs (field 12) 通常在消息末尾（在data blob之后）
         
         返回: (frame_id, lidar_configs)
+        
+        注意：如果存在多个lidar，只保留frame_id为main_lidar_frame_id的配置
         """
         frame_id = None
         lidar_configs = None
@@ -1371,8 +1393,8 @@ class PointCloudParser:
                     # lidar_configs 长度通常在 50-500 字节
                     if 20 < length < 1000 and next_pos + length <= len(data):
                         chunk = data[next_pos:next_pos + length]
-                        # 尝试解析为 lidar_configs
-                        parsed = PointCloudParser._parse_lidar_configs(chunk)
+                        # 尝试解析为 lidar_configs（只保留主lidar配置）
+                        parsed = PointCloudParser._parse_lidar_configs(chunk, main_lidar_frame_id)
                         # 验证解析结果是否有效
                         if parsed and (parsed.get('vehicle_to_sensing') is not None or parsed.get('configs')):
                             lidar_configs = parsed
@@ -1625,39 +1647,50 @@ class PointCloudParser:
         
         参考: modules/calib_utils/src/proto_instance.cpp:45-82
         
-        C++逻辑:
-        1. 如果frame_id != "lidar_uncalibrated"，说明点云已经被转换到Sensing系
-        2. 对每个lidar的config，提取sensor_to_lidar（LiDAR→Sensing的外参）
-        3. 使用sensor_to_lidar的逆矩阵，将点云从Sensing系转回LiDAR系
-        4. 按ring范围分割点云，分别进行变换
+        C++逻辑（对齐实现）:
+        1. 如果frame_id != "lidar_uncalibrated"，说明点云已经被combined到Sensing系
+        2. 从lidar_configs提取每个lidar的sensor_to_lidar外参
+           - sensor_to_lidar表示: LiDAR坐标系到Sensing坐标系的变换
+           - C++: Eigen::Isometry3d (4x4变换矩阵)
+        3. 计算逆变换: transform = sensor_to_lidar.inverse()
+           - 作用: 将点从Sensing系转回原始LiDAR系
+        4. 按ring范围分割点云（splite_pointcloud_raw），对每个子点云分别应用逆变换
+        
+        关键对齐点:
+        - C++: transform = extrinsics[j].inverse().matrix()
+        - Python: T_sensing_to_lidar = np.linalg.inv(sensor_to_lidar)
         
         Args:
             points: (N, 5) 点云 [x, y, z, intensity, timestamp] 或 (N, 6) [x, y, z, intensity, ring, timestamp]
-            lidar_configs: 解析后的lidar_configs字典
-            step: 每点的字节数
+            lidar_configs: 解析后的lidar_configs字典 (包含configs列表)
+            step: 每点的字节数 (16表示包含ring字段)
             frame_id: 原始frame_id
         
         Returns:
-            变换后的点云（LiDAR系）
+            变换后的点云（已转换到LiDAR系，frame_id将设为"lidar_uncalibrated"）
         """
         configs = lidar_configs.get('configs', [])
         
         if not configs:
-            # 没有config，无法decombine - 这不应该发生
-            # 因为 _parse_lidar_configs 应该总是返回有效的configs
+            # 没有configs，无法decombine
+            # 按C++逻辑: 如果没有lidar_configs，应该返回错误
+            print(f"  ⚠️  没有找到lidar configs，无法decombine")
             return points
         
-        # 判断点云是否包含ring信息（step=16表示有ring字段）
+        # 判断点云是否包含ring信息（step=16表示PointXYZIRT格式，有ring字段）
         has_ring = (step == 16 and points.shape[1] >= 6)
         
         if not has_ring:
-            # 如果没有ring信息，只能使用第一个config的变换
+            # 没有ring信息，无法按lidar分割，使用第一个config的变换应用到所有点
+            # 注意：这与C++行为不完全一致，C++要求有ring信息
             if configs[0].get('sensor_to_lidar') is not None:
-                T_sensing_to_lidar = configs[0]['sensor_to_lidar']  # LiDAR→Sensing (从config读取)
-                T_lidar_to_sensing = np.linalg.inv(T_sensing_to_lidar)  # Sensing→LiDAR
+                # 按C++命名约定（从右往左读）
+                T_sensing_to_lidar = configs[0]['sensor_to_lidar']  # LiDAR→Sensing (从config读取，从右往左读)
+                T_lidar_to_sensing = np.linalg.inv(T_sensing_to_lidar)  # Sensing→LiDAR (逆变换，从右往左读)
                 
-                # 应用变换：将点从Sensing系转到LiDAR系
-                # C++对齐：DecombineProtoPointCloud 使用 extrinsics[j].inverse() 变换
+                # 应用变换：将点从Sensing系转回LiDAR系
+                # C++对齐: transformPointCloudXYZIRT(*source_cloud_raw, *source_cloud, transform)
+                #          其中 transform = extrinsics[j].inverse()
                 xyz = points[:, :3]
                 xyz_homo = np.hstack([xyz, np.ones((xyz.shape[0], 1))])
                 xyz_transformed = (T_lidar_to_sensing @ xyz_homo.T).T[:, :3]
@@ -1665,71 +1698,104 @@ class PointCloudParser:
                 points_out = points.copy()
                 points_out[:, :3] = xyz_transformed
                 
-                # 总是打印decombine结果（用单独的标志控制）
+                # 打印decombine结果
                 if not hasattr(PointCloudParser, '_decombine_logged'):
                     PointCloudParser._decombine_logged = True
-                    print(f"  ✓ 已应用decombine变换 (无ring信息，使用config[0])")
-                    print(f"    T_lidar_to_sensing (LiDAR→Sensing) translation: [{T_lidar_to_sensing[0, 3]:.4f}, {T_lidar_to_sensing[1, 3]:.4f}, {T_lidar_to_sensing[2, 3]:.4f}]")
-                    print(f"    变换前点云范围: x=[{xyz[:, 0].min():.2f}, {xyz[:, 0].max():.2f}]")
-                    print(f"    变换后点云范围: x=[{xyz_transformed[:, 0].min():.2f}, {xyz_transformed[:, 0].max():.2f}]")
+                    print(f"  ✓ 已应用decombine变换 (⚠️ 无ring信息，应用config[0]到所有点)")
+                    print(f"    T_sensing_to_lidar (LiDAR→Sensing, 从右往左读) translation: [{T_sensing_to_lidar[0, 3]:.4f}, {T_sensing_to_lidar[1, 3]:.4f}, {T_sensing_to_lidar[2, 3]:.4f}]")
+                    print(f"    T_lidar_to_sensing (Sensing→LiDAR, 从右往左读) translation: [{T_lidar_to_sensing[0, 3]:.4f}, {T_lidar_to_sensing[1, 3]:.4f}, {T_lidar_to_sensing[2, 3]:.4f}]")
+                    print(f"    变换前点云范围: x=[{xyz[:, 0].min():.2f}, {xyz[:, 0].max():.2f}], y=[{xyz[:, 1].min():.2f}, {xyz[:, 1].max():.2f}]")
+                    print(f"    变换后点云范围: x=[{xyz_transformed[:, 0].min():.2f}, {xyz_transformed[:, 0].max():.2f}], y=[{xyz_transformed[:, 1].min():.2f}, {xyz_transformed[:, 1].max():.2f}]")
                 
                 return points_out
             else:
+                print(f"  ⚠️  config[0]没有sensor_to_lidar，跳过decombine")
                 return points
         
-        # 有ring信息，按ring范围分割点云
-        ring_col = 4 if points.shape[1] == 6 else -1  # 假设ring在第5列（索引4）
+        # 有ring信息，按ring范围分割点云（对齐C++ splite_pointcloud_raw逻辑）
+        ring_col = 4 if points.shape[1] == 6 else -1  # ring在第5列（索引4）
         
-        # 如果点云格式不支持ring，跳过decombine
         if ring_col < 0 or points.shape[1] < 6:
+            print(f"  ⚠️  点云格式不支持ring分割 (shape={points.shape})，跳过decombine")
             return points
         
         rings = points[:, ring_col].astype(np.int32)
         points_out = points.copy()
         decombined_count = 0
         
-        for cfg in configs:
+        # 打印decombine详情（首次）
+        if not hasattr(PointCloudParser, '_decombine_logged'):
+            PointCloudParser._decombine_logged = True
+            print(f"  ✓ 按ring范围分割并应用decombine变换")
+            print(f"    点云包含ring信息，共{len(configs)}个lidar configs")
+        
+        for i, cfg in enumerate(configs):
             ring_start = cfg['ring_id_start']
             ring_end = cfg['ring_id_end']
             sensor_to_lidar = cfg.get('sensor_to_lidar')
             
             if sensor_to_lidar is None:
+                print(f"    ⚠️  config[{i}] 没有sensor_to_lidar，跳过")
                 continue
             
-            # 找到属于这个lidar的点
-            mask = (rings >= ring_start) & (rings <= ring_end)
-            if not np.any(mask):
+            # 找到属于这个lidar的点（C++: splite_pointcloud_raw）
+            # C++: if (ring >= ring_start && ring < ring_end)  // 左闭右开区间 [ring_start, ring_end)
+            mask = (rings >= ring_start) & (rings < ring_end)
+            num_points_in_range = np.sum(mask)
+            
+            if num_points_in_range == 0:
                 continue
             
-            # 计算变换（Sensing→LiDAR = inverse(LiDAR→Sensing)）
-            T_lidar_to_sensing = np.linalg.inv(sensor_to_lidar)
+            # 计算逆变换（C++对齐: transform = extrinsics[j].inverse()）
+            # 按C++命名约定（从右往左读）：
+            T_sensing_to_lidar = sensor_to_lidar  # LiDAR→Sensing（从右往左读）
+            T_lidar_to_sensing = np.linalg.inv(T_sensing_to_lidar)  # Sensing→LiDAR（从右往左读）
             
-            # 应用变换
+            # 应用变换（C++对齐: transformPointCloudXYZIRT）
+            # 将点从Sensing系转回LiDAR系
             xyz = points[mask, :3]
             xyz_homo = np.hstack([xyz, np.ones((xyz.shape[0], 1))])
             xyz_transformed = (T_lidar_to_sensing @ xyz_homo.T).T[:, :3]
             
             points_out[mask, :3] = xyz_transformed
-            decombined_count += np.sum(mask)
+            decombined_count += num_points_in_range
+            
+            # 打印每个lidar的变换详情（首次）
+            if not PointCloudParser._lidar_configs_logged:
+                cfg_frame_id = cfg.get('frame_id', 'unknown')
+                print(f"    config[{i}]: frame_id='{cfg_frame_id}', ring=[{ring_start}, {ring_end}) (左闭右开), points={num_points_in_range}")
+                print(f"      T_sensing_to_lidar (LiDAR→Sensing, 从右往左读) translation: [{T_sensing_to_lidar[0, 3]:.4f}, {T_sensing_to_lidar[1, 3]:.4f}, {T_sensing_to_lidar[2, 3]:.4f}]")
+                print(f"      T_lidar_to_sensing (Sensing→LiDAR, 从右往左读) translation: [{T_lidar_to_sensing[0, 3]:.4f}, {T_lidar_to_sensing[1, 3]:.4f}, {T_lidar_to_sensing[2, 3]:.4f}]")
         
         if not PointCloudParser._lidar_configs_logged:
-            print(f"  ✓ 已按ring分割应用decombine变换")
-            print(f"    变换点数: {decombined_count}/{len(points)}")
+            print(f"    总计变换点数: {decombined_count}/{len(points)} ({100*decombined_count/len(points):.1f}%)")
         
         return points_out
     
     @staticmethod
-    def parse_proto_pointcloud2(data: bytes, apply_decombine: bool = True) -> Optional[np.ndarray]:
+    def parse_proto_pointcloud2(data: bytes, apply_decombine: bool = False, main_lidar_frame_id: str = "atx_202",
+                                config_for_comparison: Optional[dict] = None) -> Optional[np.ndarray]:
         """解析 PointCloud2 proto 数据
         
         参考: ~/develop/code/github/Self-Cali-GS/surround_calibration/data/lidar_utils.py
         
         ✅ 性能优化：使用NumPy向量化操作替代Python循环，大幅提升解析速度
-        ✅ 新增：支持lidar_configs解析和decombine处理（对齐C++ DecombineProtoPointCloud）
+        ✅ 新增：支持lidar_configs解析（对齐C++ DecombineProtoPointCloud）
         
         Args:
             data: protobuf消息bytes数据
             apply_decombine: 是否应用decombine处理（如果点云在Sensing系，转回LiDAR系）
+                           ⚠️ 默认False：本脚本中点云需要保持在Sensing系用于后续去畸变
+                           ✅ 仅在需要原始LiDAR系点云时设置为True
+            main_lidar_frame_id: 主lidar的frame_id，只保留该lidar的配置（默认"atx_202"）
+                               ⚠️ 如果存在多个lidar，只提取和使用主lidar的外参
+                               ✅ 设置为None则保留所有lidar配置
+            config_for_comparison: 从lidars.cfg读取的配置，用于与bag提取的配置进行对比
+        
+        注意：
+            - 本脚本工作流程：bag提取(Sensing系) → 去畸变(Sensing系) → 保存(Sensing系)
+            - 去畸变假设点云在Sensing系，因此提取时不应做decombine变换
+            - 参考代码3222行注释："点云去畸变后在 Sensing 坐标系"
         """
         if data is None or len(data) < 16:
             return None
@@ -1759,9 +1825,9 @@ class PointCloudParser:
             if n < 50:
                 continue
             
-            # ✅ 新增：在找到有效点云数据后，提取frame_id和lidar_configs
+            # ✅ 新增：在找到有效点云数据后，提取frame_id和lidar_configs（只保留主lidar配置）
             if frame_id is None:
-                frame_id, lidar_configs = PointCloudParser._extract_frame_id_and_lidar_configs(to_parse)
+                frame_id, lidar_configs = PointCloudParser._extract_frame_id_and_lidar_configs(to_parse, main_lidar_frame_id)
             
             # 构建 fields_map
             fields_map = {}
@@ -1806,18 +1872,81 @@ class PointCloudParser:
                     print(f"  has_lidar_configs: {'YES' if lidar_configs else 'NO'}")
                     
                     if lidar_configs:
-                        v2s = lidar_configs.get('vehicle_to_sensing')
-                        if v2s is not None:
-                            print(f"  lidar_configs.vehicle_to_sensing (Sensing->Vehicle):")
-                            print(f"    position: [{v2s[0, 3]:.6f}, {v2s[1, 3]:.6f}, {v2s[2, 3]:.6f}]")
+                        # 打印从bag提取的vehicle_to_sensing
+                        v2s_bag = lidar_configs.get('vehicle_to_sensing')
+                        if v2s_bag is not None:
+                            print(f"\n  【从BAG提取】vehicle_to_sensing (Sensing->Vehicle):")
+                            print(f"    position: [{v2s_bag[0, 3]:.6f}, {v2s_bag[1, 3]:.6f}, {v2s_bag[2, 3]:.6f}]")
+                            print(f"    rotation (3x3):")
+                            for row_idx in range(3):
+                                print(f"      [{v2s_bag[row_idx, 0]:9.6f}, {v2s_bag[row_idx, 1]:9.6f}, {v2s_bag[row_idx, 2]:9.6f}]")
                         
+                        # 打印从bag提取的sensor_to_lidar
                         configs = lidar_configs.get('configs', [])
-                        print(f"  config_size: {len(configs)}")
+                        print(f"\n  config_size: {len(configs)} (filtered: only main_lidar_frame_id='{main_lidar_frame_id}')")
                         for i, cfg in enumerate(configs):
-                            s2l = cfg.get('sensor_to_lidar')
-                            print(f"    config[{i}]: ring=[{cfg['ring_id_start']}, {cfg['ring_id_end']}]")
-                            if s2l is not None:
-                                print(f"      sensor_to_lidar (LiDAR->Sensing) translation: [{s2l[0, 3]:.6f}, {s2l[1, 3]:.6f}, {s2l[2, 3]:.6f}]")
+                            s2l_bag = cfg.get('sensor_to_lidar')
+                            cfg_frame_id = cfg.get('frame_id', 'unknown')
+                            print(f"\n    【从BAG提取】config[{i}]: frame_id='{cfg_frame_id}', ring=[{cfg['ring_id_start']}, {cfg['ring_id_end']})")
+                            if s2l_bag is not None:
+                                print(f"      sensor_to_lidar (LiDAR->Sensing) translation: [{s2l_bag[0, 3]:.6f}, {s2l_bag[1, 3]:.6f}, {s2l_bag[2, 3]:.6f}]")
+                                print(f"      sensor_to_lidar rotation (3x3):")
+                                for row_idx in range(3):
+                                    print(f"        [{s2l_bag[row_idx, 0]:9.6f}, {s2l_bag[row_idx, 1]:9.6f}, {s2l_bag[row_idx, 2]:9.6f}]")
+                        
+                        # 如果提供了lidars.cfg配置，进行对比
+                        if config_for_comparison is not None:
+                            print(f"\n=== 对比 lidars.cfg 配置 ===")
+                            
+                            # 对比vehicle_to_sensing
+                            if 'vehicle_to_sensing' in config_for_comparison:
+                                v2s_cfg = config_for_comparison['vehicle_to_sensing']
+                                if 'position' in v2s_cfg and 'orientation' in v2s_cfg:
+                                    from scipy.spatial.transform import Rotation as R
+                                    pos_cfg = np.array(v2s_cfg['position'])
+                                    ori_cfg = np.array(v2s_cfg['orientation'])  # [qx, qy, qz, qw]
+                                    T_cfg = np.eye(4)
+                                    T_cfg[:3, :3] = R.from_quat(ori_cfg).as_matrix()
+                                    T_cfg[:3, 3] = pos_cfg
+                                    
+                                    print(f"\n  【从LIDARS.CFG】vehicle_to_sensing (Sensing->Vehicle):")
+                                    print(f"    position: [{T_cfg[0, 3]:.6f}, {T_cfg[1, 3]:.6f}, {T_cfg[2, 3]:.6f}]")
+                                    print(f"    rotation (3x3):")
+                                    for row_idx in range(3):
+                                        print(f"      [{T_cfg[row_idx, 0]:9.6f}, {T_cfg[row_idx, 1]:9.6f}, {T_cfg[row_idx, 2]:9.6f}]")
+                                    
+                                    # 计算差异
+                                    if v2s_bag is not None:
+                                        pos_diff = np.linalg.norm(T_cfg[:3, 3] - v2s_bag[:3, 3])
+                                        rot_diff = np.linalg.norm(T_cfg[:3, :3] - v2s_bag[:3, :3], 'fro')
+                                        print(f"\n  【GAP】vehicle_to_sensing:")
+                                        print(f"    位置差异 (L2 norm): {pos_diff:.6f} m")
+                                        print(f"    旋转差异 (Frobenius norm): {rot_diff:.6f}")
+                                        print(f"    位置分量差异: [{T_cfg[0,3]-v2s_bag[0,3]:.6f}, {T_cfg[1,3]-v2s_bag[1,3]:.6f}, {T_cfg[2,3]-v2s_bag[2,3]:.6f}]")
+                            
+                            # 对比sensor_to_lidar
+                            if 'position' in config_for_comparison and 'orientation' in config_for_comparison:
+                                from scipy.spatial.transform import Rotation as R
+                                pos_cfg = np.array(config_for_comparison['position'])
+                                ori_cfg = np.array(config_for_comparison['orientation'])  # [qx, qy, qz, qw]
+                                T_s2l_cfg = np.eye(4)
+                                T_s2l_cfg[:3, :3] = R.from_quat(ori_cfg).as_matrix()
+                                T_s2l_cfg[:3, 3] = pos_cfg
+                                
+                                print(f"\n  【从LIDARS.CFG】sensor_to_lidar (LiDAR->Sensing):")
+                                print(f"    position: [{T_s2l_cfg[0, 3]:.6f}, {T_s2l_cfg[1, 3]:.6f}, {T_s2l_cfg[2, 3]:.6f}]")
+                                print(f"    rotation (3x3):")
+                                for row_idx in range(3):
+                                    print(f"      [{T_s2l_cfg[row_idx, 0]:9.6f}, {T_s2l_cfg[row_idx, 1]:9.6f}, {T_s2l_cfg[row_idx, 2]:9.6f}]")
+                                
+                                # 计算差异
+                                if configs and s2l_bag is not None:
+                                    pos_diff = np.linalg.norm(T_s2l_cfg[:3, 3] - s2l_bag[:3, 3])
+                                    rot_diff = np.linalg.norm(T_s2l_cfg[:3, :3] - s2l_bag[:3, :3], 'fro')
+                                    print(f"\n  【GAP】sensor_to_lidar:")
+                                    print(f"    位置差异 (L2 norm): {pos_diff:.6f} m")
+                                    print(f"    旋转差异 (Frobenius norm): {rot_diff:.6f}")
+                                    print(f"    位置分量差异: [{T_s2l_cfg[0,3]-s2l_bag[0,3]:.6f}, {T_s2l_cfg[1,3]-s2l_bag[1,3]:.6f}, {T_s2l_cfg[2,3]-s2l_bag[2,3]:.6f}]")
                 
                 # ✅ 新增：Decombine处理（对齐C++ DecombineProtoPointCloud）
                 if apply_decombine and frame_id and frame_id != 'lidar_uncalibrated' and lidar_configs:
@@ -2610,7 +2739,7 @@ class BEVCalibDatasetPreparer:
                                 self.vehicle_to_sensing_from_bag = v2s
                                 print(f"✓ 从bag点云消息中提取到 vehicle_to_sensing")
                         
-                        points = PointCloudParser.parse_proto_pointcloud2(data)
+                        points = PointCloudParser.parse_proto_pointcloud2(data, config_for_comparison=self.lidar_config)
                         if points is not None and points.shape[0] >= 50:
                             # 使用bag_hash+局部计数器作为文件名，避免冲突
                             filename = f"{bag_hash}_{local_pc_count:06d}.bin"
@@ -2715,7 +2844,7 @@ class BEVCalibDatasetPreparer:
                                 print(f"✓ 从bag点云消息中提取到 vehicle_to_sensing")
                                 print(f"   (C++命名: T_vehicle_to_sensing = Sensing→Vehicle)")
                         
-                        points = PointCloudParser.parse_proto_pointcloud2(data)
+                        points = PointCloudParser.parse_proto_pointcloud2(data, config_for_comparison=self.lidar_config)
                         if points is not None and points.shape[0] >= 50:
                             pc_buffer.append((ts_sec, points))
                             # ✅ 内存优化：点云数据更大，更频繁地保存
@@ -3708,25 +3837,25 @@ class BEVCalibDatasetPreparer:
         print(f"  保存效率: {len(synced_pairs) / save_time:.2f} 帧/秒")
     
     def _save_calib_file(self, seq_dir: Path):
-        """保存标定文件（与C++实现一致）
+        """保存标定文件（符合KITTI标准格式）
         
         参考：
-        - manual_sensor_calib.cpp: lidar_cam_fusion_manual()
+        - KITTI Odometry 数据集格式规范
         - 坐标系文档：P_A = T^A_B * P_B
         
-        **与C++一致的坐标系**：
+        **KITTI标准格式**：
         - 点云在Sensing系（去畸变后）
-        - Tr矩阵：**Sensing → Camera**（将Sensing系点云变换到Camera坐标系）
+        - Tr矩阵：**Camera → Sensing**（从相机指向传感器的变换）
         
         **坐标变换链**：
         - 点云在Sensing系：P_sensing（去畸变后）
-        - 变换到Camera系：P_camera = T_sensing_to_camera * P_sensing
+        - KITTI的Tr是反向变换：Tr = Camera → Sensing
+        - 使用时需要取逆：P_camera = inv(Tr) * P_sensing
         - 投影到图像：p = K * P_camera（P_camera.z > 0时可见）
         
-        **关键修复**：
-        - 点云保持在Sensing系（与C++一致）
-        - Tr矩阵是 Sensing→Camera（与C++一致）
-        - 可以直接使用 kitti_dataset.py，无需 custom_dataset.py
+        **重要**：
+        - 为了与KITTI标准格式兼容，这里写入 Camera→Sensing（Tr的逆矩阵）
+        - 这样 kitti_dataset.py 和 custom_dataset.py 可以使用相同的加载逻辑
         """
         calib_path = seq_dir / 'calib.txt'
         
@@ -3734,11 +3863,10 @@ class BEVCalibDatasetPreparer:
         P2 = np.zeros((3, 4))
         P2[:3, :3] = self.K
         
-        # Tr: Sensing到Camera的变换矩阵（Sensing → Camera）
-        # C++命名约定：T_camera_to_sensing（从右往左读：Sensing → Camera）
-        # 注意：这里使用 T_camera_to_sensing，它是 Sensing→Camera 变换
-        T_sensing_to_cam = self.T_camera_to_sensing  # Sensing → Camera
-        T_sensing_to_cam_3x4 = T_sensing_to_cam[:3, :]  # 只取前3行（KITTI标准：3x4矩阵）
+        # Tr: Camera到Sensing的变换矩阵（Camera → Sensing）符合KITTI标准
+        # self.T_camera_to_sensing 是 Sensing→Camera，需要取逆得到 Camera→Sensing
+        T_sensing_to_cam = np.linalg.inv(self.T_camera_to_sensing)  # Camera → Sensing (KITTI标准)
+        Tr_3x4 = T_sensing_to_cam[:3, :]  # 只取前3行（KITTI标准：3x4矩阵）
         
         # D: 畸变系数（参考C++实现，投影时需要）
         # 支持两种模型：
@@ -3773,9 +3901,9 @@ class BEVCalibDatasetPreparer:
                 f.write(" ".join([f"{val:.12e}" for val in P2.flatten()]))
                 f.write("\n")
             
-            # Tr: 3x4矩阵（12个数）- Sensing → Camera
+            # Tr: 3x4矩阵（12个数）- Camera → Sensing (KITTI标准格式)
             f.write("Tr: ")
-            f.write(" ".join([f"{val:.12e}" for val in T_sensing_to_cam_3x4.flatten()]))
+            f.write(" ".join([f"{val:.12e}" for val in Tr_3x4.flatten()]))
             f.write("\n")
             
             # D: 畸变系数
@@ -3789,9 +3917,9 @@ class BEVCalibDatasetPreparer:
             # 保存相机模型类型（用于投影时选择正确的去畸变方法）
             f.write(f"camera_model: {model_type}\n")
         
-        print(f"标定文件已保存: {calib_path} (与C++一致 + 畸变系数)")
-        print(f"  ✓ 点云坐标系: Sensing系（与C++一致）")
-        print(f"  ✓ 投影变换: Tr (Sensing→Camera)")
+        print(f"标定文件已保存: {calib_path} (KITTI标准格式 + 畸变系数)")
+        print(f"  ✓ 点云坐标系: Sensing系")
+        print(f"  ✓ 投影变换: Tr (Camera→Sensing, KITTI标准)")
         
         # 根据模型类型打印畸变系数
         if model_type == 'fisheye':
