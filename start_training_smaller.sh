@@ -11,7 +11,7 @@ set -e
 VERSION=${1:-v1}
 
 # 数据集路径
-DATASET=${DATASET:-/mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data}
+DATASET=${DATASET:-/mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix}
 
 # 检查数据集是否存在
 if [ ! -d "$DATASET" ]; then
@@ -47,18 +47,18 @@ conda activate bevcalib
 echo "启动训练..."
 echo ""
 
-# 训练1: 小扰动 (10°, 0.5m) - GPU 0
-echo "[GPU 0] 小扰动训练 (10°, 0.5m)..."
+# 训练1: 小扰动 (3°, 0.1m) - GPU 0
+echo "[GPU 0] 小扰动训练 (3°, 0.1m)..."
 nohup bash train_B26A.sh scratch \
     --dataset_root $DATASET \
     --cuda_device 0 \
-    --angle_range_deg 10 \
-    --trans_range 0.5 \
-    --log_suffix small_10deg_${VERSION} \
+    --angle_range_deg 3 \
+    --trans_range 0.1 \
+    --log_suffix small_3deg_${VERSION} \
     &
 PID1=$!
 echo "  PID: $PID1"
-echo "  日志: ./logs/B26A_model_small_10deg_${VERSION}/train.log"
+echo "  日志: ./logs/B26A_model_small_3deg_${VERSION}/train.log"
 
 sleep 2
 
@@ -75,19 +75,6 @@ PID2=$!
 echo "  PID: $PID2"
 echo "  日志: ./logs/B26A_model_small_5deg_${VERSION}/train.log"
 
-# # 训练2: 标准扰动 (20°, 1.5m) - GPU 1
-# echo "[GPU 1] 标准扰动训练 (20°, 1.5m)..."
-# nohup bash train_B26A.sh scratch \
-#     --dataset_root $DATASET \
-#     --cuda_device 1 \
-#     --angle_range_deg 20 \
-#     --trans_range 1.5 \
-#     --log_suffix standard_20deg_${VERSION} \
-#     &
-# PID2=$!
-# echo "  PID: $PID2"
-# echo "  日志: ./logs/B26A_model_standard_20deg_${VERSION}/train.log"
-
 echo ""
 echo "========================================"
 echo "✅ 所有训练已启动"
@@ -102,7 +89,7 @@ echo "  nvidia-smi"
 echo "  ps aux | grep train_kitti"
 echo ""
 echo "查看日志:"
-echo "  tail -f ./logs/B26A_model_small_10deg_${VERSION}/train.log"
+echo "  tail -f ./logs/B26A_model_small_3deg_${VERSION}/train.log"
 echo "  tail -f ./logs/B26A_model_small_5deg_${VERSION}/train.log"
 echo ""
 echo "停止训练:"

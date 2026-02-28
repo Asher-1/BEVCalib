@@ -75,6 +75,8 @@ class CustomDataset(Dataset):
         self.dataset_root = data_folder
         self.K = {}
         self.T = {}
+        self.D = {}  # 畸变系数
+        self.camera_model = {}  # 相机模型类型 (pinhole/fisheye)
         
         # 确定要使用的序列
         if sequences is not None:
@@ -95,12 +97,19 @@ class CustomDataset(Dataset):
             try:
                 odom = odometry(data_folder, seq)
                 calib = odom.calib
-                # 注意: pykitti的T_cam2_velo实际上是 velo->cam 的变换矩阵
-                # 变换点云到相机坐标系: P_cam = T_cam2_velo @ P_velo
-                # 不需要取逆！
-                T_velo_to_cam = calib.T_cam2_velo
+                # 注意: 自定义数据集现在符合KITTI标准格式
+                # pykitti读取的T_cam2_velo实际上是 calib.txt 中的 Tr 矩阵
+                # KITTI标准：Tr = Camera → Velodyne，使用时需要取逆得到 Velodyne → Camera
+                T_cam_to_sensing = calib.T_cam2_velo  # Camera → Sensing
+                T_sensing_to_cam = np.linalg.inv(T_cam_to_sensing)  # Sensing → Camera (取逆)
                 self.K[seq] = calib.K_cam2
-                self.T[seq] = T_velo_to_cam
+                self.T[seq] = T_sensing_to_cam  # 存储 Sensing → Camera
+                
+                # 解析畸变系数D和相机模型（pykitti不支持这些扩展字段）
+                calib_path = os.path.join(self.dataset_root, 'sequences', seq, 'calib.txt')
+                D, camera_model = self._parse_distortion_from_calib(calib_path)
+                self.D[seq] = D
+                self.camera_model[seq] = camera_model
                 
                 image_list = os.listdir(os.path.join(self.dataset_root, 'sequences', seq, 'image_2'))
                 image_list.sort()
@@ -154,6 +163,38 @@ class CustomDataset(Dataset):
         
         sequences.sort()
         return sequences
+    
+    def _parse_distortion_from_calib(self, calib_path):
+        """
+        从calib.txt解析畸变系数D和相机模型类型
+        
+        Args:
+            calib_path: calib.txt文件路径
+        
+        Returns:
+            D: 畸变系数数组 (5,) 或 None
+            camera_model: 'pinhole' 或 'fisheye'
+        """
+        D = None
+        camera_model = 'pinhole'  # 默认针孔模型
+        
+        if not os.path.exists(calib_path):
+            return D, camera_model
+        
+        try:
+            with open(calib_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('D:'):
+                        # 解析畸变系数: D: k1 k2 p1 p2 k3
+                        values = line.split(':')[1].strip().split()
+                        D = np.array([float(v) for v in values], dtype=np.float64)
+                    elif line.startswith('camera_model:'):
+                        camera_model = line.split(':')[1].strip()
+        except Exception as e:
+            print(f"[CustomDataset] 警告: 无法解析畸变系数: {e}")
+        
+        return D, camera_model
 
     def __len__(self):
         return len(self.all_files)
@@ -167,7 +208,7 @@ class CustomDataset(Dataset):
             print('File not exist')
             assert False
         img = Image.open(img_path)
-        img.resize((1242, 375))
+        # 注意: 不在这里resize图像，resize在collate_fn中进行，同时调整内参K
         pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)
         
         # 记录原始点云数量
@@ -209,27 +250,19 @@ class CustomDataset(Dataset):
                            (pcd[:, 1] >= self.y_min) & (pcd[:, 1] <= self.y_max)
             pcd = pcd[range_filter, :]
             
-            # 如果仍然太少，创建一个虚拟点云（避免训练崩溃）
+            # 如果仍然太少，return None
             if len(pcd) < 10:
                 if track_stats:
                     self.utilization_stats['null_frames'] += 1
-                print(f"⚠️ 帧 {seq}/{id} 是异常帧（去畸变可能失败），使用虚拟点云")
-                # 创建一个小的虚拟点云，位于原点附近
-                x_center = (self.x_min + self.x_max) / 2
-                pcd = np.array([
-                    [x_center + 10.0, 0.0, 0.0, 0.0],
-                    [x_center + 20.0, 0.0, 0.0, 0.0],
-                    [x_center + 30.0, 0.0, 0.0, 0.0],
-                    [x_center + 40.0, 0.0, 0.0, 0.0],
-                    [x_center + 50.0, 0.0, 0.0, 0.0],
-                ], dtype=np.float32)
+                return None
         
         if track_stats:
             self.utilization_stats['valid_frames'] += 1
         
         gt_transform = self.T[seq]
         intrinsic = self.K[seq]
-        return img, pcd, gt_transform, intrinsic
+        distortion = self.D.get(seq, None)  # 畸变系数，可能为None
+        return img, pcd, gt_transform, intrinsic, distortion
     
     def validate_data_utilization(self, sample_ratio=0.1, min_utilization=0.3, min_valid_ratio=0.9, verbose=True):
         """
@@ -348,7 +381,7 @@ if __name__ == "__main__":
     
     # 测试加载第一个样本
     print("\n测试加载样本...")
-    img, pcd, gt_transform, intrinsic = dataset[0]
+    img, pcd, gt_transform, intrinsic, distortion = dataset[0]
     
     print(f"图像尺寸: {img.size}")
     print(f"点云形状: {pcd.shape}")

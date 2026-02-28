@@ -152,7 +152,7 @@ class realworld_loss(nn.Module):
 
         ret = {
             "total_loss" : loss,
-            "translation_loss" : real_trans_loss, # l1, m
+            "translation_loss" : real_trans_loss, # l2, m
             "rotation_loss" : rotation_loss / torch.pi * 180.0, # degree
             "quat_norm_loss" : quat_norm_loss, 
             "PC_reproj_loss" : PC_reproj_loss,

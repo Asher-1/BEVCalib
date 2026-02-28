@@ -264,7 +264,7 @@ case $MODE in
             --log_dir "$LOG_DIR" \
             --dataset_root "$DATASET_ROOT" \
             --label B26A_scratch \
-            --batch_size 8 \
+            --batch_size 16 \
             --num_epochs 500 \
             --save_ckpt_per_epoches 40 \
             --angle_range_deg $ANGLE_RANGE_DEG \
@@ -374,9 +374,9 @@ echo "Available checkpoints:"
 echo "  ls $LOG_DIR/checkpoint/"
 echo ""
 echo "Quick inference example:"
-LATEST_CKPT=\$(ls -t $LOG_DIR/checkpoint/ckpt_*.pth 2>/dev/null | head -1)
-if [ -n "\$LATEST_CKPT" ]; then
+LATEST_CKPT=$(ls -t $LOG_DIR/checkpoint/ckpt_*.pth 2>/dev/null | head -1)
+if [ -n "$LATEST_CKPT" ]; then
     echo "  python kitti-bev-calib/inference_kitti.py \\"
     echo "    --dataset_root $DATASET_ROOT \\"
-    echo "    --ckpt_path \$LATEST_CKPT"
+    echo "    --ckpt_path $LATEST_CKPT"
 fi

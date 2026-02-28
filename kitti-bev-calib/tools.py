@@ -8,10 +8,11 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5):
 
     Parameters:
         T: np.ndarray, shape (B, 4, 4)
-           Original homogeneous transformation matrices. The upper left (3x3) sub-matrix is the rotation matrix, 
+           Original homogeneous transformation matrices (LiDAR/Sensing → Camera).
+           The upper left (3x3) sub-matrix is the rotation matrix, 
            the first 3 elements of the last column are the translation vector, and the last row should be [0, 0, 0, 1].
         angle_range_deg: float, the range of the rotation perturbation in degrees (absolute value)
-        trans_range: float, the range of translation perturbation (each coordinate will be perturbed within [-trans_range, trans_range])
+        trans_range: float, the range of translation perturbation (in meters)
     """
     B = T.shape[0]
     T_new = []
@@ -35,12 +36,12 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5):
         # Apply the perturbation (right multiply) to the original rotation
         new_rot = delta_rot * orig_rot
 
-        # Generate translation perturbation with exact magnitude of trans_range
-        # First generate a random direction vector
+        # Generate translation perturbation
+        # Random direction vector
         rand_direction = np.random.randn(3)
         # Normalize it
         rand_direction = rand_direction / np.linalg.norm(rand_direction)
-        # Scale it to have magnitude of trans_range
+        # Random magnitude within [0, trans_range]
         delta_trans_magnitude = np.random.uniform(0, trans_range)
         delta_trans = rand_direction * delta_trans_magnitude
         # Apply the perturbation

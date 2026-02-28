@@ -52,17 +52,40 @@ def parse_args():
     parser.add_argument("--validate_sample_ratio", type=float, default=0.1, help="数据验证采样比例 (0.0-1.0)")
     parser.add_argument("--min_point_utilization", type=float, default=0.5, help="最低点云利用率阈值 (0.0-1.0)")
     parser.add_argument("--min_valid_ratio", type=float, default=0.9, help="最低有效帧比例阈值 (0.0-1.0)")
-    parser.add_argument("--force_train", type=int, default=0, help="即使数据验证失败也强制训练 (1=强制, 0=退出)")
     # 可视化参数
-    parser.add_argument("--vis_freq", type=int, default=50, help="训练可视化频率 (每多少个batch可视化一次)")
-    parser.add_argument("--vis_samples", type=int, default=2, help="每次可视化的样本数")
+    parser.add_argument("--vis_freq", type=int, default=40, help="训练可视化频率 (每多少个batch可视化一次)")
+    parser.add_argument("--vis_samples", type=int, default=3, help="每次可视化的样本数")
     parser.add_argument("--vis_points", type=int, default=80000, help="每个样本最大可视化点数")
-    parser.add_argument("--vis_point_radius", type=int, default=2, help="可视化点的半径")
+    parser.add_argument("--vis_point_radius", type=int, default=1, help="可视化点的半径")
     parser.add_argument("--enable_vis", type=int, default=1, help="是否启用点云投影可视化 (1=启用, 0=禁用)")
+    parser.add_argument("--enable_ckpt_eval", type=int, default=1, help="是否在保存checkpoint时进行评估 (1=启用, 0=禁用)")
     return parser.parse_args()
 
-def crop_and_resize(item, size, intrinsics, crop=True):
+def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
+    """
+    图像预处理: 缩放 → 更新内参
+    
+    注意: 不再应用cv2.undistort，因为B26A等相机管线输出的图像已经是去畸变的。
+    诊断验证: 对已去畸变图像再次undistort会引入最大~9px偏移(640x360)，
+    导致GT投影与图像不对齐。
+    
+    Args:
+        item: PIL Image 或 numpy array
+        size: (width, height) 目标尺寸
+        intrinsics: (3, 3) 原始相机内参矩阵
+        crop: 是否裁剪中间区域
+        distortion: 畸变系数 (保留参数但不使用)
+    
+    Returns:
+        resized: (H, W, 3) BGR图像
+        new_intrinsics: (3, 3) 调整后的内参矩阵
+    """
     img = cv2.cvtColor(np.array(item), cv2.COLOR_RGB2BGR)
+    
+    # 注意: 不对图像做去畸变处理
+    # B26A相机管线输出的图像已经过去畸变校正，calib.txt中的D系数是原始镜头畸变参数(仅供参考)
+    # 诊断结果: 二次undistort/一次undistort差异比=0.971，证实图像已去畸变
+    
     h, w = img.shape[:2]
     if crop:
         mid_width = w // 2
@@ -132,13 +155,20 @@ def make_collate_fn(target_size):
     
     Returns:
         collate_fn 函数
+    
+    Note:
+        数据集返回: (img, pcd, gt_transform, intrinsic, distortion)
+        distortion 用于去畸变图像
     """
     def collate_fn(batch):
-        processed_data = [crop_and_resize(item[0], target_size, item[3], False) for item in batch]
+        # item结构: (img, pcd, gt_transform, intrinsic, distortion)
+        # 去畸变 + 缩放在 crop_and_resize 中完成
+        processed_data = [crop_and_resize(item[0], target_size, item[3], False, item[4]) for item in batch]
         imgs = [item[0] for item in processed_data]
         intrinsics = [item[1] for item in processed_data]
 
         gt_T_to_camera = [item[2] for item in batch]
+        
         pcs = []
         masks = []
         max_num_points = 0
@@ -166,11 +196,9 @@ def main():
     else:
         current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
         log_dir = f"{log_dir}/{current_time}"
-    model_save_dir = os.path.join(log_dir, "model")
     ckpt_save_dir = os.path.join(log_dir, "checkpoint")
-    os.makedirs(ckpt_save_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(model_save_dir, exist_ok=True)
+    os.makedirs(ckpt_save_dir, exist_ok=True)
     
     # 复制源代码到日志目录（排除logs目录避免无限递归）
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -223,16 +251,12 @@ def main():
         print(f"验证结果已保存到: {validation_log_path}")
         
         if not validation_result['passed']:
-            if args.force_train > 0:
-                print("\n⚠️ 警告: 数据利用率验证未通过，但 --force_train=1，继续训练...")
-            else:
-                print("\n❌ 错误: 数据利用率验证未通过，退出训练！")
-                print("   可以通过以下方式解决：")
-                print("   1. 检查 bev_settings.py 中的体素化范围配置是否与数据集匹配")
-                print("   2. 调整 --min_point_utilization 或 --min_valid_ratio 阈值")
-                print("   3. 使用 --force_train=1 强制训练（不推荐）")
-                print("   4. 使用 --validate_data=0 跳过验证（不推荐）")
-                exit(1)
+            print("\n❌ 错误: 数据利用率验证未通过，退出训练！")
+            print("   可以通过以下方式解决：")
+            print("   1. 检查 bev_settings.py 中的体素化范围配置是否与数据集匹配")
+            print("   2. 调整 --min_point_utilization 或 --min_valid_ratio 阈值")
+            print("   4. 使用 --validate_data=0 跳过验证（不推荐）")
+            exit(1)
     else:
         print("\n⚠️ 跳过数据利用率校验 (--validate_data=0)")
 
@@ -318,7 +342,7 @@ def main():
     
     # 累积误差统计
     epoch_pose_errors = {
-        'trans_error': 0, 'x_error': 0, 'y_error': 0, 'z_error': 0,
+        'trans_error': 0, 'fwd_error': 0, 'lat_error': 0, 'ht_error': 0,
         'rot_error': 0, 'roll_error': 0, 'pitch_error': 0, 'yaw_error': 0,
     }
     
@@ -375,7 +399,8 @@ def main():
 
             if batch_index % 10 == 0:
                 print(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], Loss: {total_loss.item():.4f}, "
-                      f"Trans: {batch_errors['trans_error']:.4f}m, Rot: {batch_errors['rot_error']:.2f}°")
+                      f"Trans: {batch_errors['trans_error']:.4f}m (Fwd:{batch_errors['fwd_error']:.4f} Lat:{batch_errors['lat_error']:.4f} Ht:{batch_errors['ht_error']:.4f}), "
+                      f"Rot: {batch_errors['rot_error']:.2f}°")
             
             # TensorBoard 可视化
             if args.enable_vis > 0 and batch_index % args.vis_freq == 0:
@@ -409,9 +434,9 @@ def main():
                     
                     # 记录当前batch的详细误差
                     writer.add_scalar('Train/PoseError/trans_error_m', batch_errors['trans_error'], global_step)
-                    writer.add_scalar('Train/PoseError/x_error_m', batch_errors['x_error'], global_step)
-                    writer.add_scalar('Train/PoseError/y_error_m', batch_errors['y_error'], global_step)
-                    writer.add_scalar('Train/PoseError/z_error_m', batch_errors['z_error'], global_step)
+                    writer.add_scalar('Train/PoseError/fwd_error_m', batch_errors['fwd_error'], global_step)
+                    writer.add_scalar('Train/PoseError/lat_error_m', batch_errors['lat_error'], global_step)
+                    writer.add_scalar('Train/PoseError/ht_error_m', batch_errors['ht_error'], global_step)
                     writer.add_scalar('Train/PoseError/rot_error_deg', batch_errors['rot_error'], global_step)
                     writer.add_scalar('Train/PoseError/roll_error_deg', batch_errors['roll_error'], global_step)
                     writer.add_scalar('Train/PoseError/pitch_error_deg', batch_errors['pitch_error'], global_step)
@@ -431,14 +456,16 @@ def main():
         for key in epoch_pose_errors:
             epoch_pose_errors[key] /= len(train_loader)
         
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Pose Error - Trans: {epoch_pose_errors['trans_error']:.4f}m "
-              f"(X:{epoch_pose_errors['x_error']:.4f} Y:{epoch_pose_errors['y_error']:.4f} Z:{epoch_pose_errors['z_error']:.4f}), "
-              f"Rot: {epoch_pose_errors['rot_error']:.2f}° (R:{epoch_pose_errors['roll_error']:.2f} P:{epoch_pose_errors['pitch_error']:.2f} Y:{epoch_pose_errors['yaw_error']:.2f})")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Pose Error - "
+              f"Trans: {epoch_pose_errors['trans_error']:.4f}m "
+              f"(Fwd:{epoch_pose_errors['fwd_error']:.4f} Lat:{epoch_pose_errors['lat_error']:.4f} Ht:{epoch_pose_errors['ht_error']:.4f}), "
+              f"Rot: {epoch_pose_errors['rot_error']:.2f}° "
+              f"(R:{epoch_pose_errors['roll_error']:.2f} P:{epoch_pose_errors['pitch_error']:.2f} Y:{epoch_pose_errors['yaw_error']:.2f})")
         
         writer.add_scalar('Epoch/train/trans_error_m', epoch_pose_errors['trans_error'], epoch)
-        writer.add_scalar('Epoch/train/x_error_m', epoch_pose_errors['x_error'], epoch)
-        writer.add_scalar('Epoch/train/y_error_m', epoch_pose_errors['y_error'], epoch)
-        writer.add_scalar('Epoch/train/z_error_m', epoch_pose_errors['z_error'], epoch)
+        writer.add_scalar('Epoch/train/fwd_error_m', epoch_pose_errors['fwd_error'], epoch)
+        writer.add_scalar('Epoch/train/lat_error_m', epoch_pose_errors['lat_error'], epoch)
+        writer.add_scalar('Epoch/train/ht_error_m', epoch_pose_errors['ht_error'], epoch)
         writer.add_scalar('Epoch/train/rot_error_deg', epoch_pose_errors['rot_error'], epoch)
         writer.add_scalar('Epoch/train/roll_error_deg', epoch_pose_errors['roll_error'], epoch)
         writer.add_scalar('Epoch/train/pitch_error_deg', epoch_pose_errors['pitch_error'], epoch)
@@ -456,6 +483,150 @@ def main():
                 'args': vars(args) 
             }, ckpt_path)
             print(f"Checkpoint saved to {ckpt_path}")
+            
+            # 保存checkpoint对应的推理结果和可视化（使用验证集）
+            if args.enable_ckpt_eval > 0:
+                ckpt_eval_dir = os.path.join(ckpt_save_dir, f"ckpt_{epoch+1}_eval")
+                os.makedirs(ckpt_eval_dir, exist_ok=True)
+                
+                print(f"Evaluating checkpoint {epoch+1} on validation set and saving visualization to {ckpt_eval_dir}...")
+                model.eval()
+                
+                # 使用验证集的噪声范围
+                eval_trans_range = eval_noise["trans_range"]
+                eval_angle_range = eval_noise["angle_range_deg"]
+                
+                # 创建外参结果文件
+                extrinsics_file = os.path.join(ckpt_eval_dir, "extrinsics_and_errors.txt")
+                
+                # 累积误差统计
+                all_errors = {
+                    'trans_error': [], 'fwd_error': [], 'lat_error': [], 'ht_error': [],
+                    'rot_error': [], 'roll_error': [], 'pitch_error': [], 'yaw_error': []
+                }
+                gt_extrinsics_written = False
+                
+                sample_count = 0
+                with torch.no_grad():
+                    for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(val_loader):
+                        # 只评估前几个batch（避免太多样本）
+                        if batch_index >= 5:  # 最多评估5个batch
+                            break
+                        
+                        gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
+                        init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
+                            gt_T_to_camera_np, 
+                            angle_range_deg=eval_angle_range, 
+                            trans_range=eval_trans_range
+                        )
+                        
+                        resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+                        if xyz_only_choise:
+                            pcs_np = np.array(pcs)[:, :, :3]
+                        else:
+                            pcs_np = np.array(pcs)
+                        pcs = torch.from_numpy(pcs_np).float().to(device)
+                        gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device)
+                        init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device)
+                        post_cam2ego_T = torch.eye(4).unsqueeze(0).repeat(gt_T_to_camera.shape[0], 1, 1).float().to(device)
+                        intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device)
+                        
+                        T_pred, _, _ = model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+                        
+                        imgs_np = np.array(imgs)
+                        masks_np = np.array(masks)
+                        T_pred_np = T_pred.detach().cpu().numpy()
+                        
+                        # 为每个样本生成可视化和保存外参
+                        for i in range(len(imgs_np)):
+                            sample_idx = sample_count + i
+                            
+                            # 生成单样本可视化
+                            vis_image = visualize_batch_projection(
+                                images=imgs_np[i:i+1],
+                                points_batch=pcs_np[i:i+1],
+                                init_T_batch=init_T_to_camera_np[i:i+1],
+                                gt_T_batch=gt_T_to_camera_np[i:i+1],
+                                pred_T_batch=T_pred_np[i:i+1],
+                                K_batch=np.array(intrinsics)[i:i+1],
+                                masks=masks_np[i:i+1],
+                                num_samples=1,
+                                max_points=args.vis_points,
+                                point_radius=args.vis_point_radius
+                            )
+                            
+                            # 保存可视化图像
+                            vis_image_path = os.path.join(ckpt_eval_dir, f"sample_{sample_idx:04d}_projection.png")
+                            cv2.imwrite(vis_image_path, vis_image)
+                            
+                            # 计算误差
+                            errors = compute_pose_errors(T_pred_np[i], gt_T_to_camera_np[i])
+                            
+                            # 累积误差
+                            for key in all_errors:
+                                all_errors[key].append(errors[key])
+                            
+                            # 保存外参和误差信息
+                            with open(extrinsics_file, 'a') as f:
+                                # 只在第一次写入文件头和 GT
+                                if not gt_extrinsics_written:
+                                    f.write(f"Checkpoint: epoch_{epoch+1}\n")
+                                    f.write(f"Evaluation on validation set (perturbation: {eval_angle_range}deg, {eval_trans_range}m)\n")
+                                    f.write(f"="*80 + "\n\n")
+                                    
+                                    f.write("Ground Truth Extrinsics (LiDAR → Camera):\n")
+                                    for row in gt_T_to_camera_np[i]:
+                                        f.write(f"  {row[0]:10.6f} {row[1]:10.6f} {row[2]:10.6f} {row[3]:10.6f}\n")
+                                    f.write("\n" + "="*80 + "\n\n")
+                                    gt_extrinsics_written = True
+                                
+                                f.write(f"Sample {sample_idx:04d}\n")
+                                f.write("-" * 80 + "\n")
+                                
+                                f.write("\nPredicted Extrinsics (LiDAR → Camera):\n")
+                                for row in T_pred_np[i]:
+                                    f.write(f"  {row[0]:10.6f} {row[1]:10.6f} {row[2]:10.6f} {row[3]:10.6f}\n")
+                                
+                                f.write("\nTranslation Errors (in LiDAR coordinate system):\n")
+                                f.write(f"  Total:   {errors['trans_error']:.6f} m\n")
+                                f.write(f"  X (Fwd): {errors['fwd_error']:.6f} m\n")
+                                f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
+                                f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
+                                
+                                f.write("\nRotation Errors (axis-angle):\n")
+                                f.write(f"  Total:       {errors['rot_error']:.6f} deg\n")
+                                f.write(f"  Roll (X):    {errors['roll_error']:.6f} deg\n")
+                                f.write(f"  Pitch (Y):   {errors['pitch_error']:.6f} deg\n")
+                                f.write(f"  Yaw (Z):     {errors['yaw_error']:.6f} deg\n")
+                                
+                                f.write("\n" + "="*80 + "\n\n")
+                        
+                        sample_count += len(imgs_np)
+                
+                # 写入平均误差统计
+                with open(extrinsics_file, 'a') as f:
+                    f.write("\n" + "="*80 + "\n")
+                    f.write("AVERAGE ERRORS ACROSS ALL SAMPLES\n")
+                    f.write("="*80 + "\n\n")
+                    f.write(f"Total samples evaluated: {sample_count}\n\n")
+                    
+                    avg_errors = {key: np.mean(values) for key, values in all_errors.items()}
+                    std_errors = {key: np.std(values) for key, values in all_errors.items()}
+                    
+                    f.write("Average Translation Errors (in LiDAR coordinate system):\n")
+                    f.write(f"  Total:   {avg_errors['trans_error']:.6f} ± {std_errors['trans_error']:.6f} m\n")
+                    f.write(f"  X (Fwd): {avg_errors['fwd_error']:.6f} ± {std_errors['fwd_error']:.6f} m\n")
+                    f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
+                    f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
+                    
+                    f.write("\nAverage Rotation Errors (axis-angle):\n")
+                    f.write(f"  Total:       {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
+                    f.write(f"  Roll (X):    {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
+                    f.write(f"  Pitch (Y):   {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
+                    f.write(f"  Yaw (Z):     {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
+                    f.write("\n" + "="*80 + "\n")
+                
+                print(f"Checkpoint evaluation complete: {sample_count} samples saved to {ckpt_eval_dir}")
 
         train_loss = None
         init_loss = None
@@ -467,7 +638,7 @@ def main():
             model.eval()
             val_loss = {}
             val_pose_errors = {
-                'trans_error': 0, 'x_error': 0, 'y_error': 0, 'z_error': 0,
+                'trans_error': 0, 'fwd_error': 0, 'lat_error': 0, 'ht_error': 0,
                 'rot_error': 0, 'roll_error': 0, 'pitch_error': 0, 'yaw_error': 0,
             }
             
@@ -538,14 +709,16 @@ def main():
             for key in val_pose_errors:
                 val_pose_errors[key] /= len(val_loader)
             
-            print(f"Epoch [{epoch+1}/{num_epochs}], Val Pose Error - Trans: {val_pose_errors['trans_error']:.4f}m "
-                  f"(X:{val_pose_errors['x_error']:.4f} Y:{val_pose_errors['y_error']:.4f} Z:{val_pose_errors['z_error']:.4f}), "
-                  f"Rot: {val_pose_errors['rot_error']:.2f}° (R:{val_pose_errors['roll_error']:.2f} P:{val_pose_errors['pitch_error']:.2f} Y:{val_pose_errors['yaw_error']:.2f})")
+            print(f"Epoch [{epoch+1}/{num_epochs}], Val Pose Error - "
+                  f"Trans: {val_pose_errors['trans_error']:.4f}m "
+                  f"(Fwd:{val_pose_errors['fwd_error']:.4f} Lat:{val_pose_errors['lat_error']:.4f} Ht:{val_pose_errors['ht_error']:.4f}), "
+                  f"Rot: {val_pose_errors['rot_error']:.2f}° "
+                  f"(R:{val_pose_errors['roll_error']:.2f} P:{val_pose_errors['pitch_error']:.2f} Y:{val_pose_errors['yaw_error']:.2f})")
             
             writer.add_scalar('Epoch/val/trans_error_m', val_pose_errors['trans_error'], epoch)
-            writer.add_scalar('Epoch/val/x_error_m', val_pose_errors['x_error'], epoch)
-            writer.add_scalar('Epoch/val/y_error_m', val_pose_errors['y_error'], epoch)
-            writer.add_scalar('Epoch/val/z_error_m', val_pose_errors['z_error'], epoch)
+            writer.add_scalar('Epoch/val/fwd_error_m', val_pose_errors['fwd_error'], epoch)
+            writer.add_scalar('Epoch/val/lat_error_m', val_pose_errors['lat_error'], epoch)
+            writer.add_scalar('Epoch/val/ht_error_m', val_pose_errors['ht_error'], epoch)
             writer.add_scalar('Epoch/val/rot_error_deg', val_pose_errors['rot_error'], epoch)
             writer.add_scalar('Epoch/val/roll_error_deg', val_pose_errors['roll_error'], epoch)
             writer.add_scalar('Epoch/val/pitch_error_deg', val_pose_errors['pitch_error'], epoch)

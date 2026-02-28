@@ -183,7 +183,7 @@ class BEVCalib(nn.Module):
 
         pc = pc.permute(0, 2, 1).contiguous() # (B, 3, N)
         pc_bev_feats = self.pc_branch(pc) # B, C, H, W
-        x = torch.cat([cam_bev_feats, pc_bev_feats], dim = 1)
+        # x = torch.cat([cam_bev_feats, pc_bev_feats], dim = 1)
         x = self.conv_fuser(cam_bev_feats, pc_bev_feats) # B, C, H, W
         if self.bev_encoder_use:
             x = self.bev_encoder(x) # B, C, H, W
