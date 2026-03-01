@@ -2,12 +2,47 @@
 
 本文档提供详细的训练参数说明和建议。
 
+> **📢 重要更新 (2026-03-01)**  
+> 训练脚本已重构！现在支持多数据集训练，日志按数据集分级组织。
+> 
+> **推荐使用新脚本**：
+> - 快速开始：`bash start_training.sh all v1`
+> - 详细配置：`bash train_universal.sh scratch --dataset_root /path/to/data`
+> 
+> **相关文档**：
+> - [README_TRAINING_SCRIPTS.md](README_TRAINING_SCRIPTS.md) - 新脚本使用说明（推荐首读）
+> - [QUICK_START_TRAINING.md](QUICK_START_TRAINING.md) - 快速开始指南
+> - [TRAINING_REFACTOR_SUMMARY.md](TRAINING_REFACTOR_SUMMARY.md) - 重构详细说明
+> 
+> 本文档保留了详细的参数调优指南，适合需要深入了解训练参数的用户。
+
 ---
 
 ## 📋 快速开始
 
-### KITTI 数据集训练
+### 推荐方式：使用新的训练脚本
+
 ```bash
+# 训练 all_training_data 数据集
+bash start_training.sh all v1
+
+# 训练 B26A 数据集
+bash start_training.sh B26A v1
+
+# 单个GPU训练，更多配置选项
+bash train_universal.sh scratch \
+    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data \
+    --cuda_device 0 \
+    --angle_range_deg 10 \
+    --trans_range 0.5
+```
+
+### 直接使用 Python 训练（高级用法）
+
+如果需要完全自定义配置，可以直接调用 Python 脚本：
+
+```bash
+# KITTI 数据集训练
 python kitti-bev-calib/train_kitti.py \
     --log_dir ./logs/kitti \
     --dataset_root /path/to/kitti-odometry \
@@ -15,13 +50,14 @@ python kitti-bev-calib/train_kitti.py \
     --num_epochs 500
 ```
 
-### 自定义数据集训练
 ```bash
+# 自定义数据集训练
 python kitti-bev-calib/train_kitti.py \
     --log_dir ./logs/custom_model \
-    --dataset_root /home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data \
+    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data \
     --batch_size 4 \
-    --num_epochs 100
+    --num_epochs 100 \
+    --use_custom_dataset 1
 ```
 
 ---
@@ -357,5 +393,62 @@ python kitti-bev-calib/train_kitti.py \
 
 ---
 
-**更新时间**: 2026-01-28  
-**版本**: v1.0
+## 🚀 使用新脚本的优势
+
+### 为什么推荐使用新脚本？
+
+**旧方式**（直接调用 Python）：
+```bash
+python kitti-bev-calib/train_kitti.py --dataset_root /path/to/data --log_dir ./logs/my_model --batch_size 8 ...
+```
+- ❌ 需要手动指定所有参数
+- ❌ 日志目录混乱
+- ❌ 切换数据集需要修改命令
+
+**新方式**（使用脚本）：
+```bash
+bash start_training.sh all v1
+```
+- ✅ 一行启动，自动配置
+- ✅ 日志按数据集分级组织
+- ✅ 支持多数据集，轻松切换
+- ✅ 内置参数验证和错误检查
+
+### 日志组织对比
+
+**旧方式**：
+```
+logs/
+├── my_model/
+├── another_model/
+├── test_model/
+└── ... (所有混在一起)
+```
+
+**新方式**：
+```
+logs/
+├── B26A/                    # 按数据集分级
+│   ├── model_small_10deg_v1/
+│   └── model_small_5deg_v1/
+├── all_training_data/
+│   ├── model_small_10deg_v1/
+│   └── model_small_5deg_v1/
+└── README.md
+```
+
+### 何时使用直接 Python 调用？
+
+仍然推荐直接调用 Python 的场景：
+- 需要非常特殊的参数组合
+- 在 Jupyter Notebook 中交互式训练
+- 自动化脚本中需要完全控制
+- 调试和开发新功能
+
+对于日常训练，**强烈推荐使用新脚本**。
+
+---
+
+**更新时间**: 2026-03-01（添加新脚本说明）  
+**原始版本**: v1.0 (2026-01-28)  
+**当前版本**: v1.1

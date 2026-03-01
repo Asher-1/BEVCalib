@@ -31,14 +31,13 @@ class LSS(nn.Module):
                  out_channels = 128,
                  ):
         super(LSS, self).__init__()
-        # 默认值保持向后兼容
         if transformedImgShape is None:
             transformedImgShape = (3, 256, 704)
         if featureShape is None:
             featureShape = (256, transformedImgShape[1] // 8, transformedImgShape[2] // 8)
-        _, self.orfH, self.orfW = transformedImgShape
-        self.fC, self.fH, self.fW = featureShape
-        self.d_st, self.d_end, self.d_step = d_conf
+        _, self.orfH, self.orfW = transformedImgShape # (3, 640, 360)
+        self.fC, self.fH, self.fW = featureShape # (256, 80, 45)
+        self.d_st, self.d_end, self.d_step = d_conf # (1, 100, 1)
         self.D = torch.arange(self.d_st, self.d_end, self.d_step, dtype = torch.float).shape[0]
         self.out_channels = out_channels
         self.frustum = self.create_frustum()
@@ -69,6 +68,7 @@ class LSS(nn.Module):
                      ):
         img_rots, img_trans, cam_intrins, img_post_rots, img_post_trans = cam2ego_rot, cam2ego_trans, cam_intrins, post_cam2ego_rot, post_cam2ego_trans
         B, N, _ = img_trans.shape
+        # restore data augmentation and convert to original image space
         points = self.frustum - img_post_trans.view(B, N, 1, 1, 1, 3) # (B, N, D, fH, fW, 3)
         points = torch.inverse(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
         # before : (B, N, D, fH, fW, (x, y, z), 1), image space
@@ -201,7 +201,7 @@ class GaussianLSS(nn.Module):
 class Cam2BEV(nn.Module):
     def __init__(self, 
                  output_indices = [1, 2, 3], 
-                 img_shape = None,             # (H, W) - 输入图像尺寸，动态传入
+                 img_shape = None, # (H, W) - 640x360
                  encoder_out_channels = 256,
                  FPN_in_channels = [192, 384, 768], 
                  FPN_out_channels = 256,
@@ -212,8 +212,8 @@ class Cam2BEV(nn.Module):
             img_shape = (256, 704)  # 默认值保持向后兼容 (H, W)
         
         img_H, img_W = img_shape
-        transformedImgShape = (3, img_H, img_W)
-        featureShape = (encoder_out_channels, img_H // 8, img_W // 8)
+        transformedImgShape = (3, img_H, img_W) # (3, 640, 360)
+        featureShape = (encoder_out_channels, img_H // 8, img_W // 8) # (256, 80, 45)
         
         print(f"[Cam2BEV] 输入图像尺寸: {img_W}x{img_H}, 特征尺寸: {featureShape[2]}x{featureShape[1]}")
         

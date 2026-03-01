@@ -28,6 +28,9 @@ import struct
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing as mp
+import matplotlib
+matplotlib.use('Agg')  # 使用无头后端，避免GUI依赖
+import matplotlib.pyplot as plt
 import time
 from datetime import timedelta
 
@@ -1264,6 +1267,25 @@ class PointCloudParser:
         return result
     
     @staticmethod
+    def _is_main_lidar(frame_id: str, main_lidar_suffix: str = "_202") -> bool:
+        """判断是否是主lidar
+        
+        Args:
+            frame_id: lidar的frame_id (如 "atx_202", "hesai_202", "robosense_202")
+            main_lidar_suffix: 主lidar的后缀标识（默认"_202"）
+        
+        Returns:
+            bool: 如果frame_id以main_lidar_suffix结尾，返回True
+        
+        示例:
+            _is_main_lidar("atx_202")        → True
+            _is_main_lidar("hesai_202")      → True
+            _is_main_lidar("robosense_202")  → True
+            _is_main_lidar("atx_203")        → False
+        """
+        return frame_id is not None and frame_id.endswith(main_lidar_suffix)
+    
+    @staticmethod
     def _parse_lidar_configs(data: bytes, main_lidar_frame_id: str = "atx_202") -> dict:
         """解析 LidarConfig 消息
         
@@ -1273,7 +1295,10 @@ class PointCloudParser:
         
         Args:
             data: protobuf消息bytes数据
-            main_lidar_frame_id: 主lidar的frame_id，只保留该lidar的配置（默认"atx_202"）
+            main_lidar_frame_id: 主lidar的标识，支持两种模式：
+                               - 精确匹配: "atx_202" (完整frame_id)
+                               - 后缀匹配: "_202" (以_开头，匹配所有_202结尾的lidar)
+                               默认"atx_202"（兼容旧版本）
         
         返回:
           {
@@ -1285,13 +1310,18 @@ class PointCloudParser:
           }
         
         注意：
-          如果存在多个lidar，只保留frame_id为main_lidar_frame_id的配置
+          如果存在多个lidar，只保留主lidar的配置
+          - 后缀模式: main_lidar_frame_id="_202" → 保留所有以_202结尾的lidar
+          - 精确模式: main_lidar_frame_id="atx_202" → 只保留atx_202
         """
         result = {
             'vehicle_to_sensing': None,
             'configs': []
         }
         pos = 0
+        
+        # 判断是后缀匹配还是精确匹配
+        is_suffix_mode = main_lidar_frame_id is not None and main_lidar_frame_id.startswith("_")
         
         while pos < len(data):
             tag, pos = PointCloudParser._decode_varint(data, pos)
@@ -1310,8 +1340,20 @@ class PointCloudParser:
                     result['vehicle_to_sensing'] = PointCloudParser._parse_transformation3(chunk)
                 elif field_num == 2:  # config (repeated)
                     config = PointCloudParser._parse_lidar_config_single(chunk)
+                    frame_id = config.get('frame_id')
+                    
                     # ✅ 过滤：只保留主lidar的配置
-                    if main_lidar_frame_id is None or config.get('frame_id') == main_lidar_frame_id:
+                    should_keep = False
+                    if main_lidar_frame_id is None:
+                        should_keep = True
+                    elif is_suffix_mode:
+                        # 后缀匹配模式: frame_id 以指定后缀结尾
+                        should_keep = PointCloudParser._is_main_lidar(frame_id, main_lidar_frame_id)
+                    else:
+                        # 精确匹配模式: frame_id 完全相同
+                        should_keep = (frame_id == main_lidar_frame_id)
+                    
+                    if should_keep:
                         result['configs'].append(config)
             elif wire == 0:  # Varint
                 _, pos = PointCloudParser._decode_varint(data, pos)
@@ -1334,13 +1376,18 @@ class PointCloudParser:
         
         Args:
             data: protobuf消息bytes数据
-            main_lidar_frame_id: 主lidar的frame_id，只保留该lidar的配置（默认"atx_202"）
+            main_lidar_frame_id: 主lidar的标识，支持两种模式：
+                               - 精确匹配: "atx_202" (完整frame_id)
+                               - 后缀匹配: "_202" (以_开头，匹配所有_202结尾的lidar)
+                               默认"atx_202"（兼容旧版本）
         
         ⚠️ 重要：lidar_configs (field 12) 通常在消息末尾（在data blob之后）
         
         返回: (frame_id, lidar_configs)
         
-        注意：如果存在多个lidar，只保留frame_id为main_lidar_frame_id的配置
+        注意：如果存在多个lidar，只保留主lidar的配置
+          - 后缀模式: main_lidar_frame_id="_202" → 保留所有以_202结尾的lidar
+          - 精确模式: main_lidar_frame_id="atx_202" → 只保留atx_202
         """
         frame_id = None
         lidar_configs = None
@@ -1787,7 +1834,10 @@ class PointCloudParser:
             apply_decombine: 是否应用decombine处理（如果点云在Sensing系，转回LiDAR系）
                            ⚠️ 默认False：本脚本中点云需要保持在Sensing系用于后续去畸变
                            ✅ 仅在需要原始LiDAR系点云时设置为True
-            main_lidar_frame_id: 主lidar的frame_id，只保留该lidar的配置（默认"atx_202"）
+            main_lidar_frame_id: 主lidar的标识，支持两种模式：
+                               - 精确匹配: "atx_202" (完整frame_id)
+                               - 后缀匹配: "_202" (以_开头，匹配所有_202结尾的lidar，如atx_202, hesai_202等)
+                               默认"atx_202"（兼容旧版本，精确匹配）
                                ⚠️ 如果存在多个lidar，只提取和使用主lidar的外参
                                ✅ 设置为None则保留所有lidar配置
             config_for_comparison: 从lidars.cfg读取的配置，用于与bag提取的配置进行对比
@@ -2216,6 +2266,103 @@ class BEVCalibDatasetPreparer:
             print(f"    orientation(quat): {pose0.orientation}")
         
         print(f"  ✓ 已转换 {len(self.pose_metadata)} 个位姿到Sensing系")
+    
+    def _generate_projection_visualization(self, points: np.ndarray, image: np.ndarray, 
+                                          output_path: Path, frame_idx: int, 
+                                          is_undistorted: bool = True) -> bool:
+        """生成点云投影到图像的可视化图
+        
+        Args:
+            points: (N, 4+) 点云数据 [x, y, z, intensity, ...]，在Sensing系
+            image: (H, W, 3) RGB图像
+            output_path: 输出文件路径
+            frame_idx: 帧索引
+            is_undistorted: 是否使用去畸变后的点云
+            
+        Returns:
+            bool: 是否成功生成
+        """
+        try:
+            # 投影矩阵: Camera内参
+            fx = self.camera_config['intrinsic']['f_x']
+            fy = self.camera_config['intrinsic']['f_y']
+            cx = self.camera_config['intrinsic']['c_x']
+            cy = self.camera_config['intrinsic']['c_y']
+            K = np.array([[fx, 0, cx],
+                         [0, fy, cy],
+                         [0,  0,  1]])
+            
+            # Tr矩阵: Camera→LiDAR的逆 = LiDAR→Camera
+            # 这里点云在Sensing系，需要先转到LiDAR系，再转到Camera系
+            # 但由于我们的 T_camera_to_lidar 是 LiDAR→Camera（在Sensing系的LiDAR）
+            # 点云已经在Sensing系，所以直接使用即可
+            Tr_inv = np.linalg.inv(self.T_camera_to_lidar)  # Camera→LiDAR
+            
+            # 转换点云到齐次坐标
+            points_hom = np.hstack([points[:, :3], np.ones((points.shape[0], 1))])
+            
+            # 变换: Sensing(点云) → Camera
+            # T_camera_to_lidar 是 LiDAR→Camera，其中LiDAR和点云都在Sensing系
+            # 所以实际上就是 Sensing→Camera
+            points_cam = (self.T_camera_to_lidar @ points_hom.T).T[:, :3]
+            
+            # 过滤相机前方的点
+            mask = points_cam[:, 2] > 0
+            points_cam = points_cam[mask]
+            depths = points_cam[:, 2].copy()
+            
+            if len(points_cam) == 0:
+                return False
+            
+            # 投影到图像平面
+            points_img = (K @ points_cam.T).T
+            points_img = points_img[:, :2] / points_img[:, 2:3]
+            
+            # 过滤图像范围内的点
+            H, W = image.shape[:2]
+            mask = (points_img[:, 0] >= 0) & (points_img[:, 0] < W) & \
+                   (points_img[:, 1] >= 0) & (points_img[:, 1] < H)
+            points_img = points_img[mask]
+            depths = depths[mask]
+            
+            if len(points_img) == 0:
+                return False
+            
+            # 生成可视化图
+            fig, ax = plt.subplots(1, 1, figsize=(19.2, 10.8), dpi=100)
+            ax.imshow(image)
+            
+            scatter = ax.scatter(points_img[:, 0], points_img[:, 1],
+                                c=depths, cmap='jet', s=1, alpha=0.5)
+            plt.colorbar(scatter, ax=ax, label='Depth (m)')
+            
+            # 标注点云状态
+            status_text = "✓ Undistorted" if is_undistorted else "⚠ Raw (Not Undistorted)"
+            status_color = 'green' if is_undistorted else 'orange'
+            
+            title_text = f'Frame {frame_idx:06d} | Projected: {len(points_img)}/{points.shape[0]} points\n{status_text}'
+            ax.set_title(title_text, fontsize=16, color='black')
+            
+            # 在图像右上角添加状态标签
+            ax.text(0.98, 0.02, status_text, 
+                   transform=ax.transAxes,
+                   fontsize=14, fontweight='bold',
+                   verticalalignment='bottom',
+                   horizontalalignment='right',
+                   bbox=dict(boxstyle='round', facecolor=status_color, alpha=0.8),
+                   color='white')
+            
+            ax.axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=100, bbox_inches='tight')
+            plt.close(fig)
+            
+            return True
+            
+        except Exception as e:
+            print(f"  ⚠️  投影可视化失败 (Frame {frame_idx}): {e}")
+            return False
     
     def _compute_transforms(self):
         """计算变换矩阵
@@ -2739,7 +2886,7 @@ class BEVCalibDatasetPreparer:
                                 self.vehicle_to_sensing_from_bag = v2s
                                 print(f"✓ 从bag点云消息中提取到 vehicle_to_sensing")
                         
-                        points = PointCloudParser.parse_proto_pointcloud2(data, config_for_comparison=self.lidar_config)
+                        points = PointCloudParser.parse_proto_pointcloud2(data, main_lidar_frame_id="_202", config_for_comparison=self.lidar_config)
                         if points is not None and points.shape[0] >= 50:
                             # 使用bag_hash+局部计数器作为文件名，避免冲突
                             filename = f"{bag_hash}_{local_pc_count:06d}.bin"
@@ -2844,7 +2991,7 @@ class BEVCalibDatasetPreparer:
                                 print(f"✓ 从bag点云消息中提取到 vehicle_to_sensing")
                                 print(f"   (C++命名: T_vehicle_to_sensing = Sensing→Vehicle)")
                         
-                        points = PointCloudParser.parse_proto_pointcloud2(data, config_for_comparison=self.lidar_config)
+                        points = PointCloudParser.parse_proto_pointcloud2(data, main_lidar_frame_id="_202", config_for_comparison=self.lidar_config)
                         if points is not None and points.shape[0] >= 50:
                             pc_buffer.append((ts_sec, points))
                             # ✅ 内存优化：点云数据更大，更频繁地保存
@@ -3632,14 +3779,19 @@ class BEVCalibDatasetPreparer:
             sample_interval = max(1, len(synced_pairs) // self.save_debug_samples)
             sample_indices = list(range(0, len(synced_pairs), sample_interval))[:self.save_debug_samples]
             
-            print(f"\n📸 保存调试样本（未去畸变点云）:")
+            print(f"\n📸 保存调试样本（未去畸变点云 + 投影可视化）:")
             print(f"  样本数量: {len(sample_indices)}")
             print(f"  采样间隔: 每 {sample_interval} 帧")
             print(f"  保存位置: {debug_dir}")
             
+            projection_success_count = 0
+            undistorted_count = 0
+            raw_count = 0
+            
             for sample_idx, pair_idx in enumerate(tqdm(sample_indices, desc="  保存调试样本")):
                 img_idx, pc_idx = synced_pairs[pair_idx]
                 pc_meta = self.pc_metadata[pc_idx]
+                img_meta = self.image_metadata[img_idx]
                 
                 # 复制原始点云
                 # ⚠️ 关键修复：使用 pair_idx（帧索引）而不是 sample_idx 作为文件名
@@ -3651,15 +3803,76 @@ class BEVCalibDatasetPreparer:
                     shutil.copy2(src_path, dst_path)
                     
                     # 同时保存对应的图像
-                    img_meta = self.image_metadata[img_idx]
                     img_src = Path(img_meta.file_path)
                     if img_src.exists():
                         img_dst = debug_dir / f"{pair_idx:06d}_image.jpg"  # 使用 pair_idx
                         shutil.copy2(img_src, img_dst)
+                        
+                        # 生成点云投影可视化图（使用去畸变后的点云）
+                        try:
+                            # 读取原始点云
+                            points_raw = np.fromfile(src_path, dtype=np.float32)
+                            if len(points_raw) >= 4:
+                                points_raw = points_raw.reshape(-1, 4)  # [x, y, z, intensity]
+                                
+                                # ⚠️ 关键：对点云进行去畸变处理
+                                # 获取时间戳
+                                pc_ts = pc_meta.timestamp
+                                img_ts = img_meta.timestamp
+                                
+                                # 计算点云扫描时间（参考prepare_custom_dataset.py逻辑）
+                                if points_raw.shape[1] >= 5:
+                                    # 如果有timestamp列，使用timestamp范围
+                                    timestamps = points_raw[:, 4]
+                                    start_ts = pc_ts + timestamps.min() * 2e-6  # timestamp单位是2us
+                                    end_ts = pc_ts + timestamps.max() * 2e-6
+                                else:
+                                    # 否则假设100ms扫描时间
+                                    start_ts = pc_ts
+                                    end_ts = pc_ts + 0.1
+                                
+                                # 去畸变到图像时刻
+                                points_undistorted = UndistortionUtils.undistort_pointcloud(
+                                    points_raw, pc_ts, img_ts, self.pose_metadata,
+                                    debug=False, frame_idx=pair_idx
+                                )
+                                
+                                # 判断是否成功去畸变
+                                is_undistorted = (points_undistorted is not None)
+                                
+                                # 如果去畸变成功，使用去畸变后的点云；否则使用原始点云
+                                points_to_project = points_undistorted if is_undistorted else points_raw
+                                
+                                # 统计
+                                if is_undistorted:
+                                    undistorted_count += 1
+                                else:
+                                    raw_count += 1
+                                
+                                # 读取图像
+                                image = cv2.imread(str(img_src))
+                                if image is not None:
+                                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                                    
+                                    # 生成投影可视化，传入去畸变状态
+                                    proj_output = debug_dir / f"{pair_idx:06d}_projection.png"
+                                    if self._generate_projection_visualization(points_to_project, image, proj_output, pair_idx, is_undistorted):
+                                        projection_success_count += 1
+                        except Exception as e:
+                            pass  # 静默失败，不影响主流程
             
             print(f"  ✓ 已保存 {len(sample_indices)} 个调试样本")
-            print(f"  💡 提示: 去畸变后的点云将保存在 velodyne/ 目录")
-            print(f"     可对比 debug_raw_pointclouds/ 和 velodyne/ 查看去畸变效果")
+            print(f"  ✓ 生成 {projection_success_count}/{len(sample_indices)} 个投影可视化图")
+            print(f"     - 使用去畸变点云: {undistorted_count} 张 ✓")
+            if raw_count > 0:
+                print(f"     - 使用原始点云: {raw_count} 张 ⚠️ (去畸变失败，投影可能不准确)")
+            print(f"  💡 提示: ")
+            print(f"     - 原始点云: debug_raw_pointclouds/*_raw.bin")
+            print(f"     - 去畸变点云: velodyne/*.bin")
+            print(f"     - 投影可视化: debug_raw_pointclouds/*_projection.png")
+            print(f"       * 绿色标签 '✓ Undistorted': 使用去畸变点云，投影准确")
+            print(f"       * 橙色标签 '⚠ Raw': 使用原始点云，投影可能不准确")
+            print(f"     可对比查看去畸变效果和投影质量")
         
         # 保存最终数据集（并行处理）
         print(f"\n{'='*80}")
@@ -3792,15 +4005,24 @@ class BEVCalibDatasetPreparer:
         # 保存时间戳文件
         self._save_times_file(synced_pairs, seq_dir)
         
-        # 清理临时文件（可选）
-        # 注意：如果需要验证去畸变效果，请保留temp目录
-        # temp/pointclouds/ 中存储的是去畸变前的原始点云
-        print(f"\n💡 提示: temp目录包含去畸变前的原始点云")
+        # 清理临时文件（自动删除以节省存储空间）
+        # temp/ 目录存储的是从bag提取的原始数据，处理完后可以删除
+        # 最终数据已保存在 sequences/ 目录，debug样本在 debug_raw_pointclouds/
+        print(f"\n🗑️  清理临时文件...")
         print(f"   位置: {self.temp_dir}")
-        print(f"   如果需要验证去畸变效果，请保留此目录")
-        print(f"   如果不需要，可以手动删除以节省空间")
-        # import shutil
-        # shutil.rmtree(self.temp_dir)  # 注释掉自动删除
+        import shutil
+        try:
+            # 获取 temp 目录大小
+            import subprocess
+            size_output = subprocess.run(['du', '-sh', str(self.temp_dir)], 
+                                       capture_output=True, text=True, timeout=30)
+            temp_size = size_output.stdout.split()[0] if size_output.returncode == 0 else "未知"
+            
+            shutil.rmtree(self.temp_dir)
+            print(f"   ✓ 已删除临时目录，节省了约 {temp_size} 存储空间")
+        except Exception as e:
+            print(f"   ⚠️  删除临时目录失败: {e}")
+            print(f"   💡 您可以手动删除以节省空间: rm -rf {self.temp_dir}")
         
         # 计算总耗时
         total_time = getattr(self, '_extract_time', 0) + sync_time + save_time
@@ -3810,7 +4032,8 @@ class BEVCalibDatasetPreparer:
         print(f"{'='*80}")
         print(f"\n📁 输出位置:")
         print(f"  数据集: {seq_dir}")
-        print(f"  临时文件: {self.temp_dir} (已保留)")
+        if self.save_debug_samples > 0:
+            print(f"  调试样本: {seq_dir / 'debug_raw_pointclouds'}")
         
         print(f"\n📊 统计信息:")
         print(f"  有效图像: {success_count} 张")
