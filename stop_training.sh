@@ -17,12 +17,12 @@ echo ""
 # 查找训练进程
 echo "查找训练进程..."
 TRAIN_PIDS=$(ps aux | grep -E "train_kitti.py" | grep -v grep | awk '{print $2}')
-BASH_PIDS=$(ps aux | grep -E "train_B26A.sh" | grep -v grep | awk '{print $2}')
+BASH_PIDS=$(ps aux | grep -E "train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep | awk '{print $2}')
 
 # 显示当前进程
 echo ""
 echo "当前训练进程:"
-ps aux | grep -E "train_kitti.py|train_B26A.sh" | grep -v grep || echo "  无运行中的训练进程"
+ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep || echo "  无运行中的训练进程"
 echo ""
 
 # 统计进程数量
@@ -78,24 +78,26 @@ echo "等待进程结束..."
 sleep 3
 
 # 检查是否还有残留进程
-REMAINING=$(ps aux | grep -E "train_kitti.py|train_B26A.sh" | grep -v grep | wc -l)
+REMAINING=$(ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep | wc -l)
 
 if [ "$REMAINING" -gt 0 ]; then
     echo "⚠️  还有 $REMAINING 个进程未停止，强制终止..."
     pkill -9 -f "train_kitti.py" 2>/dev/null || true
     pkill -9 -f "train_B26A.sh" 2>/dev/null || true
+    pkill -9 -f "train_universal.sh" 2>/dev/null || true
+    pkill -9 -f "start_training.sh" 2>/dev/null || true
     sleep 2
 fi
 
 # 最终检查
-FINAL=$(ps aux | grep -E "train_kitti.py|train_B26A.sh" | grep -v grep | wc -l)
+FINAL=$(ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep | wc -l)
 
 echo ""
 if [ "$FINAL" -eq 0 ]; then
     echo "✅ 所有训练进程已停止"
 else
     echo "❌ 仍有 $FINAL 个进程运行中，请手动检查"
-    ps aux | grep -E "train_kitti.py|train_B26A.sh" | grep -v grep
+    ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep
 fi
 
 echo ""

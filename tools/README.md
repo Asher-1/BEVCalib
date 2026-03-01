@@ -1,501 +1,329 @@
-# BEVCalib 数据集工具集
+# BEVCalib Tools 工具集
 
-本目录包含用于生成、验证和可视化自定义 KITTI-Odometry 格式数据集的工具脚本。
+本目录包含 BEVCalib 数据集准备、验证、可视化和分析的完整工具集。
 
-## 📋 工具列表
-
-### 1. prepare_custom_dataset.py
-**主要的数据集准备脚本**
-
-从 ROS bag 文件生成 KITTI-Odometry 格式的数据集，包括：
-- 图像提取与同步
-- 点云提取与去畸变（参考C++实现）
-- 位姿插值与转换（李代数插值）
-- 标定文件生成
-
-**参数说明：**
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--bag_dir` | 必填 | ROS bag文件目录 |
-| `--config_dir` | 必填 | 配置文件目录（包含cameras.cfg, extrinsics.yaml等） |
-| `--output_dir` | 必填 | 输出数据集目录 |
-| `--camera_name` | traffic_2 | 相机名称 |
-| `--target_fps` | 10.0 | 目标帧率（用于降采样） |
-| `--num_workers` | 4 | 并行工作线程数 |
-| `--batch_size` | 200 | 批处理大小 |
-| `--max_frames` | None | 最大处理帧数（用于测试） |
-| `--save_debug_samples` | 0 | 保存调试样本数量（未去畸变点云，用于对比可视化） |
-| `--max_pose_gap` | 0.5 | 最大允许的pose间隔（秒），用于处理不连续bag数据 |
-
-**使用示例：**
-```bash
-# 基本用法
-python prepare_custom_dataset.py \
-  --bag_dir /path/to/bag/dir \
-  --config_dir /path/to/config/dir \
-  --output_dir /path/to/output/dir \
-  --camera_name traffic_2
-
-# 完整参数（推荐）
-python prepare_custom_dataset.py \
-  --bag_dir /path/to/bag/dir \
-  --config_dir /path/to/config/dir \
-  --output_dir /path/to/output/dir \
-  --camera_name traffic_2 \
-  --target_fps 10.0 \
-  --num_workers 8 \
-  --batch_size 200 \
-  --save_debug_samples 20
-
-# 快速测试（只处理100帧）
-python prepare_custom_dataset.py \
-  --bag_dir /path/to/bag/dir \
-  --config_dir /path/to/config/dir \
-  --output_dir /path/to/output/dir \
-  --camera_name traffic_2 \
-  --max_frames 100
-```
-
-**输出目录结构：**
-```
-output_dir/
-├── sequences/00/
-│   ├── image_2/          # PNG图像 (000000.png, 000001.png, ...)
-│   ├── velodyne/         # 去畸变后的点云 (000000.bin, ...)
-│   ├── debug_raw_pointclouds/  # 未去畸变点云样本（如果启用--save_debug_samples）
-│   ├── calib.txt         # 标定文件
-│   └── times.txt         # 时间戳文件
-├── poses/00.txt          # 位姿文件
-└── temp/                 # 临时文件（可删除）
-```
-
-**详细文档：** 参见 `../docs/自定义数据集制作Pipeline.md`
+为便于使用和维护，所有工具已按功能分类组织到不同子目录中。
 
 ---
 
-### 2. batch_prepare_trips.py
-**批量处理多个 trip 数据集**
+## 📂 目录结构
 
-从多个 trip 目录批量生成 KITTI-Odometry 格式的训练数据集，每个 trip 对应一个独立的 sequence。
-
-**主要功能：**
-- 🚀 自动遍历 trips 目录下的所有行程
-- 📦 每个 trip 自动分配 sequence ID（00, 01, 02, ...）
-- 🎯 只提取主 lidar（frame_id: "atx_202"）数据
-- 📝 生成完整的处理日志
-- 🔄 支持失败重试（跳过失败的 trip 继续处理）
-
-**参数说明：**
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--trips_dir` | 必填 | trips 根目录（包含所有行程的目录） |
-| `--output_dir` | 必填 | 输出数据集目录 |
-| `--camera_name` | traffic_2 | 相机名称 |
-| `--target_fps` | 10.0 | 目标帧率 |
-| `--start_sequence` | 0 | 起始 sequence ID |
-
-**使用示例：**
-```bash
-# 激活环境
-source /opt/conda/etc/profile.d/conda.sh && conda activate bevcalib
-
-# 批量处理所有 trips
-python batch_prepare_trips.py \
-  --trips_dir /path/to/trips \
-  --output_dir /path/to/output \
-  --camera_name traffic_2 \
-  --target_fps 10.0 \
-  --start_sequence 0
-
-# 实际示例
-python batch_prepare_trips.py \
-  --trips_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips \
-  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
-  --camera_name traffic_2 \
-  --target_fps 10.0
 ```
-
-**输入目录结构：**
-```
-trips_dir/
-├── YR-B26A1-1_20251117_031232/    # Trip 1 → Sequence 00
-│   ├── bags/
-│   │   ├── unimportant/           # 或 important/
-│   │   │   └── *.bag
-│   └── config/
-│       ├── cameras.cfg
-│       ├── lidars.cfg
-│       └── extrinsics.yaml
-├── YR-C061-5_20260227_061027/     # Trip 2 → Sequence 01
-│   ├── bags/
-│   └── config/
-└── ...
-```
-
-**输出目录结构：**
-```
-output_dir/
-├── sequences/
-│   ├── 00/                        # 第一个 trip
-│   │   ├── image_2/
-│   │   ├── velodyne/
-│   │   ├── calib.txt
-│   │   └── times.txt
-│   ├── 01/                        # 第二个 trip
-│   │   ├── image_2/
-│   │   └── ...
-│   └── ...
-├── poses/
-│   ├── 00.txt
-│   ├── 01.txt
-│   └── ...
-├── temp/                          # 临时文件
-└── batch_processing_*.log         # 批量处理日志
-```
-
-**监控处理进度：**
-```bash
-# 使用监控脚本（实时显示日志）
-bash monitor_batch_processing.sh
-
-# 或手动查看日志
-tail -f /path/to/output_dir/batch_processing_*.log
-```
-
-**停止批量处理：**
-```bash
-# 使用停止脚本（交互式确认）
-bash stop_batch_processing.sh
-
-# 或手动停止
-pkill -9 -f batch_prepare_trips.py
-pkill -9 -f prepare_custom_dataset.py
-```
-
-**日志说明：**
-- 实时显示处理进度
-- 自动生成时间戳日志文件
-- 记录每个 trip 的处理结果
-- 显示成功/失败统计
-
-**注意事项：**
-1. 确保使用 `bevcalib` conda 环境
-2. 每个 trip 目录必须包含 `bags/` 和 `config/` 子目录
-3. 配置文件中必须包含 `frame_id: "atx_202"` 的主 lidar
-4. 处理时间取决于 bag 文件大小和数量
-5. 失败的 trip 会被跳过，不影响其他 trip 的处理
-
----
-
-### 3. visualize_projection.py
-**点云投影可视化工具**
-
-支持两种模式：
-- **project**: 单纯的点云投影到图像
-- **compare**: 对比去畸变前后的效果
-
-**特性：**
-- ✅ 支持 PINHOLE 和 KANNALA_BRANDT 两种相机模型
-- ✅ 自动处理相机畸变系数
-- ✅ FOV 过滤（对齐 C++ 实现）
-- ✅ 深度着色渲染
-
-**使用示例：**
-```bash
-# 投影单帧点云
-python visualize_projection.py \
-  --mode project \
-  --dataset_root /path/to/dataset \
-  --frame 0
-
-# 对比去畸变效果（使用debug_raw_pointclouds目录）
-python visualize_projection.py \
-  --mode compare \
-  --dataset_root /path/to/dataset \
-  --frame 0 \
-  --debug_sample 0
-
-# 批量对比多帧
-python visualize_projection.py \
-  --mode compare \
-  --dataset_root /path/to/dataset \
-  --frame 0 \
-  --num_frames 5
-```
-
-**注意：** 对比去畸变效果需要在生成数据时使用 `--save_debug_samples` 参数保存未去畸变的点云样本。
-
----
-
-### 4. batch_generate_projections.py
-**批量生成点云投影可视化图像**
-
-快速批量生成大量帧的点云投影可视化图像，用于验证投影效果和数据质量。
-
-**主要功能：**
-- 🚀 自动均匀采样指定数量的帧
-- 📊 显示投影统计信息（成功率、平均投影点数）
-- 🎨 使用深度着色（jet colormap）
-- ⚡ 使用无头模式（Agg backend），适合服务器环境
-- 📝 进度条实时显示
-
-**参数说明：**
-| 参数 | 说明 |
-|------|------|
-| `--dataset_root` | 数据集根目录 |
-| `--sequence` | 序列号（如 "00", "01"） |
-| `--output_dir` | 输出目录 |
-| `--num_samples` | 生成样本数量（默认: 100） |
-| `--start_frame` | 起始帧（默认: 0） |
-| `--end_frame` | 结束帧（默认: None，自动检测） |
-
-**使用示例：**
-```bash
-# 激活环境
-source /opt/conda/etc/profile.d/conda.sh && conda activate bevcalib
-
-# 为 Sequence 00 生成 100 张投影图像
-python batch_generate_projections.py \
-  --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
-  --sequence 00 \
-  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data/temp/projection_visualizations \
-  --num_samples 100
-
-# 只生成前 500 帧中的 50 张图像
-python batch_generate_projections.py \
-  --dataset_root /path/to/dataset \
-  --sequence 00 \
-  --output_dir /path/to/output \
-  --num_samples 50 \
-  --start_frame 0 \
-  --end_frame 500
-```
-
-**输出：**
-- 图像文件命名: `seq{序号}_frame{帧号:06d}.png`
-- 例如: `seq00_frame000000.png`, `seq00_frame000015.png`, ...
-- 统计信息: 成功生成数量、平均投影点数
-
-**典型用途：**
-- 快速验证整个数据集的投影质量
-- 检查标定文件是否正确
-- 发现数据异常帧
-- 生成数据集可视化样本
-
----
-
-### 5. validate_kitti_odometry.py
-**KITTI-Odometry 格式验证器**
-
-严格验证数据集是否符合 KITTI-Odometry 标准格式。
-
-**检查项：**
-- ✅ 目录结构（sequences/, poses/）
-- ✅ 标定文件格式（P0-P3, Tr）
-- ✅ 位姿文件格式（每行12个数）
-- ✅ 图像和点云命名格式
-- ✅ 数据对齐（数量一致性）
-- ✅ 坐标范围合理性
-
-**使用示例：**
-```bash
-python validate_kitti_odometry.py /path/to/dataset --sequence 00
-```
-
-**输出：** 详细的验证报告，包括通过项、警告和错误
-
----
-
-### 6. visualize_kitti_structure.py
-**数据集结构可视化工具**
-
-快速浏览数据集的整体结构和统计信息。
-
-**功能：**
-- 📊 序列统计（帧数、时长、FPS）
-- 📐 图像和点云尺寸/范围
-- 🔧 标定参数预览
-- ✅ 数据完整性检查
-
-**使用示例：**
-```bash
-# 分析整个数据集
-python visualize_kitti_structure.py /path/to/dataset
-
-# 分析特定序列
-python visualize_kitti_structure.py /path/to/dataset --sequence 00
-
-# 分析多个序列
-python visualize_kitti_structure.py /path/to/dataset --sequence 00 01 02
+tools/
+├── README.md                    # 本文档
+├── docs/                        # 📚 文档和指南
+├── preparation/                 # 📊 数据准备工具
+├── validation/                  # ✅ 验证工具
+├── visualization/               # 🎨 可视化工具
+├── analysis/                    # 📈 分析工具
+├── utils/                       # 🔧 修复与调试工具
+└── scripts/                     # 🔄 Shell 脚本工具
 ```
 
 ---
 
-### 7. view_pointcloud.py
-**点云查看工具**
+## 🚀 快速开始
 
-支持查看 PLY 和 BIN 格式的点云文件。
+### 1. 准备数据集
 
-**支持格式：**
-- `.ply`: PLY 格式（ASCII）
-- `.bin`: KITTI BIN 格式（每点 4 或 5 个 float32）
-
-**可视化后端：**
-- **Open3D**（推荐）：交互式 3D 查看
-- **Matplotlib**（备选）：简单的 3D 散点图
-
-**使用示例：**
 ```bash
-# 查看 PLY 格式点云
-python view_pointcloud.py temp/pointclouds/000000.ply
-
-# 查看 BIN 格式点云
-python view_pointcloud.py sequences/00/velodyne/000000.bin
-
-# 查看多个点云（对比）
-python view_pointcloud.py temp/pointclouds/000000.ply sequences/00/velodyne/000000.bin
-
-# 只显示统计信息
-python view_pointcloud.py temp/pointclouds/000000.ply --info
-
-# 指定后端
-python view_pointcloud.py temp/pointclouds/000000.ply --backend matplotlib
+# 准备自定义数据集（KITTI-Odometry格式）
+python tools/preparation/prepare_custom_dataset.py \
+    --source /path/to/raw/data \
+    --output /path/to/output \
+    --config config.yaml
 ```
-
----
-
-## 🔄 典型工作流程
-
-### 1a. 批量生成数据集（推荐用于多个 trips）
-```bash
-# 激活环境
-source /opt/conda/etc/profile.d/conda.sh && conda activate bevcalib
-
-# 批量处理所有 trips
-cd /mnt/drtraining/user/dahailu/code/BEVCalib/tools
-python batch_prepare_trips.py \
-  --trips_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips \
-  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
-  --camera_name traffic_2 \
-  --target_fps 10.0
-```
-
-**预期输出：**
-- 自动处理所有 trip 目录
-- 每个 trip 对应一个 sequence（00, 01, 02...）
-- 生成完整的批量处理日志
-- 处理时间取决于 trip 数量和大小
-
-### 1b. 生成单个数据集（完整流程）
-```bash
-# 生成完整数据集（包含调试样本用于验证去畸变效果）
-python tools/prepare_custom_dataset.py \
-  --bag_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips/YR-B26A1-1_20251117_031232/data \
-  --config_dir /mnt/drtraining/user/dahailu/data/bevcalib/trips/YR-B26A1-1_20251117_031232/configs \
-  --output_dir /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data_fix \
-  --camera_name traffic_2 \
-  --target_fps 10.0 \
-  --num_workers 32 \
-  --batch_size 800 \
-  --save_debug_samples 20
-```
-
-**预期输出：**
-- 数据提取: ~2分钟
-- 数据同步: <1秒
-- 去畸变保存: ~4-5分钟
-- **总计: ~6-7分钟**
 
 ### 2. 验证数据集
+
 ```bash
-python validate_kitti_odometry.py /data/kitti_dataset --sequence 00
+# 方式A: 快速摘要（5秒）
+python tools/validation/validate_dataset.py summary /path/to/dataset
+
+# 方式B: 快速验证（17秒）- 日常检查
+python tools/validation/validate_dataset.py full /path/to/dataset \
+    --output-dir validation_results
+
+# 方式C: 完整验证（15分钟）- 首次验证
+python tools/validation/validate_dataset.py full /path/to/dataset \
+    --output-dir validation_results --full
+
+# 方式D: 仅投影验证（10分钟）- 每序列10帧
+python tools/validation/validate_dataset.py projection-full /path/to/dataset \
+    --output-dir projection_validation
 ```
 
-### 3. 可视化检查
+### 3. 可视化
+
 ```bash
-# 查看数据集结构
-python visualize_kitti_structure.py /data/kitti_dataset --sequence 00
+# 交互式点云投影可视化
+python tools/visualization/visualize_projection.py \
+    --dataset_root /path/to/dataset \
+    --sequence 00
 
-# 验证投影效果
-python visualize_projection.py \
-  --mode project \
-  --dataset_root /data/kitti_dataset \
-  --frame 0
-
-# 对比去畸变效果（需要--save_debug_samples）
-python visualize_projection.py \
-  --mode compare \
-  --dataset_root /data/kitti_dataset \
-  --frame 0 \
-  --debug_sample 0
-```
-
-### 4. 查看点云
-```bash
-# 查看去畸变后的点云
-python view_pointcloud.py /data/kitti_dataset/sequences/00/velodyne/000000.bin
-
-# 对比去畸变前后（需要--save_debug_samples）
-python view_pointcloud.py \
-  /data/kitti_dataset/sequences/00/debug_raw_pointclouds/000000_raw.bin \
-  /data/kitti_dataset/sequences/00/velodyne/000000.bin
-```
-
-### 5. 开始训练
-```bash
-cd kitti-bev-calib
-python train_kitti.py --dataset_root /data/kitti_dataset
+# 查看单个点云
+python tools/visualization/view_pointcloud.py /path/to/pointcloud.bin
 ```
 
 ---
 
-## 📚 相关文档
+## 📚 详细文档
 
-- **数据集制作指南**: `../docs/自定义数据集制作Pipeline.md`
-- **训练和测试流程**: `../docs/训练和测试流程文档.md`
-- **原理解析**: `../docs/原理解析文档.md`
-- **代码架构**: `../docs/代码架构文档.md`
+### 核心文档
+
+- **[快速开始指南](docs/QUICK_START.md)** - 1分钟上手
+- **[架构说明](docs/ARCHITECTURE.md)** - 工具设计理念
+- **[验证模式详解](docs/VALIDATION_MODES.md)** - 不同验证模式对比
 
 ---
 
-## 🛠️ 依赖项
+## 🛠️ 工具分类说明
+
+### 📊 数据准备工具 (`preparation/`)
+
+数据集格式转换和准备工具。
+
+**主要工具**:
+- `prepare_custom_dataset.py` - 转换自定义数据为KITTI-Odometry格式
+- `batch_prepare_trips.py` - 批量准备多个数据集
+
+[查看详细文档 →](preparation/README.md)
+
+---
+
+### ✅ 验证工具 (`validation/`)
+
+数据集质量验证和检查工具。
+
+**主要工具**:
+- **`validate_dataset.py`** ⭐ - 统一验证入口（推荐）
+- `validate_kitti_odometry.py` - KITTI格式验证
+- `verify_dataset_tr_fix.py` - Tr矩阵验证
+- `comprehensive_projection_validation.py` - 完整投影验证
+- `check_projection_headless.py` - 单帧投影测试
+- `show_dataset_summary.py` - 数据集摘要
+
+**快速使用**:
+```bash
+# 所有验证功能已整合到 validate_dataset.py
+python tools/validation/validate_dataset.py --help
+```
+
+[查看详细文档 →](validation/README.md)
+
+---
+
+### 🎨 可视化工具 (`visualization/`)
+
+数据可视化和图像生成工具。
+
+**主要工具**:
+- `visualize_projection.py` - 交互式投影可视化
+- `view_pointcloud.py` - 点云查看器
+- `visualize_kitti_structure.py` - KITTI数据结构可视化
+- `batch_generate_projections.py` - 批量生成投影图
+
+**快速使用**:
+```bash
+# 交互式查看点云投影
+python tools/visualization/visualize_projection.py \
+    --dataset_root /path/to/dataset --sequence 00
+```
+
+[查看详细文档 →](visualization/README.md)
+
+---
+
+### 📈 分析工具 (`analysis/`)
+
+训练数据分析和统计工具。
+
+**主要工具**:
+- `analyze_perturbation_training.py` - 扰动训练效果分析
+
+[查看详细文档 →](analysis/README.md)
+
+---
+
+### 🔧 修复与调试工具 (`utils/`)
+
+数据修复和问题调试工具。
+
+**主要工具**:
+- `fix_calib_tr_inversion.py` - 修复Tr矩阵反向问题
+- `debug_undistortion.py` - 调试点云去畸变算法
+
+**使用场景**:
+- 修复标定矩阵格式问题
+- 对比C++/Python去畸变实现
+- 诊断数据质量问题
+
+[查看详细文档 →](utils/README.md)
+
+---
+
+### 🔄 Shell 脚本 (`scripts/`)
+
+批处理管理和监控脚本。
+
+**主要脚本**:
+- `monitor_batch_processing.sh` - 监控批处理任务
+- `stop_batch_processing.sh` - 停止批处理任务
+
+[查看详细文档 →](scripts/README.md)
+
+---
+
+## 📋 常见工作流
+
+### 工作流1: 准备新数据集
 
 ```bash
-# 核心依赖
-pip install numpy opencv-python scipy
+# 1. 准备数据
+python tools/preparation/prepare_custom_dataset.py \
+    --source raw_data/ --output dataset/
 
-# 可选依赖（用于点云可视化）
-pip install open3d matplotlib
+# 2. 验证数据集
+python tools/validation/validate_dataset.py full dataset/ \
+    --output-dir validation/ --full
 
-# ROS bag 处理（二选一）
-pip install rosbag  # ROS1
-pip install rosbags  # ROS2 或独立使用
+# 3. 查看验证报告
+cat validation/VALIDATION_SUMMARY.md
+cat validation/projection_validation/PROJECTION_VALIDATION_REPORT.md
+```
+
+### 工作流2: 日常数据检查
+
+```bash
+# 快速摘要
+python tools/validation/validate_dataset.py summary dataset/
+
+# 快速验证
+python tools/validation/validate_dataset.py full dataset/ \
+    --output-dir validation_quick/
+```
+
+### 工作流3: 投影质量分析
+
+```bash
+# 1. 生成完整投影验证
+python tools/validation/validate_dataset.py projection-full dataset/ \
+    --output-dir projections/
+
+# 2. 交互式查看特定序列
+python tools/visualization/visualize_projection.py \
+    --dataset_root dataset/ --sequence 00
+```
+
+### 工作流4: 问题诊断
+
+```bash
+# 1. 检查Tr矩阵
+python tools/validation/verify_dataset_tr_fix.py --dataset_root dataset/
+
+# 2. 测试单帧投影
+python tools/validation/check_projection_headless.py \
+    --dataset_root dataset/ --sequence 00 --frame 0 \
+    --output test_projection.png
+
+# 3. 如发现问题，使用修复工具
+python tools/utils/fix_calib_tr_inversion.py --dataset_root dataset/
 ```
 
 ---
 
-## 💡 提示
+## 🎯 推荐最佳实践
 
-1. **性能优化**：
-   - 使用 `--batch_size` 和 `--num_workers` 参数加速数据生成
-   - 对于大型数据集，先用 `--max_frames 10` 测试
+### 1. 首次使用新数据集
 
-2. **调试**：
-   - 使用 `--keep_temp` 保留中间文件以便检查
-   - 使用 `visualize_projection.py --mode compare` 验证去畸变效果
+```bash
+# Step 1: 快速摘要（了解数据集概况）
+python tools/validation/validate_dataset.py summary dataset/
 
-3. **相机模型**：
-   - **PINHOLE**: 标准针孔模型（5个畸变系数）
-   - **KANNALA_BRANDT**: 鱼眼模型（4个畸变系数）
-   - 畸变系数会自动从 `cameras.cfg` 提取并应用
+# Step 2: 完整验证（确保数据质量）
+python tools/validation/validate_dataset.py full dataset/ \
+    --output-dir validation_complete/ --full
+
+# Step 3: 查看报告，确认无问题
+cat validation_complete/VALIDATION_SUMMARY.md
+```
+
+### 2. 日常开发验证
+
+```bash
+# 快速模式即可（17秒）
+python tools/validation/validate_dataset.py full dataset/ \
+    --output-dir validation_quick/
+```
+
+### 3. 发布前检查
+
+```bash
+# 运行完整验证
+python tools/validation/validate_dataset.py full dataset/ \
+    --output-dir validation_release/ --full
+```
+
+---
+
+## ❓ 常见问题
+
+### Q1: 应该使用哪个验证命令？
+
+- **日常检查**: `validate_dataset.py full dataset/` (快速模式，17秒)
+- **首次验证**: `validate_dataset.py full dataset/ --full` (完整模式，15分钟)
+- **仅看投影**: `validate_dataset.py projection-full dataset/` (10分钟)
+
+详见 [VALIDATION_MODES.md](docs/VALIDATION_MODES.md)
+
+### Q2: 为什么要分目录组织？
+
+- **便于查找**: 按功能分类，快速定位工具
+- **降低复杂度**: 每个目录职责单一，易于理解
+- **便于维护**: 相关工具集中管理，减少耦合
+- **模块化**: 各工具独立开发和测试
+
+### Q3: 如何从旧路径迁移？
+
+旧路径 → 新路径：
+```bash
+# 验证工具
+tools/validate_dataset.py              → tools/validation/validate_dataset.py
+tools/validate_kitti_odometry.py       → tools/validation/validate_kitti_odometry.py
+
+# 可视化工具
+tools/visualize_projection.py          → tools/visualization/visualize_projection.py
+tools/view_pointcloud.py                → tools/visualization/view_pointcloud.py
+
+# 数据准备
+tools/prepare_custom_dataset.py        → tools/preparation/prepare_custom_dataset.py
+
+# 工具函数
+tools/fix_calib_tr_inversion.py        → tools/utils/fix_calib_tr_inversion.py
+```
+
+### Q4: 在哪里查看各工具的详细用法？
+
+每个子目录都有独立的 `README.md`，包含详细的工具说明和使用示例。
+
+---
+
+## 🤝 贡献指南
+
+添加新工具时，请：
+
+1. 选择合适的分类目录
+2. 添加脚本文档字符串
+3. 更新对应目录的 README.md
+4. 如需要，添加使用示例到主 README
 
 ---
 
 ## 📞 问题反馈
 
-如果遇到问题，请检查：
-1. 配置文件格式是否正确（`cameras.cfg`, `lidars.cfg`）
-2. ROS bag 文件是否包含所需的 topics
-3. 相机名称是否与配置文件中的 `camera_dev` 匹配
+如遇到问题或有改进建议，请联系维护团队。
 
-更多详细信息请参考项目文档。
+---
+
+**最后更新**: 2026-03-01  
+**维护者**: BEVCalib Team
