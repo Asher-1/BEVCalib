@@ -42,6 +42,24 @@ def load_pointcloud(bin_file):
     return points
 
 
+def undistort_image(img, calib):
+    """使用标定文件中的畸变系数去畸变图像
+
+    Returns:
+        undistorted image, or original image if D is not available
+    """
+    if 'D' not in calib:
+        return img
+    D = calib['D']
+    if len(D) < 4:
+        return img
+    P2 = calib['P2'].reshape(3, 4)
+    K = P2[:3, :3].copy()
+    dist_coeffs = np.zeros(5)
+    dist_coeffs[:len(D)] = D
+    return cv2.undistort(img, K, dist_coeffs)
+
+
 def project_points(points, calib, img_shape):
     """投影点云到图像"""
     # 获取标定参数
@@ -99,6 +117,9 @@ def visualize_projection(dataset_root, sequence, frame, output_file):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     points = load_pointcloud(pc_file)
     calib = load_calib(calib_file)
+    
+    # 去畸变图像（P2是理想内参，需要先去畸变才能对齐）
+    img = undistort_image(img, calib)
     
     # 投影
     points_img, depths, num_visible = project_points(points, calib, img.shape)

@@ -42,7 +42,7 @@ def find_bag_directory(trip_dir):
     raise ValueError(f"在 {trip_dir} 中未找到 bag 目录")
 
 
-def process_trip(trip_dir, sequence_id, output_base_dir, log_file, camera_name='traffic_2', target_fps=10.0):
+def process_trip(trip_dir, sequence_id, output_base_dir, log_file, camera_name='traffic_2', target_fps=10.0, force_config=False):
     """
     处理单个 trip 行程
     
@@ -104,6 +104,9 @@ def process_trip(trip_dir, sequence_id, output_base_dir, log_file, camera_name='
             '--save_debug_samples', '20',
         ]
         
+        if force_config:
+            cmd.append('--force-config')
+        
         log_msg = f"\n执行命令:\n{' '.join(cmd)}\n\n"
         print(log_msg)
         log_file.write(log_msg)
@@ -156,6 +159,8 @@ def main():
                        help='目标帧率（默认: 10.0）')
     parser.add_argument('--start_sequence', type=int, default=0,
                        help='起始 sequence ID（默认: 0）')
+    parser.add_argument('--force-config', action='store_true', default=False,
+                       help='强制使用lidars.cfg中的lidar外参替代bag中的外参')
     
     args = parser.parse_args()
     
@@ -177,6 +182,8 @@ def main():
     print(f"相机名称: {args.camera_name}")
     print(f"目标帧率: {args.target_fps} fps")
     print(f"起始 Sequence ID: {args.start_sequence}")
+    if args.force_config:
+        print(f"⚠️  强制使用lidars.cfg外参（忽略bag中的lidar外参）")
     
     # 获取所有 trip 目录（按名称排序以保证一致性）
     trip_dirs = sorted([d for d in trips_dir.iterdir() if d.is_dir()])
@@ -195,6 +202,8 @@ def main():
         log_file.write(f"相机名称: {args.camera_name}\n")
         log_file.write(f"目标帧率: {args.target_fps} fps\n")
         log_file.write(f"起始 Sequence ID: {args.start_sequence}\n")
+        if args.force_config:
+            log_file.write(f"⚠️  强制使用lidars.cfg外参\n")
         log_file.write(f"\n找到 {len(trip_dirs)} 个 trip 目录\n")
         log_file.flush()
         
@@ -212,7 +221,8 @@ def main():
                     output_base_dir=output_dir,
                     log_file=log_file,
                     camera_name=args.camera_name,
-                    target_fps=args.target_fps
+                    target_fps=args.target_fps,
+                    force_config=args.force_config
                 )
                 success_count += 1
             except Exception as e:
@@ -244,6 +254,26 @@ def main():
         
         print(summary)
         log_file.write(summary)
+        
+        # ========== 下一步提示 ==========
+        next_steps = f"\n{'='*80}\n"
+        next_steps += f"📋 下一步操作\n"
+        next_steps += f"{'='*80}\n\n"
+        next_steps += f"原始数据准备完成！现在需要 resize 图像用于训练。\n\n"
+        next_steps += f"方式1: 使用快捷脚本（推荐）\n"
+        next_steps += f"  cd {Path(__file__).parent}\n"
+        next_steps += f"  ./run_resize_only.sh {output_dir} 640 360\n\n"
+        next_steps += f"方式2: 使用完整流水线脚本\n"
+        next_steps += f"  cd {Path(__file__).parent}\n"
+        next_steps += f"  ./run_preparation_pipeline.sh full {trips_dir} {output_dir} 640 360\n\n"
+        next_steps += f"方式3: 直接调用 Python 脚本\n"
+        next_steps += f"  python {Path(__file__).parent}/resize_images.py \\\n"
+        next_steps += f"    --dataset_root {output_dir} \\\n"
+        next_steps += f"    --width 640 --height 360 --workers 32\n\n"
+        next_steps += f"{'='*80}\n"
+        
+        print(next_steps)
+        log_file.write(next_steps)
     
     print(f"\n完整日志已保存到: {log_file_path}")
 
