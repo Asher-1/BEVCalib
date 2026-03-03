@@ -2,18 +2,21 @@
 """
 BEVCalib 数据集统一验证工具
 
-这是一个统一的入口工具，整合了所有验证功能：
-1. 快速摘要 - 显示数据集基本信息
-2. 格式验证 - 验证KITTI-Odometry格式
-3. Tr矩阵验证 - 检查标定矩阵
-4. 投影验证 - 测试点云投影效果
-5. 完整验证 - 运行所有验证并生成报告
+整合所有验证功能的统一入口：
+  summary          数据集摘要
+  format           KITTI格式验证
+  tr               Tr矩阵验证
+  projection       单帧投影测试
+  projection-full  多序列投影验证
+  quick            快速验证（~17秒，前3序列，各1帧）
+  full             完整验证（~15分钟，所有序列+完整投影）
 
 用法：
     python tools/validate_dataset.py summary /path/to/dataset
     python tools/validate_dataset.py format /path/to/dataset --sequence 00
     python tools/validate_dataset.py projection /path/to/dataset --sequence 00 --frame 0
-    python tools/validate_dataset.py full /path/to/dataset --output validation_results
+    python tools/validate_dataset.py quick /path/to/dataset --output-dir results/
+    python tools/validate_dataset.py full /path/to/dataset --output-dir results/
 """
 
 import sys
@@ -110,11 +113,17 @@ def run_comprehensive_projection(args):
     return result.returncode
 
 
-def run_full_validation(args):
-    """运行完整验证流程"""
+def run_full_validation(args, thorough=False):
+    """运行验证流程
+
+    Args:
+        thorough: False=快速模式(前3序列,各1帧), True=完整模式(所有序列+完整投影)
+    """
     import subprocess
     import json
     from datetime import datetime
+    
+    mode_label = "完整模式" if thorough else "快速模式"
     
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -122,15 +131,19 @@ def run_full_validation(args):
     results = {
         'timestamp': datetime.now().isoformat(),
         'dataset_root': args.dataset_root,
+        'mode': 'full' if thorough else 'quick',
         'validations': {}
     }
     
     print("\n" + "="*80)
-    print("🔍 BEVCalib 数据集完整验证")
+    print(f"BEVCalib 数据集验证 [{mode_label}]")
     print("="*80)
-    print(f"数据集: {args.dataset_root}")
+    print(f"数据集:   {args.dataset_root}")
     print(f"输出目录: {output_dir}")
-    print(f"模式: {'完整模式（所有序列+完整投影）' if args.full else '快速模式（前3个序列）'}")
+    if thorough:
+        print(f"范围:     所有序列 + 完整投影（每序列采样5帧）")
+    else:
+        print(f"范围:     前3个序列 + 采样投影（各1帧）")
     print("="*80 + "\n")
     
     # 1. 快速摘要
@@ -141,7 +154,7 @@ def run_full_validation(args):
         show_dataset_summary(args.dataset_root)
         results['validations']['summary'] = {'status': 'success'}
     except Exception as e:
-        print(f"❌ 错误: {e}")
+        print(f"错误: {e}")
         results['validations']['summary'] = {'status': 'failed', 'error': str(e)}
     
     # 2. Tr矩阵验证
@@ -166,9 +179,10 @@ def run_full_validation(args):
     
     sequences_dir = Path(args.dataset_root) / 'sequences'
     sequences = sorted([d.name for d in sequences_dir.iterdir() if d.is_dir()])
+    validate_sequences = sequences if thorough else sequences[:3]
     
     format_results = []
-    for seq in sequences[:3] if not args.full else sequences:  # 默认只验证前3个
+    for seq in validate_sequences:
         print(f"  验证序列 {seq}...")
         cmd = [sys.executable, str(VALIDATION_DIR / 'validate_kitti_odometry.py'),
                args.dataset_root, '--sequence', seq]
@@ -180,19 +194,18 @@ def run_full_validation(args):
         
         format_results.append({
             'sequence': seq,
-            'status': 'success' if '🎉' in result.stdout else 'failed',
+            'status': 'success' if result.returncode == 0 else 'failed',
             'log_file': str(log_file)
         })
     
     results['validations']['format'] = format_results
     
     # 4. 投影验证
-    if args.full:
-        # 完整投影验证（每序列5帧）
+    if thorough:
         print("\n步骤 4/4: 完整投影验证（每序列采样5帧）")
         print("-" * 80)
         print("  正在运行完整投影验证...")
-        print("  这将需要约10-15分钟...")
+        print("  预计耗时约10-15分钟...")
         
         projection_dir = output_dir / 'projection_validation'
         cmd = [sys.executable, str(VALIDATION_DIR / 'comprehensive_projection_validation.py'),
@@ -200,26 +213,25 @@ def run_full_validation(args):
                '--output_dir', str(projection_dir)]
         result = subprocess.run(cmd, capture_output=True, text=True)
         
-        results['validations']['projection_full'] = {
+        results['validations']['projection'] = {
+            'type': 'comprehensive',
             'status': 'success' if result.returncode == 0 else 'failed',
             'output_dir': str(projection_dir),
             'description': '每序列采样5帧（开始、1/4、中间、3/4、结束）'
         }
         
         if result.returncode == 0:
-            print("  ✅ 完整投影验证完成")
+            print("  完整投影验证完成")
             print(f"  报告: {projection_dir}/PROJECTION_VALIDATION_REPORT.md")
         else:
-            print("  ❌ 投影验证失败")
+            print("  投影验证失败")
     else:
-        # 快速投影验证（采样）
         print("\n步骤 4/4: 快速投影验证（采样）")
         print("-" * 80)
         
         projection_dir = output_dir / 'sample_projections'
         projection_dir.mkdir(exist_ok=True)
         
-        # 对前3个序列验证第0帧
         projection_results = []
         for seq in sequences[:3]:
             output_file = projection_dir / f'seq{seq}_frame000000.png'
@@ -239,7 +251,11 @@ def run_full_validation(args):
                 'output_file': str(output_file)
             })
         
-        results['validations']['projection_samples'] = projection_results
+        results['validations']['projection'] = {
+            'type': 'sampled',
+            'samples': projection_results,
+            'description': '前3序列各1帧（第0帧）'
+        }
     
     # 保存结果JSON
     results_file = output_dir / 'validation_summary.json'
@@ -247,21 +263,40 @@ def run_full_validation(args):
         json.dump(results, f, indent=2, ensure_ascii=False)
     
     # 生成报告
+    _write_report(results, output_dir, thorough)
+    
     report_file = output_dir / 'VALIDATION_SUMMARY.md'
+    print("\n" + "="*80)
+    print(f"验证完成！[{mode_label}]")
+    print(f"报告: {report_file}")
+    print(f"JSON: {results_file}")
+    print("="*80 + "\n")
+    
+    return 0
+
+
+def _write_report(results, output_dir, thorough):
+    """生成 Markdown 验证报告"""
+    report_file = output_dir / 'VALIDATION_SUMMARY.md'
+    results_file = output_dir / 'validation_summary.json'
+    
     with open(report_file, 'w', encoding='utf-8') as f:
-        f.write("# 数据集验证摘要\n\n")
+        mode_label = "完整验证" if thorough else "快速验证"
+        f.write(f"# 数据集验证摘要（{mode_label}）\n\n")
         f.write(f"**验证时间**: {results['timestamp']}\n\n")
         f.write(f"**数据集**: `{results['dataset_root']}`\n\n")
+        f.write(f"**模式**: {mode_label}\n\n")
         f.write("## 验证结果\n\n")
         
         # 摘要
         f.write("### 1. 数据集摘要\n")
-        f.write(f"状态: {'✅' if results['validations']['summary']['status'] == 'success' else '❌'}\n\n")
+        summary_ok = results['validations']['summary']['status'] == 'success'
+        f.write(f"状态: {'PASS' if summary_ok else 'FAIL'}\n\n")
         
         # Tr矩阵
         f.write("### 2. Tr矩阵验证\n")
-        tr_status = results['validations']['tr_matrix']['status']
-        f.write(f"状态: {'✅' if tr_status == 'success' else '❌'}\n")
+        tr_ok = results['validations']['tr_matrix']['status'] == 'success'
+        f.write(f"状态: {'PASS' if tr_ok else 'FAIL'}\n")
         f.write(f"日志: `{results['validations']['tr_matrix']['log_file']}`\n\n")
         
         # 格式验证
@@ -269,31 +304,32 @@ def run_full_validation(args):
         f.write("| 序列 | 状态 | 日志文件 |\n")
         f.write("|------|------|----------|\n")
         for fmt in results['validations']['format']:
-            status = '✅' if fmt['status'] == 'success' else '❌'
+            status = 'PASS' if fmt['status'] == 'success' else 'FAIL'
             f.write(f"| {fmt['sequence']} | {status} | `{fmt['log_file']}` |\n")
         f.write("\n")
         
         # 投影验证
-        f.write("### 4. 投影验证（采样）\n\n")
-        f.write("| 序列 | 帧 | 状态 | 输出文件 |\n")
-        f.write("|------|-----|------|----------|\n")
-        for proj in results['validations']['projection_samples']:
-            status = '✅' if proj['status'] == 'success' else '❌'
-            f.write(f"| {proj['sequence']} | {proj['frame']:06d} | {status} | `{proj['output_file']}` |\n")
-        f.write("\n")
+        proj = results['validations']['projection']
+        if proj['type'] == 'sampled':
+            f.write("### 4. 投影验证（采样）\n\n")
+            f.write(f"说明: {proj['description']}\n\n")
+            f.write("| 序列 | 帧 | 状态 | 输出文件 |\n")
+            f.write("|------|-----|------|----------|\n")
+            for s in proj['samples']:
+                status = 'PASS' if s['status'] == 'success' else 'FAIL'
+                f.write(f"| {s['sequence']} | {s['frame']:06d} | {status} | `{s['output_file']}` |\n")
+            f.write("\n")
+        else:
+            f.write("### 4. 完整投影验证\n\n")
+            f.write(f"说明: {proj['description']}\n\n")
+            status = 'PASS' if proj['status'] == 'success' else 'FAIL'
+            f.write(f"状态: {status}\n")
+            f.write(f"输出目录: `{proj['output_dir']}`\n\n")
         
         f.write("## 文件位置\n\n")
         f.write(f"- JSON结果: `{results_file}`\n")
         f.write(f"- 验证报告: `{report_file}`\n")
         f.write(f"- 日志目录: `{output_dir}/`\n")
-    
-    print("\n" + "="*80)
-    print(f"✅ 验证完成！")
-    print(f"报告: {report_file}")
-    print(f"JSON: {results_file}")
-    print("="*80 + "\n")
-    
-    return 0
 
 
 def main():
@@ -302,68 +338,72 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 快速摘要
-  python tools/validate_dataset.py summary /path/to/dataset
-  
-  # 验证格式（单个序列）
-  python tools/validate_dataset.py format /path/to/dataset --sequence 00
-  
-  # 验证格式（所有序列）
-  python tools/validate_dataset.py format /path/to/dataset --all
-  
-  # 验证Tr矩阵
-  python tools/validate_dataset.py tr /path/to/dataset
-  
-  # 测试投影（单帧）
-  python tools/validate_dataset.py projection /path/to/dataset --sequence 00 --frame 0
-  
-  # 完整投影验证
-  python tools/validate_dataset.py projection-full /path/to/dataset \\
-      --output-dir validation_results/projections
-  
-  # 运行完整验证
-  python tools/validate_dataset.py full /path/to/dataset \\
-      --output-dir validation_results
+  # 数据集摘要
+  python validate_dataset.py summary /path/to/dataset
+
+  # 快速验证 (~17秒，前3序列，各1帧投影)
+  python validate_dataset.py quick /path/to/dataset --output-dir results/
+
+  # 完整验证 (~15分钟，所有序列 + 完整投影)
+  python validate_dataset.py full /path/to/dataset --output-dir results/
+
+  # 格式验证（单序列 / 全部）
+  python validate_dataset.py format /path/to/dataset --sequence 00
+  python validate_dataset.py format /path/to/dataset --all
+
+  # Tr矩阵验证
+  python validate_dataset.py tr /path/to/dataset
+
+  # 单帧投影测试
+  python validate_dataset.py projection /path/to/dataset --sequence 00 --frame 0
+
+  # 多序列投影验证
+  python validate_dataset.py projection-full /path/to/dataset --output-dir proj/
         """
     )
     
     subparsers = parser.add_subparsers(dest='command', help='验证命令')
     
-    # 摘要命令
+    # --- 快速验证 ---
+    quick_parser = subparsers.add_parser(
+        'quick', help='快速验证（~17秒，前3序列，各1帧投影）')
+    quick_parser.add_argument('dataset_root', help='数据集根目录')
+    quick_parser.add_argument('--output-dir', required=True, help='验证结果输出目录')
+    
+    # --- 完整验证 ---
+    full_parser = subparsers.add_parser(
+        'full', help='完整验证（~15分钟，所有序列 + 完整投影）')
+    full_parser.add_argument('dataset_root', help='数据集根目录')
+    full_parser.add_argument('--output-dir', required=True, help='验证结果输出目录')
+    
+    # --- 摘要 ---
     summary_parser = subparsers.add_parser('summary', help='显示数据集摘要')
     summary_parser.add_argument('dataset_root', help='数据集根目录')
     
-    # 格式验证命令
+    # --- 格式验证 ---
     format_parser = subparsers.add_parser('format', help='验证KITTI格式')
     format_parser.add_argument('dataset_root', help='数据集根目录')
     format_parser.add_argument('--sequence', default='00', help='序列ID (默认: 00)')
     format_parser.add_argument('--all', dest='all_sequences', action='store_true',
                               help='验证所有序列')
     
-    # Tr矩阵验证命令
+    # --- Tr矩阵验证 ---
     tr_parser = subparsers.add_parser('tr', help='验证Tr矩阵')
     tr_parser.add_argument('dataset_root', help='数据集根目录')
     
-    # 投影测试命令
+    # --- 单帧投影 ---
     projection_parser = subparsers.add_parser('projection', help='测试单帧投影')
     projection_parser.add_argument('dataset_root', help='数据集根目录')
     projection_parser.add_argument('--sequence', default='00', help='序列ID')
     projection_parser.add_argument('--frame', type=int, default=0, help='帧号')
     projection_parser.add_argument('--output', help='输出文件路径')
     
-    # 完整投影验证命令
+    # --- 多序列投影验证 ---
     proj_full_parser = subparsers.add_parser('projection-full',
-                                             help='完整投影验证（多帧采样）')
+                                             help='多序列投影验证（每序列多帧采样）')
     proj_full_parser.add_argument('dataset_root', help='数据集根目录')
     proj_full_parser.add_argument('--output-dir', required=True, help='输出目录')
     proj_full_parser.add_argument('--sequences', nargs='+', help='指定序列（默认全部）')
-    
-    # 完整验证命令
-    full_parser = subparsers.add_parser('full', help='运行完整验证流程')
-    full_parser.add_argument('dataset_root', help='数据集根目录')
-    full_parser.add_argument('--output-dir', required=True, help='输出目录')
-    full_parser.add_argument('--full', action='store_true',
-                            help='完整模式（验证所有序列）')
     
     args = parser.parse_args()
     
@@ -371,7 +411,6 @@ def main():
         parser.print_help()
         return 1
     
-    # 执行相应的命令
     try:
         if args.command == 'summary':
             return run_summary(args)
@@ -383,8 +422,10 @@ def main():
             return run_projection_test(args)
         elif args.command == 'projection-full':
             return run_comprehensive_projection(args)
+        elif args.command == 'quick':
+            return run_full_validation(args, thorough=False)
         elif args.command == 'full':
-            return run_full_validation(args)
+            return run_full_validation(args, thorough=True)
         else:
             parser.print_help()
             return 1
@@ -392,7 +433,7 @@ def main():
         print("\n\n用户中断")
         return 130
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
+        print(f"\n错误: {e}")
         import traceback
         traceback.print_exc()
         return 1

@@ -36,6 +36,7 @@ class QuickCumsum(torch.autograd.Function):
 
 class QuickCumsumCuda(torch.autograd.Function):
     @staticmethod
+    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, x, geom_feats, ranks, B, D, H, W):
         kept = torch.ones(x.shape[0], device=x.device, dtype=torch.bool)
         kept[1:] = ranks[1:] != ranks[:-1]
@@ -61,6 +62,7 @@ class QuickCumsumCuda(torch.autograd.Function):
         return out
 
     @staticmethod
+    @torch.cuda.amp.custom_bwd
     def backward(ctx, out_grad):
         interval_starts, interval_lengths, geom_feats = ctx.saved_tensors
         B, D, H, W = ctx.saved_shapes

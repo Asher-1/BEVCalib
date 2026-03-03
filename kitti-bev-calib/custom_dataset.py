@@ -44,7 +44,7 @@ class CustomDataset(Dataset):
     KITTI_SEQUENCES = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', 
                        '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']
     
-    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True):
+    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None):
         # 使用 bev_settings 的体素化范围配置
         self.x_min, self.x_max = xbound[0], xbound[1]
         self.y_min, self.y_max = ybound[0], ybound[1]
@@ -77,6 +77,12 @@ class CustomDataset(Dataset):
         self.T = {}
         self.D = {}  # 畸变系数
         self.camera_model = {}  # 相机模型类型 (pinhole/fisheye)
+        
+        self.target_size = target_size  # (width, height) for pre-resized lookup
+        self._resized_dir_name = None
+        self._resized_K = {}  # pre-computed intrinsics for resized images
+        if target_size is not None:
+            self._resized_dir_name = f"image_2_{target_size[0]}x{target_size[1]}"
         
         # 确定要使用的序列
         if sequences is not None:
@@ -138,6 +144,33 @@ class CustomDataset(Dataset):
             raise ValueError(f"未找到任何有效数据！检查路径: {data_folder}")
         
         print(f"[CustomDataset] 总计: {len(self.all_files)} 帧来自 {len(loaded_sequences)} 个序列")
+        
+        self._use_resized = False
+        if self._resized_dir_name is not None:
+            sample_seq = loaded_sequences[0]
+            resized_dir = os.path.join(self.dataset_root, 'sequences', sample_seq, self._resized_dir_name)
+            if os.path.isdir(resized_dir) and len(os.listdir(resized_dir)) > 0:
+                self._use_resized = True
+                tw, th = self.target_size
+                for seq in loaded_sequences:
+                    K_orig = self.K[seq]
+                    sample_img_dir = os.path.join(self.dataset_root, 'sequences', seq, 'image_2')
+                    sample_file = next((f for f in os.listdir(sample_img_dir) if f.endswith('.png')), None)
+                    if sample_file:
+                        from PIL import Image as _PILImage
+                        with _PILImage.open(os.path.join(sample_img_dir, sample_file)) as _im:
+                            ow, oh = _im.size
+                    else:
+                        ow, oh = 3840, 2160
+                    sx, sy = tw / ow, th / oh
+                    self._resized_K[seq] = np.array([
+                        [K_orig[0, 0] * sx, 0, K_orig[0, 2] * sx],
+                        [0, K_orig[1, 1] * sy, K_orig[1, 2] * sy],
+                        [0, 0, 1]
+                    ])
+                print(f"[CustomDataset] ✅ 使用预处理图像: {self._resized_dir_name}/ (跳过运行时4K PNG解码+resize)")
+            else:
+                print(f"[CustomDataset] ⚠️ 预处理目录 {self._resized_dir_name}/ 未找到，使用原始4K PNG")
     
     def _detect_sequences(self):
         """自动检测数据集中存在的序列"""
@@ -202,8 +235,15 @@ class CustomDataset(Dataset):
     def __getitem__(self, idx, track_stats=False):
         seq = self.all_files[idx].split('/')[0]
         id = self.all_files[idx].split('/')[1]
-        img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
         pcd_path = os.path.join(self.dataset_root, 'sequences', seq, 'velodyne', id+'.bin')
+        
+        if self._use_resized:
+            img_path = os.path.join(self.dataset_root, 'sequences', seq, self._resized_dir_name, id+'.jpg')
+            if not os.path.exists(img_path):
+                img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
+        else:
+            img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
+        
         if not os.path.exists(img_path) or not os.path.exists(pcd_path):
             print('File not exist')
             assert False
@@ -260,8 +300,12 @@ class CustomDataset(Dataset):
             self.utilization_stats['valid_frames'] += 1
         
         gt_transform = self.T[seq]
-        intrinsic = self.K[seq]
-        distortion = self.D.get(seq, None)  # 畸变系数，可能为None
+        if self._use_resized and seq in self._resized_K:
+            intrinsic = self._resized_K[seq]
+            distortion = None
+        else:
+            intrinsic = self.K[seq]
+            distortion = self.D.get(seq, None)
         return img, pcd, gt_transform, intrinsic, distortion
     
     def validate_data_utilization(self, sample_ratio=0.1, min_utilization=0.3, min_valid_ratio=0.9, verbose=True):

@@ -83,14 +83,17 @@ class PC_reproj_loss(nn.Module):
         loss = torch.tensor(0.0, device = pcs.device)
         for i in range(B):
             RT_gt = gt_T_to_camera[i]
-            T_pred = torch.eye(4, device = pcs.device)
+            T_pred = torch.eye(4, device = pcs.device, dtype=pcs.dtype)
             T_pred[:3, :3] = pred_rotation[i]
             T_pred[:3, 3] = pred_translation[i]
-            RT_total = torch.matmul(RT_gt.inverse(), T_pred)
+            with torch.cuda.amp.autocast(enabled=False):
+                RT_total = torch.matmul(
+                    torch.linalg.inv(RT_gt.float()), T_pred.float()
+                )
             pc = pcs[i]
             if mask is not None:
                 pc = pc[mask[i] == 1]
-            ones = torch.ones(pc.shape[0], 1, device=pc.device)
+            ones = torch.ones(pc.shape[0], 1, device=pc.device, dtype=pc.dtype)
             points_h = torch.cat([pc, ones], dim = 1) # (N, 4)
             points_transformed = torch.matmul(points_h, RT_total.t())[:, :3] # (N, 3)
             error = (points_transformed - pc).norm(dim = 1)
@@ -133,14 +136,22 @@ class realworld_loss(nn.Module):
         quat_norm_loss = self.quat_norm_loss(pred_rotation)
         R_pred = batch_quat2mat(pred_rotation)
         T_pred = torch.bmm(T_pred, R_pred) # (B, 4, 4)
-        T_gt_expected = torch.matmul(T_pred.inverse(), init_T_to_camera)
+
+        with torch.cuda.amp.autocast(enabled=False):
+            T_gt_expected = torch.matmul(
+                torch.linalg.inv(T_pred.float()), init_T_to_camera.float()
+            )
+
         pred_translation = T_gt_expected[:, :3, 3]
         pred_rotation = T_gt_expected[:, :3, :3]
         gt_translation = gt_T_to_camera[:, :3, 3]
         gt_rotation = gt_T_to_camera[:, :3, :3]
 
         translation_loss = self.translation_loss(pred_translation, gt_translation)
-        rotation_loss = self.rotation_loss(pred_rotation, gt_rotation)
+
+        with torch.cuda.amp.autocast(enabled=False):
+            rotation_loss = self.rotation_loss(pred_rotation.float(), gt_rotation.float())
+
         PC_reproj_loss = self.PC_reproj_loss(pcs, gt_T_to_camera, pred_translation, pred_rotation, mask)
         loss = self.weight_translation * translation_loss \
                 + self.weight_rotation * rotation_loss \

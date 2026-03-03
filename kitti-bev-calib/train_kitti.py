@@ -1,13 +1,17 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+from torch.cuda.amp import autocast, GradScaler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from kitti_dataset import KittiDataset
 from custom_dataset import CustomDataset
 from bev_calib import BEVCalib
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.tensorboard import SummaryWriter
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from torch.utils.data import random_split
 import numpy as np
 from pathlib import Path
@@ -15,12 +19,33 @@ from tools import generate_single_perturbation_from_T
 import shutil
 import cv2
 import os
+import time
 from visualization import (
     compute_batch_pose_errors,
     visualize_batch_projection,
     prepare_image_for_tensorboard,
     compute_pose_errors
 )
+
+def tprint(*args, **kwargs):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}]", *args, **kwargs)
+
+def setup_ddp():
+    """Auto-detect and initialize DDP when launched via torchrun."""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        torch.cuda.set_device(local_rank)
+        timeout_minutes = int(os.environ.get('DDP_TIMEOUT_MINUTES', '30'))
+        dist.init_process_group(backend='nccl', timeout=timedelta(minutes=timeout_minutes))
+        return True, rank, world_size, local_rank
+    return False, 0, 1, 0
+
+def cleanup_ddp():
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the model")
@@ -33,7 +58,7 @@ def parse_args():
     parser.add_argument("--eval_angle_range_deg", type=float, default=None)
     parser.add_argument("--eval_trans_range", type=float, default=None)
     parser.add_argument("--num_epochs", type=int, default=1)
-    parser.add_argument("--eval_epoches", type=int, default=4)
+    parser.add_argument("--eval_epoches", type=int, default=20)
     parser.add_argument("--deformable", type=int, default=-1)
     parser.add_argument("--bev_encoder", type=int, default=1)
     parser.add_argument("--xyz_only", type=int, default=1)
@@ -59,15 +84,12 @@ def parse_args():
     parser.add_argument("--vis_point_radius", type=int, default=1, help="可视化点的半径")
     parser.add_argument("--enable_vis", type=int, default=1, help="是否启用点云投影可视化 (1=启用, 0=禁用)")
     parser.add_argument("--enable_ckpt_eval", type=int, default=1, help="是否在保存checkpoint时进行评估 (1=启用, 0=禁用)")
+    parser.add_argument("--compile", type=int, default=0, help="使用 torch.compile 加速模型 (1=启用, 0=禁用)")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
     """
     图像预处理: 缩放 → 更新内参
-    
-    注意: 不再应用cv2.undistort，因为B26A等相机管线输出的图像已经是去畸变的。
-    诊断验证: 对已去畸变图像再次undistort会引入最大~9px偏移(640x360)，
-    导致GT投影与图像不对齐。
     
     Args:
         item: PIL Image 或 numpy array
@@ -81,10 +103,6 @@ def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
         new_intrinsics: (3, 3) 调整后的内参矩阵
     """
     img = cv2.cvtColor(np.array(item), cv2.COLOR_RGB2BGR)
-    
-    # 注意: 不对图像做去畸变处理
-    # B26A相机管线输出的图像已经过去畸变校正，calib.txt中的D系数是原始镜头畸变参数(仅供参考)
-    # 诊断结果: 二次undistort/一次undistort差异比=0.971，证实图像已去畸变
     
     h, w = img.shape[:2]
     if crop:
@@ -146,48 +164,60 @@ def get_target_size(use_custom_dataset, target_width=None, target_height=None):
     return (target_width or default_width, target_height or default_height)
 
 
-def make_collate_fn(target_size):
-    """
-    创建带有指定 target_size 的 collate_fn
-    
-    Args:
-        target_size: (width, height) 目标图像尺寸
-    
-    Returns:
-        collate_fn 函数
-    
-    Note:
-        数据集返回: (img, pcd, gt_transform, intrinsic, distortion)
-        distortion 用于去畸变图像
-    """
-    def collate_fn(batch):
-        # item结构: (img, pcd, gt_transform, intrinsic, distortion)
-        # 去畸变 + 缩放在 crop_and_resize 中完成
-        processed_data = [crop_and_resize(item[0], target_size, item[3], False, item[4]) for item in batch]
-        imgs = [item[0] for item in processed_data]
-        intrinsics = [item[1] for item in processed_data]
+class PreprocessedDataset(Dataset):
+    """Wraps a dataset to perform image preprocessing (resize) in worker processes."""
+    def __init__(self, dataset, target_size, crop=False):
+        self.dataset = dataset
+        self.target_size = target_size
+        self.crop = crop
 
-        gt_T_to_camera = [item[2] for item in batch]
-        
-        pcs = []
-        masks = []
-        max_num_points = 0
-        for item in batch:
-            max_num_points = max(max_num_points, item[1].shape[0])
-        for item in batch:
-            pc = item[1]
-            masks.append(np.concatenate([np.ones(pc.shape[0]), np.zeros(max_num_points - pc.shape[0])], axis=0))
-            if pc.shape[0] < max_num_points:
-                pc = np.concatenate([pc, np.full((max_num_points - pc.shape[0], pc.shape[1]), 999999)], axis=0)
-            pcs.append(pc)
+    def __len__(self):
+        return len(self.dataset)
 
-        return imgs, pcs, masks, gt_T_to_camera, intrinsics
-    
-    return collate_fn
+    def __getitem__(self, idx):
+        result = self.dataset[idx]
+        if result is None:
+            return None
+        img, pcd, gt_transform, intrinsic, distortion = result
+        if isinstance(img, np.ndarray) and img.shape[:2] == (self.target_size[1], self.target_size[0]):
+            return img, pcd, gt_transform, intrinsic
+        resized_img, new_intrinsic = crop_and_resize(img, self.target_size, intrinsic, self.crop, distortion)
+        return resized_img, pcd, gt_transform, new_intrinsic
+
+
+def collate_fn(batch):
+    batch = [item for item in batch if item is not None]
+    if len(batch) == 0:
+        return None
+
+    imgs = [item[0] for item in batch]
+    gt_T_to_camera = [item[2] for item in batch]
+    intrinsics = [item[3] for item in batch]
+
+    pcs = []
+    masks = []
+    max_num_points = max(item[1].shape[0] for item in batch)
+    for item in batch:
+        pc = item[1]
+        masks.append(np.concatenate([np.ones(pc.shape[0]), np.zeros(max_num_points - pc.shape[0])], axis=0))
+        if pc.shape[0] < max_num_points:
+            pc = np.concatenate([pc, np.full((max_num_points - pc.shape[0], pc.shape[1]), 999999)], axis=0)
+        pcs.append(pc)
+
+    return imgs, pcs, masks, gt_T_to_camera, intrinsics
 
 def main():
     args = parse_args()
-    print(args)
+    
+    use_ddp, rank, world_size, local_rank = setup_ddp()
+    is_main = (rank == 0)
+    
+    if is_main:
+        tprint(f"训练启动, 参数配置:")
+        tprint(args)
+    if use_ddp and is_main:
+        tprint(f"DDP enabled: {world_size} GPUs, rank={rank}, local_rank={local_rank}")
+    
     num_epochs = args.num_epochs
     dataset_root = args.dataset_root
     log_dir = args.log_dir
@@ -197,36 +227,41 @@ def main():
         current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
         log_dir = f"{log_dir}/{current_time}"
     ckpt_save_dir = os.path.join(log_dir, "checkpoint")
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(ckpt_save_dir, exist_ok=True)
+    if is_main:
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(ckpt_save_dir, exist_ok=True)
+    if use_ddp:
+        dist.barrier()
     
-    # 复制源代码到日志目录（排除logs目录避免无限递归）
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    bev_calib_dir = os.path.join(parent_dir, 'kitti-bev-calib')
-    dest_dir = os.path.join(log_dir, 'kitti-bev-calib')
+    if is_main:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_dir = os.path.dirname(current_dir)
+        bev_calib_dir = os.path.join(parent_dir, 'kitti-bev-calib')
+        dest_dir = os.path.join(log_dir, 'kitti-bev-calib')
+        try:
+            shutil.copytree(bev_calib_dir, dest_dir, dirs_exist_ok=True, 
+                           ignore=shutil.ignore_patterns('logs', '__pycache__', '*.pyc', '.git*'))
+        except Exception as e:
+            print(f"警告: 复制源代码失败: {e}")
     
-    # 使用ignore参数排除logs目录
-    def ignore_logs(directory, files):
-        return ['logs', '__pycache__', '.git'] if 'logs' in files or '__pycache__' in files else []
+    writer = SummaryWriter(log_dir) if is_main else None
     
-    try:
-        shutil.copytree(bev_calib_dir, dest_dir, dirs_exist_ok=True, 
-                       ignore=shutil.ignore_patterns('logs', '__pycache__', '*.pyc', '.git*'))
-    except Exception as e:
-        print(f"警告: 复制源代码失败: {e}")
-    
-    writer = SummaryWriter(log_dir)
+    # 预先计算目标图像尺寸（供 CustomDataset 查找预处理图像）
+    target_size = get_target_size(
+        use_custom_dataset=args.use_custom_dataset > 0,
+        target_width=args.target_width,
+        target_height=args.target_height
+    )
     
     # 选择数据集类型
     if args.use_custom_dataset:
-        dataset = CustomDataset(dataset_root)
+        dataset = CustomDataset(dataset_root, target_size=target_size)
     else:
         print("使用 KittiDataset")
         dataset = KittiDataset(dataset_root)
 
-    # 数据利用率校验
-    if args.validate_data > 0:
+    # 数据利用率校验 (only on rank 0)
+    if args.validate_data > 0 and is_main:
         print("\n" + "="*60)
         print("开始数据利用率校验...")
         print("="*60)
@@ -238,7 +273,6 @@ def main():
             verbose=True
         )
         
-        # 将验证结果保存到日志
         validation_log_path = os.path.join(log_dir, "data_validation.txt")
         with open(validation_log_path, 'w') as f:
             f.write("数据利用率校验结果\n")
@@ -251,29 +285,23 @@ def main():
         print(f"验证结果已保存到: {validation_log_path}")
         
         if not validation_result['passed']:
-            print("\n❌ 错误: 数据利用率验证未通过，退出训练！")
+            print("\n错误: 数据利用率验证未通过，退出训练！")
             print("   可以通过以下方式解决：")
             print("   1. 检查 bev_settings.py 中的体素化范围配置是否与数据集匹配")
             print("   2. 调整 --min_point_utilization 或 --min_valid_ratio 阈值")
             print("   4. 使用 --validate_data=0 跳过验证（不推荐）")
             exit(1)
-    else:
-        print("\n⚠️ 跳过数据利用率校验 (--validate_data=0)")
+    elif is_main:
+        print("\n跳过数据利用率校验 (--validate_data=0)")
+    if use_ddp:
+        dist.barrier()
 
-    # 获取目标图像尺寸
-    target_size = get_target_size(
-        use_custom_dataset=args.use_custom_dataset > 0,
-        target_width=args.target_width,
-        target_height=args.target_height
-    )
-    print(f"\n📐 目标图像尺寸: {target_size[0]}x{target_size[1]} (宽x高)")
-    if args.use_custom_dataset > 0:
-        print(f"   (自定义数据集模式，保持16:9宽高比)")
-    else:
-        print(f"   (KITTI数据集模式)")
-    
-    # 创建 collate_fn
-    collate_fn = make_collate_fn(target_size)
+    if is_main:
+        tprint(f"目标图像尺寸: {target_size[0]}x{target_size[1]} (宽x高)")
+        if args.use_custom_dataset > 0:
+            print(f"   (自定义数据集模式，保持16:9宽高比)")
+        else:
+            print(f"   (KITTI数据集模式)")
     
     generator = torch.Generator().manual_seed(114514)
     train_size = int(0.8 * len(dataset))
@@ -283,32 +311,50 @@ def main():
         [train_size, val_size],
         generator=generator
     )
-    
+
+    train_dataset = PreprocessedDataset(train_dataset, target_size, crop=False)
+    val_dataset = PreprocessedDataset(val_dataset, target_size, crop=False)
+
+    num_workers = min(16, os.cpu_count() or 4)
+    if is_main:
+        tprint(f"DataLoader: num_workers={num_workers}, pin_memory=True, persistent_workers=True")
+
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if use_ddp else None
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=num_workers,
         collate_fn=collate_fn,
-        shuffle=True,
-        drop_last=True
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        drop_last=True,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=num_workers,
         collate_fn=collate_fn,
-        shuffle=False
+        shuffle=False,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
     )
 
     deformable_choise = args.deformable > 0
     bev_encoder_choise = args.bev_encoder > 0
     xyz_only_choise = args.xyz_only > 0
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+
+    torch.backends.cudnn.benchmark = True
     
-    # img_shape 格式为 (H, W)，而 target_size 是 (W, H)
     img_shape = (target_size[1], target_size[0])
-    print(f"🔧 网络输入尺寸 (H, W): {img_shape}")
+    if is_main:
+        tprint(f"网络输入尺寸 (H, W): {img_shape}")
     
     model = BEVCalib(
         deformable=deformable_choise,
@@ -319,13 +365,38 @@ def main():
     if args.pretrain_ckpt is not None:
         state_dict = torch.load(args.pretrain_ckpt, map_location=device)
         model.load_state_dict(state_dict['model_state_dict'], strict=True)
-        print(f"Load pretrain model from {args.pretrain_ckpt}")
+        if is_main:
+            tprint(f"Load pretrain model from {args.pretrain_ckpt}")
+    
+    if args.compile > 0:
+        try:
+            model = torch.compile(model)
+            if is_main:
+                tprint("torch.compile enabled")
+        except Exception as e:
+            if is_main:
+                tprint(f"torch.compile failed, falling back to eager mode: {e}")
+    
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        if is_main:
+            tprint(f"Model wrapped with DistributedDataParallel on {world_size} GPUs")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     scheduler_choice = args.scheduler > 0
     if scheduler_choice:
         scheduler = StepLR(optimizer, step_size=args.step_size, gamma=0.5)
+
+    use_amp = torch.cuda.is_available()
+    amp_dtype = torch.float16
+    scaler = GradScaler(enabled=use_amp)
+    if use_amp and is_main:
+        tprint(f"AMP enabled with {amp_dtype}, GradScaler=on")
+    
+    raw_model = model.module if use_ddp else model
+    
+    _identity_4x4 = torch.eye(4, device=device)
 
     train_noise = {
         "angle_range_deg": args.angle_range_deg if args.angle_range_deg is not None else 20,
@@ -337,7 +408,6 @@ def main():
         "trans_range": args.eval_trans_range if args.eval_trans_range is not None else train_noise["trans_range"],
     }
 
-    # 全局步数计数器
     global_step = 0
     
     # 累积误差统计
@@ -347,44 +417,62 @@ def main():
     }
     
     for epoch in range(num_epochs):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         model.train()
         train_loss = {}
-        # 重置epoch误差统计
         for key in epoch_pose_errors:
             epoch_pose_errors[key] = 0
         
-        out_init_loss_choice = False
-        if epoch < 5:
-            out_init_loss_choice = True # Output initial loss for the first 5 epochs
-        for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(train_loader):
-            gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
+        epoch_start = time.time()
+        out_init_loss_choice = epoch < 5
+        t_data_total, t_prep_total, t_compute_total, t_vis_total = 0.0, 0.0, 0.0, 0.0
+        vis_count = 0
+        t_iter_start = time.time()
+        for batch_index, batch_data in enumerate(train_loader):
+            t_data_end = time.time()
+            t_data_total += t_data_end - t_iter_start
+
+            if batch_data is None:
+                t_iter_start = time.time()
+                continue
+            imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
+
+            t_prep_start = time.time()
+            gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
             init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=train_noise["angle_range_deg"], trans_range=train_noise["trans_range"])
-            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
             if xyz_only_choise:
                 pcs_np = np.array(pcs)[:, :, :3]
             else:
                 pcs_np = np.array(pcs)
-            pcs = torch.from_numpy(pcs_np).float().to(device)
-            gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device)
-            init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device)
-            post_cam2ego_T = torch.eye(4).unsqueeze(0).repeat(gt_T_to_camera.shape[0], 1, 1).float().to(device)
-            intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device)
+            pcs_t = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
+            gt_T_to_camera_t = torch.from_numpy(gt_T_to_camera_np).to(device, non_blocking=True)
+            init_T_to_camera_t = torch.from_numpy(init_T_to_camera_np.astype(np.float32)).to(device, non_blocking=True)
+            B_cur = gt_T_to_camera_t.shape[0]
+            post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
+            intrinsic_matrix = torch.from_numpy(np.array(intrinsics, dtype=np.float32)).to(device, non_blocking=True)
+            t_prep_total += time.time() - t_prep_start
 
-            optimizer.zero_grad()
-            # img, pc, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, cam_intrinsic
-            T_pred, init_loss, loss = model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=out_init_loss_choice)
-            total_loss = loss["total_loss"]
-            total_loss.backward()
-            optimizer.step()
+            t_compute_start = time.time()
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=use_amp, dtype=amp_dtype):
+                T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=out_init_loss_choice)
+                total_loss = loss["total_loss"]
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+            scaler.step(optimizer)
+            scaler.update()
+            t_compute_total += time.time() - t_compute_start
             
-            # 计算详细的姿态误差
             with torch.no_grad():
-                batch_errors = compute_batch_pose_errors(T_pred, gt_T_to_camera)
+                batch_errors = compute_batch_pose_errors(T_pred, gt_T_to_camera_t)
                 for key in epoch_pose_errors:
                     epoch_pose_errors[key] += batch_errors[key]
             
             for key in loss.keys():
-                if key not in train_loss.keys():
+                if key not in train_loss:
                     train_loss[key] = loss[key].item()
                 else:
                     train_loss[key] += loss[key].item()
@@ -392,28 +480,24 @@ def main():
             if init_loss is not None:
                 for key in init_loss.keys():
                     train_key = f"init_{key}"
-                    if train_key not in train_loss.keys():
+                    if train_key not in train_loss:
                         train_loss[train_key] = init_loss[key].item()
                     else:
                         train_loss[train_key] += init_loss[key].item()
 
-            if batch_index % 10 == 0:
-                print(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], Loss: {total_loss.item():.4f}, "
-                      f"Trans: {batch_errors['trans_error']:.4f}m (Fwd:{batch_errors['fwd_error']:.4f} Lat:{batch_errors['lat_error']:.4f} Ht:{batch_errors['ht_error']:.4f}), "
-                      f"Rot: {batch_errors['rot_error']:.2f}°")
+            if batch_index % 10 == 0 and is_main:
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], Loss: {total_loss.item():.4f}, "
+                       f"Trans: {batch_errors['trans_error']:.4f}m (Fwd:{batch_errors['fwd_error']:.4f} Lat:{batch_errors['lat_error']:.4f} Ht:{batch_errors['ht_error']:.4f}), "
+                       f"Rot: {batch_errors['rot_error']:.2f}°")
             
-            # TensorBoard 可视化
-            if args.enable_vis > 0 and batch_index % args.vis_freq == 0:
+            if args.enable_vis > 0 and batch_index % args.vis_freq == 0 and is_main:
+                t_vis_start = time.time()
                 with torch.no_grad():
-                    # 准备可视化数据
-                    imgs_np = np.array(imgs)  # (B, H, W, 3) BGR
+                    imgs_np = np.array(imgs)
                     masks_np = np.array(masks)
                     T_pred_np = T_pred.detach().cpu().numpy()
-                    
-                    # 首次可视化时输出调试信息
                     debug_vis = (epoch == 0 and batch_index == 0)
                     
-                    # 创建可视化图像
                     vis_image = visualize_batch_projection(
                         images=imgs_np,
                         points_batch=pcs_np,
@@ -428,11 +512,9 @@ def main():
                         debug=debug_vis
                     )
                     
-                    # 转换为TensorBoard格式并记录
                     vis_image_tb = prepare_image_for_tensorboard(vis_image)
                     writer.add_image('Train/Projection', vis_image_tb, global_step)
                     
-                    # 记录当前batch的详细误差
                     writer.add_scalar('Train/PoseError/trans_error_m', batch_errors['trans_error'], global_step)
                     writer.add_scalar('Train/PoseError/fwd_error_m', batch_errors['fwd_error'], global_step)
                     writer.add_scalar('Train/PoseError/lat_error_m', batch_errors['lat_error'], global_step)
@@ -441,56 +523,70 @@ def main():
                     writer.add_scalar('Train/PoseError/roll_error_deg', batch_errors['roll_error'], global_step)
                     writer.add_scalar('Train/PoseError/pitch_error_deg', batch_errors['pitch_error'], global_step)
                     writer.add_scalar('Train/PoseError/yaw_error_deg', batch_errors['yaw_error'], global_step)
+                t_vis_total += time.time() - t_vis_start
+                vis_count += 1
             
             global_step += 1
+            t_iter_start = time.time()
+        
+        epoch_time = time.time() - epoch_start
+        if is_main:
+            steps_per_sec = len(train_loader) / epoch_time
+            t_other = epoch_time - t_data_total - t_prep_total - t_compute_total - t_vis_total
+            tprint(f"Epoch [{epoch+1}/{num_epochs}] completed in {epoch_time:.1f}s ({epoch_time/60:.1f}min), {steps_per_sec:.2f} steps/s, {epoch_time/len(train_loader):.2f}s/step")
+            tprint(f"  Profiling: data_load={t_data_total:.1f}s({t_data_total/epoch_time*100:.1f}%), "
+                   f"prep={t_prep_total:.1f}s({t_prep_total/epoch_time*100:.1f}%), "
+                   f"compute={t_compute_total:.1f}s({t_compute_total/epoch_time*100:.1f}%), "
+                   f"vis={t_vis_total:.1f}s({t_vis_total/epoch_time*100:.1f}%, {vis_count}calls, {t_vis_total/max(vis_count,1):.1f}s/call), "
+                   f"other={t_other:.1f}s({t_other/epoch_time*100:.1f}%)")
 
         if scheduler_choice:   
             scheduler.step()    
         
-        for key in train_loss.keys():
-            train_loss[key] /= len(train_loader)
-            print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss {key}: {train_loss[key]:.4f}")
-            writer.add_scalar(f"Loss/train/{key}", train_loss[key], epoch)
+        if is_main:
+            for key in train_loss.keys():
+                train_loss[key] /= len(train_loader)
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], Train Loss {key}: {train_loss[key]:.4f}")
+                writer.add_scalar(f"Loss/train/{key}", train_loss[key], epoch)
+            
+            for key in epoch_pose_errors:
+                epoch_pose_errors[key] /= len(train_loader)
+            
+            tprint(f"Epoch [{epoch+1}/{num_epochs}], Train Pose Error - "
+                   f"Trans: {epoch_pose_errors['trans_error']:.4f}m "
+                   f"(Fwd:{epoch_pose_errors['fwd_error']:.4f} Lat:{epoch_pose_errors['lat_error']:.4f} Ht:{epoch_pose_errors['ht_error']:.4f}), "
+                   f"Rot: {epoch_pose_errors['rot_error']:.2f}° "
+                   f"(R:{epoch_pose_errors['roll_error']:.2f} P:{epoch_pose_errors['pitch_error']:.2f} Y:{epoch_pose_errors['yaw_error']:.2f})")
+            
+            writer.add_scalar('Epoch/train/trans_error_m', epoch_pose_errors['trans_error'], epoch)
+            writer.add_scalar('Epoch/train/fwd_error_m', epoch_pose_errors['fwd_error'], epoch)
+            writer.add_scalar('Epoch/train/lat_error_m', epoch_pose_errors['lat_error'], epoch)
+            writer.add_scalar('Epoch/train/ht_error_m', epoch_pose_errors['ht_error'], epoch)
+            writer.add_scalar('Epoch/train/rot_error_deg', epoch_pose_errors['rot_error'], epoch)
+            writer.add_scalar('Epoch/train/roll_error_deg', epoch_pose_errors['roll_error'], epoch)
+            writer.add_scalar('Epoch/train/pitch_error_deg', epoch_pose_errors['pitch_error'], epoch)
+            writer.add_scalar('Epoch/train/yaw_error_deg', epoch_pose_errors['yaw_error'], epoch)
         
-        # 记录epoch平均姿态误差
-        for key in epoch_pose_errors:
-            epoch_pose_errors[key] /= len(train_loader)
-        
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Pose Error - "
-              f"Trans: {epoch_pose_errors['trans_error']:.4f}m "
-              f"(Fwd:{epoch_pose_errors['fwd_error']:.4f} Lat:{epoch_pose_errors['lat_error']:.4f} Ht:{epoch_pose_errors['ht_error']:.4f}), "
-              f"Rot: {epoch_pose_errors['rot_error']:.2f}° "
-              f"(R:{epoch_pose_errors['roll_error']:.2f} P:{epoch_pose_errors['pitch_error']:.2f} Y:{epoch_pose_errors['yaw_error']:.2f})")
-        
-        writer.add_scalar('Epoch/train/trans_error_m', epoch_pose_errors['trans_error'], epoch)
-        writer.add_scalar('Epoch/train/fwd_error_m', epoch_pose_errors['fwd_error'], epoch)
-        writer.add_scalar('Epoch/train/lat_error_m', epoch_pose_errors['lat_error'], epoch)
-        writer.add_scalar('Epoch/train/ht_error_m', epoch_pose_errors['ht_error'], epoch)
-        writer.add_scalar('Epoch/train/rot_error_deg', epoch_pose_errors['rot_error'], epoch)
-        writer.add_scalar('Epoch/train/roll_error_deg', epoch_pose_errors['roll_error'], epoch)
-        writer.add_scalar('Epoch/train/pitch_error_deg', epoch_pose_errors['pitch_error'], epoch)
-        writer.add_scalar('Epoch/train/yaw_error_deg', epoch_pose_errors['yaw_error'], epoch)
-        
-        if epoch == num_epochs - 1 or (args.save_ckpt_per_epoches > 0 and (epoch + 1) % args.save_ckpt_per_epoches == 0):
+        if is_main and (epoch == num_epochs - 1 or (args.save_ckpt_per_epoches > 0 and (epoch + 1) % args.save_ckpt_per_epoches == 0)):
             ckpt_path = os.path.join(ckpt_save_dir, f"ckpt_{epoch+1}.pth")
+            model_to_save = model.module if use_ddp else model
             torch.save({
                 'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': model_to_save.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': train_loss,
                 'train_noise': train_noise,
                 'eval_noise': eval_noise,
                 'args': vars(args) 
             }, ckpt_path)
-            print(f"Checkpoint saved to {ckpt_path}")
+            tprint(f"Checkpoint saved to {ckpt_path}")
             
-            # 保存checkpoint对应的推理结果和可视化（使用验证集）
-            if args.enable_ckpt_eval > 0:
+            if args.enable_ckpt_eval > 0 and is_main:
                 ckpt_eval_dir = os.path.join(ckpt_save_dir, f"ckpt_{epoch+1}_eval")
                 os.makedirs(ckpt_eval_dir, exist_ok=True)
                 
-                print(f"Evaluating checkpoint {epoch+1} on validation set and saving visualization to {ckpt_eval_dir}...")
-                model.eval()
+                tprint(f"Evaluating checkpoint {epoch+1} on validation set and saving visualization to {ckpt_eval_dir}...")
+                raw_model.eval()
                 
                 # 使用验证集的噪声范围
                 eval_trans_range = eval_noise["trans_range"]
@@ -508,10 +604,10 @@ def main():
                 
                 sample_count = 0
                 with torch.no_grad():
-                    for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(val_loader):
-                        # 只评估前几个batch（避免太多样本）
-                        if batch_index >= 5:  # 最多评估5个batch
+                    for batch_index, batch_data in enumerate(val_loader):
+                        if batch_index >= 5 or batch_data is None:
                             break
+                        imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
                         
                         gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
                         init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
@@ -520,18 +616,20 @@ def main():
                             trans_range=eval_trans_range
                         )
                         
-                        resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+                        resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
                         if xyz_only_choise:
                             pcs_np = np.array(pcs)[:, :, :3]
                         else:
                             pcs_np = np.array(pcs)
-                        pcs = torch.from_numpy(pcs_np).float().to(device)
-                        gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device)
-                        init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device)
-                        post_cam2ego_T = torch.eye(4).unsqueeze(0).repeat(gt_T_to_camera.shape[0], 1, 1).float().to(device)
-                        intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device)
+                        pcs = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
+                        gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device, non_blocking=True)
+                        init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device, non_blocking=True)
+                        B_cur = gt_T_to_camera.shape[0]
+                        post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
+                        intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device, non_blocking=True)
                         
-                        T_pred, _, _ = model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+                        with autocast(enabled=use_amp, dtype=amp_dtype):
+                            T_pred, _, _ = raw_model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
                         
                         imgs_np = np.array(imgs)
                         masks_np = np.array(masks)
@@ -626,16 +724,19 @@ def main():
                     f.write(f"  Yaw (Z):     {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
                     f.write("\n" + "="*80 + "\n")
                 
-                print(f"Checkpoint evaluation complete: {sample_count} samples saved to {ckpt_eval_dir}")
+                tprint(f"Checkpoint evaluation complete: {sample_count} samples saved to {ckpt_eval_dir}")
 
         train_loss = None
         init_loss = None
         loss = None
 
-        if epoch % args.eval_epoches == 0:
+        if use_ddp:
+            dist.barrier()
+
+        if epoch % args.eval_epoches == 0 and is_main:
             eval_trans_range = eval_noise["trans_range"]
             eval_angle_range = eval_noise["angle_range_deg"]
-            model.eval()
+            raw_model.eval()
             val_loss = {}
             val_pose_errors = {
                 'trans_error': 0, 'fwd_error': 0, 'lat_error': 0, 'ht_error': 0,
@@ -643,21 +744,25 @@ def main():
             }
             
             with torch.no_grad():
-                for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(val_loader):
-                    # img, pc, depth_img, gt_T_to_camera, init_T_to_camera
+                for batch_index, batch_data in enumerate(val_loader):
+                    if batch_data is None:
+                        continue
+                    imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
                     gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
                     init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=eval_angle_range, trans_range=eval_trans_range)
-                    resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+                    resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
                     if xyz_only_choise:
                         pcs_np = np.array(pcs)[:, :, :3]
                     else:
                         pcs_np = np.array(pcs)
-                    pcs = torch.from_numpy(pcs_np).float().to(device)
-                    gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device)
-                    init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device)
-                    post_cam2ego_T = torch.eye(4).unsqueeze(0).repeat(gt_T_to_camera.shape[0], 1, 1).float().to(device)
-                    intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device)
-                    T_pred, init_loss, loss = model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+                    pcs = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
+                    gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device, non_blocking=True)
+                    init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device, non_blocking=True)
+                    B_cur = gt_T_to_camera.shape[0]
+                    post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
+                    intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device, non_blocking=True)
+                    with autocast(enabled=use_amp, dtype=amp_dtype):
+                        T_pred, init_loss, loss = raw_model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
 
                     # 计算姿态误差
                     batch_errors = compute_batch_pose_errors(T_pred, gt_T_to_camera)
@@ -702,18 +807,18 @@ def main():
 
             for key in val_loss.keys():
                 val_loss[key] /= len(val_loader)
-                print(f"Epoch [{epoch+1}/{num_epochs}], {eval_angle_range}_{eval_trans_range} Validation Loss {key}: {val_loss[key]:.4f}")
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], {eval_angle_range}_{eval_trans_range} Validation Loss {key}: {val_loss[key]:.4f}")
                 writer.add_scalar(f"Loss/val/{key}", val_loss[key], epoch)
             
             # 记录验证集姿态误差
             for key in val_pose_errors:
                 val_pose_errors[key] /= len(val_loader)
             
-            print(f"Epoch [{epoch+1}/{num_epochs}], Val Pose Error - "
-                  f"Trans: {val_pose_errors['trans_error']:.4f}m "
-                  f"(Fwd:{val_pose_errors['fwd_error']:.4f} Lat:{val_pose_errors['lat_error']:.4f} Ht:{val_pose_errors['ht_error']:.4f}), "
-                  f"Rot: {val_pose_errors['rot_error']:.2f}° "
-                  f"(R:{val_pose_errors['roll_error']:.2f} P:{val_pose_errors['pitch_error']:.2f} Y:{val_pose_errors['yaw_error']:.2f})")
+            tprint(f"Epoch [{epoch+1}/{num_epochs}], Val Pose Error - "
+                   f"Trans: {val_pose_errors['trans_error']:.4f}m "
+                   f"(Fwd:{val_pose_errors['fwd_error']:.4f} Lat:{val_pose_errors['lat_error']:.4f} Ht:{val_pose_errors['ht_error']:.4f}), "
+                   f"Rot: {val_pose_errors['rot_error']:.2f}° "
+                   f"(R:{val_pose_errors['roll_error']:.2f} P:{val_pose_errors['pitch_error']:.2f} Y:{val_pose_errors['yaw_error']:.2f})")
             
             writer.add_scalar('Epoch/val/trans_error_m', val_pose_errors['trans_error'], epoch)
             writer.add_scalar('Epoch/val/fwd_error_m', val_pose_errors['fwd_error'], epoch)
@@ -727,8 +832,13 @@ def main():
             val_loss = None
             loss = None
 
-    writer.close()
-    print(f"Logs are saved at {log_dir}")
+        if use_ddp:
+            dist.barrier()
+
+    if is_main and writer is not None:
+        writer.close()
+        tprint(f"Logs are saved at {log_dir}")
+    cleanup_ddp()
 
 
 if __name__ == "__main__":
