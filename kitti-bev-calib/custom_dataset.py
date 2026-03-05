@@ -30,10 +30,10 @@ class CustomDataset(Dataset):
     2. 自定义数据集（自动检测序列）
     
     坐标系说明：
-    - 输入点云坐标系：Sensing系（X前进，Y左，Z上）
-    - Tr矩阵：Sensing → Camera
+    - 输入点云坐标系：LiDAR系（X前进，Y左，Z上，KITTI-Odometry标准）
+    - Tr矩阵：Camera → LiDAR（KITTI标准Velodyne→Camera的逆）
     - 输出点云坐标系：BEV坐标系（X前进，Y左，Z上），范围裁剪到体素化范围
-    - 返回的 gt_transform 是 Tr 的逆矩阵（Camera → Sensing）
+    - 返回的 gt_transform = inv(Tr) = LiDAR → Camera
     
     数据利用率统计：
     - 记录原始点云数量、过滤后点云数量、利用率
@@ -74,9 +74,10 @@ class CustomDataset(Dataset):
         self.all_files = []
         self.dataset_root = data_folder
         self.K = {}
-        self.T = {}
+        self.T = {}  # LiDAR→Camera (inv(Tr))
         self.D = {}  # 畸变系数
         self.camera_model = {}  # 相机模型类型 (pinhole/fisheye)
+        self.T_cam2sensing = {}  # Camera→Sensing (系统已知相机外参)
         
         self.target_size = target_size  # (width, height) for pre-resized lookup
         self._resized_dir_name = None
@@ -103,19 +104,21 @@ class CustomDataset(Dataset):
             try:
                 odom = odometry(data_folder, seq)
                 calib = odom.calib
-                # 注意: 自定义数据集现在符合KITTI标准格式
-                # pykitti读取的T_cam2_velo实际上是 calib.txt 中的 Tr 矩阵
-                # KITTI标准：Tr = Camera → Velodyne，使用时需要取逆得到 Velodyne → Camera
-                T_cam_to_sensing = calib.T_cam2_velo  # Camera → Sensing
-                T_sensing_to_cam = np.linalg.inv(T_cam_to_sensing)  # Sensing → Camera (取逆)
+                # pykitti读取的T_cam2_velo即calib.txt中的Tr矩阵
+                # KITTI标准: Tr = Camera → LiDAR (Velodyne)
+                # 取逆得到 LiDAR → Camera，用作训练的ground truth变换
+                T_cam_to_lidar = calib.T_cam2_velo  # Camera → LiDAR
+                T_lidar_to_cam = np.linalg.inv(T_cam_to_lidar)  # LiDAR → Camera
                 self.K[seq] = calib.K_cam2
-                self.T[seq] = T_sensing_to_cam  # 存储 Sensing → Camera
+                self.T[seq] = T_lidar_to_cam  # LiDAR → Camera (训练ground truth)
                 
-                # 解析畸变系数D和相机模型（pykitti不支持这些扩展字段）
+                # 解析扩展字段（pykitti不支持: D, camera_model, T_cam2sensing）
                 calib_path = os.path.join(self.dataset_root, 'sequences', seq, 'calib.txt')
-                D, camera_model = self._parse_distortion_from_calib(calib_path)
+                D, camera_model, T_cam2s = self._parse_extended_calib(calib_path)
                 self.D[seq] = D
                 self.camera_model[seq] = camera_model
+                if T_cam2s is not None:
+                    self.T_cam2sensing[seq] = T_cam2s
                 
                 image_list = os.listdir(os.path.join(self.dataset_root, 'sequences', seq, 'image_2'))
                 image_list.sort()
@@ -197,37 +200,39 @@ class CustomDataset(Dataset):
         sequences.sort()
         return sequences
     
-    def _parse_distortion_from_calib(self, calib_path):
-        """
-        从calib.txt解析畸变系数D和相机模型类型
-        
-        Args:
-            calib_path: calib.txt文件路径
+    def _parse_extended_calib(self, calib_path):
+        """从calib.txt解析扩展字段（pykitti不支持的自定义字段）
         
         Returns:
-            D: 畸变系数数组 (5,) 或 None
+            D: 畸变系数数组 或 None
             camera_model: 'pinhole' 或 'fisheye'
+            T_cam2sensing: Camera→Sensing 4x4矩阵 或 None
         """
         D = None
-        camera_model = 'pinhole'  # 默认针孔模型
+        camera_model = 'pinhole'
+        T_cam2sensing = None
         
         if not os.path.exists(calib_path):
-            return D, camera_model
+            return D, camera_model, T_cam2sensing
         
         try:
             with open(calib_path, 'r') as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith('D:'):
-                        # 解析畸变系数: D: k1 k2 p1 p2 k3
                         values = line.split(':')[1].strip().split()
                         D = np.array([float(v) for v in values], dtype=np.float64)
                     elif line.startswith('camera_model:'):
                         camera_model = line.split(':')[1].strip()
+                    elif line.startswith('T_cam2sensing:'):
+                        values = line.split(':')[1].strip().split()
+                        arr = np.array([float(v) for v in values], dtype=np.float64)
+                        if len(arr) == 12:
+                            T_cam2sensing = np.vstack([arr.reshape(3, 4), [0, 0, 0, 1]])
         except Exception as e:
-            print(f"[CustomDataset] 警告: 无法解析畸变系数: {e}")
+            print(f"[CustomDataset] 警告: 无法解析扩展标定字段: {e}")
         
-        return D, camera_model
+        return D, camera_model, T_cam2sensing
 
     def __len__(self):
         return len(self.all_files)

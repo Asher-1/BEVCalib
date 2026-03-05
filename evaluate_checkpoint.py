@@ -90,6 +90,8 @@ def evaluate_checkpoint(args):
     
     print("=" * 80)
     print(f"评估 Checkpoint: {args.ckpt_path}")
+    if args.output_dir:
+        print(f"输出目录: {args.output_dir}")
     print("=" * 80)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -119,30 +121,36 @@ def evaluate_checkpoint(args):
         auto_detect=True
     )
     
-    # 划分训练集和验证集（使用相同的划分方式）
-    val_size = int(len(dataset) * args.validate_sample_ratio)
-    train_size = len(dataset) - val_size
-    
-    from torch.utils.data import random_split
-    import torch as torch_module
-    generator = torch_module.Generator().manual_seed(42)
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+    # 根据 use_full_dataset 决定是否使用全量数据
+    if args.use_full_dataset:
+        eval_dataset = dataset
+        print(f"   ✓ 使用全量数据集: {len(eval_dataset)} 个样本（跨数据集泛化测试）")
+    else:
+        val_size = int(len(dataset) * args.validate_sample_ratio)
+        train_size = len(dataset) - val_size
+        
+        from torch.utils.data import random_split
+        import torch as torch_module
+        generator = torch_module.Generator().manual_seed(42)
+        _, eval_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+        print(f"   ✓ 验证集: {len(eval_dataset)} 个样本 (ratio={args.validate_sample_ratio})")
     
     collate_fn = make_collate_fn((args.target_width, args.target_height))
     val_loader = DataLoader(
-        val_dataset,
+        eval_dataset,
         batch_size=args.batch_size,
         num_workers=4,
         collate_fn=collate_fn,
         shuffle=False
     )
     
-    print(f"   ✓ 验证集: {len(val_dataset)} 个样本")
-    
     # 创建评估输出目录
-    ckpt_dir = os.path.dirname(args.ckpt_path)
-    ckpt_name = os.path.basename(args.ckpt_path).replace('.pth', '')
-    eval_dir = os.path.join(ckpt_dir, f"{ckpt_name}_eval")
+    if args.output_dir:
+        eval_dir = args.output_dir
+    else:
+        ckpt_dir = os.path.dirname(args.ckpt_path)
+        ckpt_name = os.path.basename(args.ckpt_path).replace('.pth', '')
+        eval_dir = os.path.join(ckpt_dir, f"{ckpt_name}_eval")
     os.makedirs(eval_dir, exist_ok=True)
     
     print(f"\n4. 开始评估...")
@@ -189,42 +197,33 @@ def evaluate_checkpoint(args):
             masks_np = np.array(masks)
             T_pred_np = T_pred.detach().cpu().numpy()
             
-            # 为每个样本生成可视化和保存外参
+            # 为每个样本计算误差，按间隔生成可视化
+            vis_interval = args.vis_interval
             for i in range(len(imgs_np)):
                 sample_idx = sample_count + i
                 
-                print(f"   处理样本 {sample_idx}...", end='', flush=True)
+                save_vis = (vis_interval > 0 and sample_idx % vis_interval == 0)
                 
-                # 🔍 调试：检查D是否被传递
-                if sample_idx == 0:
-                    D_to_pass = [distortions[i]] if distortions is not None and i < len(distortions) else None
-                    print(f"\n[DEBUG evaluation] distortions变量: {distortions is not None}")
-                    if distortions is not None and i < len(distortions):
-                        print(f"[DEBUG evaluation] D = {distortions[i]}")
-                        print(f"[DEBUG evaluation] D传递到visualization: {D_to_pass}")
-                    else:
-                        print(f"[DEBUG evaluation] ⚠️  D未传递！distortions={distortions}")
+                if save_vis:
+                    print(f"   处理样本 {sample_idx} (含可视化)...", end='', flush=True)
+                elif sample_idx % 50 == 0:
+                    print(f"   处理样本 {sample_idx}/{max_batches * args.batch_size}...", end='', flush=True)
                 
-                # 生成单样本可视化
-                vis_image = visualize_batch_projection(
-                    images=imgs_np[i:i+1],
-                    points_batch=pcs_np[i:i+1],
-                    init_T_batch=init_T_to_camera_np[i:i+1],
-                    gt_T_batch=gt_T_to_camera_np[i:i+1],
-                    pred_T_batch=T_pred_np[i:i+1],
-                    K_batch=np.array(intrinsics)[i:i+1],
-                    D_batch=[distortions[i]] if distortions is not None and i < len(distortions) else None,
-                    camera_model='pinhole',  # 从calib.txt读取，默认pinhole
-                    masks=masks_np[i:i+1],
-                    num_samples=1,
-                    max_points=args.vis_points,
-                    point_radius=args.vis_point_radius,
-                    use_inverse_transform=args.use_inverse_transform > 0
-                )
-                
-                # 保存可视化图像
-                vis_image_path = os.path.join(eval_dir, f"sample_{sample_idx:04d}_projection.png")
-                cv2.imwrite(vis_image_path, vis_image)
+                if save_vis:
+                    vis_image = visualize_batch_projection(
+                        images=imgs_np[i:i+1],
+                        points_batch=pcs_np[i:i+1],
+                        init_T_batch=init_T_to_camera_np[i:i+1],
+                        gt_T_batch=gt_T_to_camera_np[i:i+1],
+                        pred_T_batch=T_pred_np[i:i+1],
+                        K_batch=np.array(intrinsics)[i:i+1],
+                        masks=masks_np[i:i+1],
+                        num_samples=1,
+                        max_points=args.vis_points,
+                        point_radius=args.vis_point_radius,
+                    )
+                    vis_image_path = os.path.join(eval_dir, f"sample_{sample_idx:04d}_projection.png")
+                    cv2.imwrite(vis_image_path, vis_image)
                 
                 # 计算误差
                 errors = compute_pose_errors(T_pred_np[i], gt_T_to_camera_np[i])
@@ -233,13 +232,15 @@ def evaluate_checkpoint(args):
                 for key in all_errors:
                     all_errors[key].append(errors[key])
                 
-                # 保存外参和误差信息
+                # 保存外参和误差信息到文件
                 with open(extrinsics_file, 'a') as f:
-                    # 只在第一次写入文件头和 GT
                     if not gt_extrinsics_written:
+                        eval_mode = "全量数据集泛化测试" if args.use_full_dataset else "验证集评估"
                         f.write(f"Checkpoint: {os.path.basename(args.ckpt_path)}\n")
                         f.write(f"Epoch: {epoch}\n")
-                        f.write(f"Evaluation on validation set (perturbation: {args.angle_range_deg}deg, {args.trans_range}m)\n")
+                        f.write(f"Dataset: {args.dataset_root}\n")
+                        f.write(f"Mode: {eval_mode}\n")
+                        f.write(f"Perturbation: {args.angle_range_deg}deg, {args.trans_range}m\n")
                         f.write(f"="*80 + "\n\n")
                         
                         f.write("Ground Truth Extrinsics (LiDAR → Camera):\n")
@@ -269,7 +270,8 @@ def evaluate_checkpoint(args):
                     
                     f.write("\n" + "="*80 + "\n\n")
                 
-                print(f" ✓ (Trans: {errors['trans_error']:.4f}m, Rot: {errors['rot_error']:.2f}°)")
+                if save_vis or sample_idx % 50 == 0:
+                    print(f" ✓ (Trans: {errors['trans_error']:.4f}m, Rot: {errors['rot_error']:.2f}°)")
             
             sample_count += len(imgs_np)
     
@@ -306,6 +308,9 @@ def main():
     parser = argparse.ArgumentParser(description="评估已保存的 checkpoint")
     parser.add_argument("--ckpt_path", type=str, required=True, help="Checkpoint 文件路径")
     parser.add_argument("--dataset_root", type=str, required=True, help="数据集根目录")
+    parser.add_argument("--output_dir", type=str, default=None,
+                       help="评估结果输出目录（默认: checkpoint目录下的 ckpt_xxx_eval/）。"
+                            "跨数据集泛化测试时建议指定独立输出目录")
     parser.add_argument("--angle_range_deg", type=float, default=20.0, help="扰动角度范围")
     parser.add_argument("--trans_range", type=float, default=1.5, help="扰动平移范围")
     parser.add_argument("--target_width", type=int, default=640, help="目标图像宽度")
@@ -313,11 +318,16 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--max_batches", type=int, default=5, help="最多评估的batch数（0表示全部）")
     parser.add_argument("--validate_sample_ratio", type=float, default=0.1, help="验证集比例")
+    parser.add_argument("--use_full_dataset", action='store_true', default=False,
+                       help="使用全量数据集评估（跨数据集泛化测试时使用，忽略 validate_sample_ratio）")
     parser.add_argument("--deformable", type=int, default=0, help="是否使用 deformable attention")
     parser.add_argument("--bev_encoder", type=int, default=1, help="是否使用 BEV encoder")
     parser.add_argument("--xyz_only", type=int, default=1, help="是否只使用 XYZ 坐标")
     parser.add_argument("--vis_points", type=int, default=80000, help="可视化最大点数")
     parser.add_argument("--vis_point_radius", type=int, default=1, help="可视化点半径")
+    parser.add_argument("--vis_interval", type=int, default=1,
+                       help="每隔N个样本保存一张可视化图（默认1=每帧都保存，"
+                            "全量评估时建议设为50-100以减少IO）")
     parser.add_argument("--use_inverse_transform", type=int, default=0, 
                        help="是否对变换矩阵取逆后再使用 (1=是, 0=否) - 用于修复投影高度偏移")
     

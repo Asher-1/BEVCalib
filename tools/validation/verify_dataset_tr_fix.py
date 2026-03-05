@@ -89,7 +89,7 @@ def main():
             all_passed = False
             continue
 
-        print(f'\nTr 矩阵 (Camera → Sensing, KITTI 标准):')
+        print(f'\nTr 矩阵 (Camera → LiDAR, KITTI 标准):')
         print(tr)
 
         print(f'\n验证 Tr 矩阵格式...')

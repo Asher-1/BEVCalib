@@ -18,6 +18,7 @@
 #   --log_suffix SUFFIX      - Suffix for log directory (useful for multiple runs)
 #   --angle_range_deg DEG    - Rotation perturbation range in degrees (default: 20)
 #   --trans_range M          - Translation perturbation range in meters (default: 1.5)
+#   --batch_size N           - Batch size per GPU (default: 16)
 #   --ddp N                  - Enable DDP with N GPUs per node
 #   --nnodes N               - Number of nodes for multi-node DDP (default: 1)
 #   --node_rank R            - Rank of current node (0=master)
@@ -87,6 +88,7 @@ TENSORBOARD_PORT=""
 LOG_SUFFIX=""
 ANGLE_RANGE_DEG="20"
 TRANS_RANGE="1.5"
+BATCH_SIZE="16"
 DDP_NGPUS=""
 USE_COMPILE=0
 NNODES="1"
@@ -154,6 +156,14 @@ while [[ $# -gt 0 ]]; do
             TRANS_RANGE="$2"
             shift 2
             ;;
+        --batch_size)
+            if [ $# -lt 2 ]; then
+                echo "❌ Error: --batch_size requires a value"
+                exit 1
+            fi
+            BATCH_SIZE="$2"
+            shift 2
+            ;;
         --ddp)
             if [ $# -lt 2 ]; then
                 echo "❌ Error: --ddp requires number of GPUs"
@@ -188,7 +198,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "❌ Unknown option: $1"
-            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile"
+            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile"
             exit 1
             ;;
     esac
@@ -261,35 +271,60 @@ mkdir -p "$LOG_DIR"
 # 设置日志文件路径
 TRAIN_LOG_FILE="$LOG_DIR/train.log"
 
-echo "========================================"
-echo "BEVCalib Universal Training Script"
-echo "========================================"
-echo "Dataset Name: $DATASET_NAME"
-echo "Dataset Path: $DATASET_ROOT"
-echo "Mode: $MODE"
-if [ -n "$CUDA_DEVICE" ]; then
-    echo "CUDA Device: $CUDA_DEVICE"
-fi
-echo "TensorBoard Port: $TENSORBOARD_PORT"
-if [ -n "$LOG_SUFFIX" ]; then
-    echo "Log Suffix: $LOG_SUFFIX"
-fi
-echo "Log Directory: $LOG_DIR"
-echo "Train Log File: $TRAIN_LOG_FILE"
-echo "Perturbation: ±${ANGLE_RANGE_DEG}°, ${TRANS_RANGE}m"
+PYTORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")
+CUDA_VER=$(python -c "import torch; print(torch.version.cuda or 'N/A')" 2>/dev/null || echo "unknown")
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
+GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "?")
+AVAIL_GPUS=$(nvidia-smi --list-gpus 2>/dev/null | wc -l || echo "0")
+
 if [ -n "$DDP_NGPUS" ]; then
     if [ "$NNODES" -gt 1 ]; then
-        echo "DDP: ${NNODES} nodes x ${DDP_NGPUS} GPUs/node = $((NNODES * DDP_NGPUS)) total GPUs"
-        echo "Node: rank=$NODE_RANK, master=$MASTER_ADDR:$MASTER_PORT"
-        echo "Rendezvous: backend=static, timeout=${RDZV_TIMEOUT}s"
+        COMPUTE_STR="DDP Multi-Node (${NNODES} nodes x ${DDP_NGPUS} GPUs = $((NNODES * DDP_NGPUS)) total)"
     else
-        echo "DDP: ${DDP_NGPUS} GPUs (standalone)"
+        COMPUTE_STR="DDP Standalone (${DDP_NGPUS} GPUs)"
     fi
+elif [ -n "$CUDA_DEVICE" ]; then
+    COMPUTE_STR="Single GPU (cuda:${CUDA_DEVICE})"
+else
+    COMPUTE_STR="Single GPU (auto)"
 fi
-if [ "$USE_COMPILE" -eq 1 ]; then
-    echo "torch.compile: enabled"
+
+_W=70
+_print_row() { printf "│  %-18s %-${_W}s│\n" "$1" "$2"; }
+_print_sep() { printf "├"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┤\n"; }
+_print_top() { printf "┌"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┐\n"; }
+_print_bot() { printf "└"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┘\n"; }
+
+echo ""
+_print_top
+printf "│%*s│\n" $((_W + 21)) ""
+printf "│%*s%s%*s│\n" $(( (_W + 21 - 32) / 2 )) "" "BEVCalib Training Configuration" $(( (_W + 21 - 32 + 1) / 2 )) ""
+printf "│%*s│\n" $((_W + 21)) ""
+_print_sep
+_print_row "Dataset:"       "$DATASET_NAME"
+_print_row "Dataset Path:"  "$DATASET_ROOT"
+_print_row "Mode:"          "$MODE"
+_print_sep
+_print_row "Batch Size:"    "$BATCH_SIZE"
+_print_row "Angle Range:"   "±${ANGLE_RANGE_DEG}°"
+_print_row "Trans Range:"   "${TRANS_RANGE}m"
+_print_sep
+_print_row "Compute:"       "$COMPUTE_STR"
+_print_row "GPU:"           "${GPU_NAME} (${GPU_MEM}MB) x${AVAIL_GPUS}"
+_print_row "PyTorch:"       "$PYTORCH_VER"
+_print_row "CUDA:"          "$CUDA_VER"
+_print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
+if [ "$NNODES" -gt 1 ]; then
+_print_sep
+_print_row "Node Rank:"     "$NODE_RANK"
+_print_row "Master:"        "${MASTER_ADDR}:${MASTER_PORT}"
+_print_row "RDZV Timeout:"  "${RDZV_TIMEOUT}s"
 fi
-echo "========================================"
+_print_sep
+_print_row "Log Directory:"     "$LOG_DIR"
+_print_row "Log File:"          "$TRAIN_LOG_FILE"
+_print_row "TensorBoard Port:"  "$TENSORBOARD_PORT"
+_print_bot
 echo ""
 
 # 如果不是交互式终端（即通过 nohup 运行），自动重定向日志到文件
@@ -398,7 +433,7 @@ case $MODE in
             --log_dir "$LOG_DIR" \
             --dataset_root "$DATASET_ROOT" \
             --label ${DATASET_NAME}_scratch \
-            --batch_size 24 \
+            --batch_size $BATCH_SIZE \
             --num_epochs 400 \
             --save_ckpt_per_epoches 40 \
             --angle_range_deg $ANGLE_RANGE_DEG \
@@ -434,7 +469,7 @@ case $MODE in
             --dataset_root "$DATASET_ROOT" \
             --pretrain_ckpt "$KITTI_PRETRAIN" \
             --label ${DATASET_NAME}_finetuned \
-            --batch_size 24 \
+            --batch_size $BATCH_SIZE \
             --num_epochs 50 \
             --save_ckpt_per_epoches 10 \
             --angle_range_deg $ANGLE_RANGE_DEG \
@@ -469,7 +504,7 @@ case $MODE in
             --dataset_root "$DATASET_ROOT" \
             --pretrain_ckpt "$LAST_CKPT" \
             --label ${DATASET_NAME}_resume \
-            --batch_size 24 \
+            --batch_size $BATCH_SIZE \
             --num_epochs 100 \
             --save_ckpt_per_epoches 10 \
             --angle_range_deg $ANGLE_RANGE_DEG \
