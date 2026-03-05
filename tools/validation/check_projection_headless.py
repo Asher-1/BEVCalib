@@ -58,19 +58,16 @@ def undistort_image(img, calib):
 def project_points(points, calib, img_shape):
     """投影点云到图像
 
-    Tr = Camera→Sensing (KITTI标准), 投影使用 inv(Tr) = Sensing→Camera
+    Tr = Camera→LiDAR (KITTI标准), 投影使用 inv(Tr) = LiDAR→Camera
     """
-    # 获取标定参数
     Tr_3x4 = calib['Tr'].reshape(3, 4)
-    # 扩展为4x4矩阵
     Tr = np.vstack([Tr_3x4, [0, 0, 0, 1]])
     P2 = calib['P2'].reshape(3, 4)
     
-    # 转换为齐次坐标
     points_hom = np.hstack([points[:, :3], np.ones((points.shape[0], 1))])
     
-    # 变换到相机坐标系（使用inv(Tr)！）
-    Tr_inv = np.linalg.inv(Tr)  # Sensing/Velodyne → Camera
+    # LiDAR→Camera
+    Tr_inv = np.linalg.inv(Tr)
     points_cam = (Tr_inv @ points_hom.T).T[:, :3]
     
     # 过滤掉相机后面的点

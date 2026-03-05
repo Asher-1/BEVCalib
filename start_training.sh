@@ -19,6 +19,7 @@
 #   --compile              启用 torch.compile 加速 (需 PyTorch>=2.1 + Python<=3.10)
 #   --angle DEG            扰动角度范围 (默认: 5)
 #   --trans M              扰动平移范围 (默认: 0.3)
+#   --bs N                 batch size (默认: 16)
 #   --fg                   前台阻塞执行 (不使用nohup, 输出到终端, Ctrl+C可停止)
 #   --no-tb                不自动启动 TensorBoard
 #   --tb_port PORT         TensorBoard端口 (默认: 自动检测空闲端口, 起始6006)
@@ -76,7 +77,7 @@
 #   bash start_training.sh B26A v5 --ddp --nnodes --fg
 #
 #   # 全量数据集DDP多机
-#   bash start_training.sh all v1 --ddp --nnodes --fg --angle 10 --trans 0.5
+#   bash start_training.sh all v1 --bs 24 --ddp --nnodes --fg --angle 10 --trans 0.5
 #
 #   # 自定义数据集
 #   CUSTOM_DATASET=/path/to/my_data bash start_training.sh custom v1 --ddp
@@ -171,6 +172,7 @@ DDP_NGPUS=""
 USE_COMPILE=""
 DDP_ANGLE="5"
 DDP_TRANS="0.3"
+BATCH_SIZE="16"
 FOREGROUND=0
 ENABLE_TB=1
 TB_PORT=""
@@ -205,6 +207,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --trans)
             DDP_TRANS="$2"
+            shift 2
+            ;;
+        --bs|--batch_size)
+            BATCH_SIZE="$2"
             shift 2
             ;;
         --fg|--foreground)
@@ -270,7 +276,7 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo ""
-            echo "可用选项: --ddp [N], --fg, --compile, --angle DEG, --trans M, --no-tb, --tb_port PORT,"
+            echo "可用选项: --ddp [N], --fg, --compile, --angle DEG, --trans M, --bs N, --no-tb, --tb_port PORT,"
             echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
             echo "          --rdzv_timeout SECONDS"
             exit 1
@@ -523,36 +529,47 @@ fi
 # ============================================================================
 # 启动信息
 # ============================================================================
-echo ""
-echo "========================================"
-echo "BEVCalib 训练启动"
-echo "========================================"
-echo "数据集: $DATASET_NAME"
-echo "数据集路径: $DATASET_ROOT"
-echo "版本: $VERSION"
+
 if [ "$USE_DDP" -eq 1 ]; then
     if [ "$NNODES" -gt 1 ]; then
         TOTAL_GPUS=$((NNODES * DDP_NGPUS))
-        echo "模式: DDP多机并行 (${NNODES}机 x ${DDP_NGPUS}GPU = ${TOTAL_GPUS}GPU)"
-        echo "当前节点: rank=${NODE_RANK}, master=${MASTER_ADDR}:${MASTER_PORT}"
-        [ -n "$CLUSTER_DETECTED" ] && echo "集群: $CLUSTER_DETECTED"
+        MODE_STR="DDP多机并行 (${NNODES}机 x ${DDP_NGPUS}GPU = ${TOTAL_GPUS}GPU)"
     else
-        echo "模式: DDP单机并行 (${DDP_NGPUS} GPUs)"
+        MODE_STR="DDP单机并行 (${DDP_NGPUS} GPUs)"
     fi
-    echo "扰动: ${DDP_ANGLE}deg, ${DDP_TRANS}m"
 else
-    echo "模式: 独立多任务 (每GPU一个扰动设置)"
+    MODE_STR="独立多任务 (每GPU一个扰动设置)"
 fi
-if [ "$FOREGROUND" -eq 1 ]; then
-    echo "执行: 前台阻塞 (Ctrl+C停止)"
-else
-    echo "执行: 后台 (nohup)"
+
+_W=70
+_print_row() { printf "│  %-18s %-${_W}s│\n" "$1" "$2"; }
+_print_sep() { printf "├"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┤\n"; }
+
+echo ""
+printf "┌"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┐\n"
+printf "│%*s│\n" $((_W + 21)) ""
+printf "│%*s%s%*s│\n" $(( (_W + 21 - 32) / 2 )) "" "BEVCalib Training Configuration" $(( (_W + 21 - 32 + 1) / 2 )) ""
+printf "│%*s│\n" $((_W + 21)) ""
+_print_sep
+_print_row "Dataset:"       "$DATASET_NAME"
+_print_row "Dataset Path:"  "$DATASET_ROOT"
+_print_row "Version:"       "$VERSION"
+_print_sep
+_print_row "Mode:"          "$MODE_STR"
+_print_row "Batch Size:"    "$BATCH_SIZE"
+_print_row "Angle Range:"   "±${DDP_ANGLE}°"
+_print_row "Trans Range:"   "${DDP_TRANS}m"
+_print_row "Execution:"     "$([ "$FOREGROUND" -eq 1 ] && echo 'Foreground (Ctrl+C to stop)' || echo 'Background (nohup)')"
+_print_row "TensorBoard:"   "$([ "$ENABLE_TB" -eq 1 ] && echo 'auto-start' || echo 'disabled (--no-tb)')"
+if [ "$USE_DDP" -eq 1 ] && [ "$NNODES" -gt 1 ]; then
+_print_sep
+_print_row "Node Rank:"     "$NODE_RANK"
+_print_row "Master:"        "${MASTER_ADDR}:${MASTER_PORT}"
+[ -n "$CLUSTER_DETECTED" ] && \
+_print_row "Cluster:"       "$CLUSTER_DETECTED"
+_print_row "RDZV Timeout:"  "${RDZV_TIMEOUT}s"
 fi
-echo "TensorBoard: $([ "$ENABLE_TB" -eq 1 ] && echo '自动启动' || echo '已禁用 (--no-tb)')"
-if [ "$NNODES" -gt 1 ]; then
-    echo "Rendezvous超时: ${RDZV_TIMEOUT}s"
-fi
-echo "========================================"
+printf "└"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┘\n"
 echo ""
 
 # 检查是否有正在运行的训练
@@ -686,6 +703,7 @@ if [ "$USE_DDP" -eq 1 ]; then
         --ddp $DDP_NGPUS \
         --angle_range_deg $DDP_ANGLE \
         --trans_range $DDP_TRANS \
+        --batch_size $BATCH_SIZE \
         --log_suffix ${LOG_SUFFIX} \
         --rdzv_timeout $RDZV_TIMEOUT \
         $MULTI_NODE_ARGS \
@@ -736,6 +754,7 @@ else
         --cuda_device 0 \
         --angle_range_deg 10 \
         --trans_range 0.5 \
+        --batch_size $BATCH_SIZE \
         --log_suffix small_10deg_${VERSION} \
         $USE_COMPILE"
 
@@ -745,6 +764,7 @@ else
         --cuda_device 1 \
         --angle_range_deg 5 \
         --trans_range 0.3 \
+        --batch_size $BATCH_SIZE \
         --log_suffix small_5deg_${VERSION} \
         $USE_COMPILE"
 

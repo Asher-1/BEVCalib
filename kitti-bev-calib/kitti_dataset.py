@@ -10,24 +10,6 @@ from tqdm import tqdm
 from bev_settings import xbound, ybound, zbound
 
 class KittiDataset(Dataset):
-    """
-    KITTI-Odometry 格式数据集加载器
-    
-    支持：
-    1. 标准 KITTI-Odometry 数据集（22个序列）
-    2. 自定义数据集（自动检测序列）
-    
-    坐标系说明：
-    - 输入点云坐标系：Sensing系（X前进，Y左，Z上）
-    - Tr矩阵：Sensing → Camera
-    - 输出点云坐标系：BEV坐标系（X前进，Y左，Z上），范围裁剪到体素化范围
-    - 返回的 gt_transform 是 Tr 的逆矩阵（Camera → Sensing）
-    
-    数据利用率统计：
-    - 记录原始点云数量、过滤后点云数量、利用率
-    - 支持训练前验证数据利用率
-    """
-    
     # 标准KITTI-Odometry序列
     KITTI_SEQUENCES = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', 
                        '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']

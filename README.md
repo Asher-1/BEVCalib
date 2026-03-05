@@ -22,7 +22,7 @@ pip3 install -r requirements.txt
 The code is built with following libraries:
 
 - Python = 3.11
-- Pytorch = 2.6.0
+- Pytorch = 2.2.2
 - CUDA = 11.8
 - cuda-toolkit = 11.8
 - [spconv-cu118](https://github.com/traveller59/spconv)
@@ -354,6 +354,48 @@ tail -30 logs/model/checkpoint/ckpt_100_eval/extrinsics_and_errors.txt
 
 # 查看具体样本
 grep "Sample 0000" -A 30 logs/model/checkpoint/ckpt_100_eval/extrinsics_and_errors.txt
+```
+
+#### 跨数据集泛化测试
+
+使用在 A 数据集上训练的模型，评估其在 B 数据集（不同车辆/路线）上的表现，以测试模型泛化能力。
+
+新增参数：
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--output_dir` | str | None | 自定义输出目录（避免覆盖原有 eval 结果）|
+| `--use_full_dataset` | flag | False | 使用全量数据（跨数据集测试不需要 train/val split）|
+| `--vis_interval` | int | 1 | 每隔 N 个样本保存可视化（全量评估时建议 50-100）|
+
+**泛化测试用法：**
+```bash
+export HF_HUB_OFFLINE=1  # 离线环境需要设置
+
+python evaluate_checkpoint.py \
+    --ckpt_path logs/test_arch_validation/.../checkpoint/ckpt_400.pth \
+    --dataset_root /path/to/unseen_test_data \
+    --output_dir /path/to/unseen_test_data/generalization_eval/ckpt_400 \
+    --use_full_dataset \
+    --max_batches 0 \
+    --angle_range_deg 5.0 \
+    --trans_range 0.3 \
+    --vis_interval 50
+```
+
+**关键要点：**
+- `--use_full_dataset`：跨数据集测试应使用全部数据，而非 train/val split
+- `--output_dir`：指定独立输出目录，不覆盖训练时的 eval 结果
+- `--vis_interval 50`：每 50 帧保存一张可视化（1000+ 帧时避免大量 IO）
+- `--angle_range_deg` / `--trans_range`：应与训练时的扰动参数保持一致
+
+**输出目录结构：**
+```
+generalization_eval/ckpt_400/
+├── extrinsics_and_errors.txt     # 逐帧误差 + 全量平均统计
+├── sample_0000_projection.png    # 每 vis_interval 帧的可视化
+├── sample_0050_projection.png
+└── ...
 ```
 
 ---

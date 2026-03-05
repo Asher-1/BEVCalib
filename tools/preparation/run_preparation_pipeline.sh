@@ -10,6 +10,7 @@
 # 用法示例：
 #   ./run_preparation_pipeline.sh /path/to/trips_dir /data/output 640 360
 #   ./run_preparation_pipeline.sh /path/to/trips_dir /data/output 640 360 traffic_2 10.0 --force-config
+#   ./run_preparation_pipeline.sh /path/to/trips_dir /data/output 640 360 traffic_2 10.0 -j 4
 # 
 # 参数：
 #   $1: trips 根目录（包含多个 trip 子目录）
@@ -19,6 +20,7 @@
 #   $5: 相机名称（可选，默认traffic_2）
 #   $6: 目标帧率（可选，默认10.0）
 #   --force-config: 强制使用lidars.cfg外参（可出现在任意位置）
+#   -j N: 并行处理trip数量（可出现在任意位置，默认1=串行）
 # 
 # 作者: AI Assistant
 # 日期: 2026-02-28
@@ -26,15 +28,25 @@
 
 set -e  # 遇到错误立即退出
 
-# ========== 解析 --force-config 标志 ==========
+# ========== 解析标志参数 ==========
 FORCE_CONFIG=""
+PARALLEL_JOBS=""
 POSITIONAL_ARGS=()
-for arg in "$@"; do
-    if [ "$arg" = "--force-config" ]; then
-        FORCE_CONFIG="--force-config"
-    else
-        POSITIONAL_ARGS+=("$arg")
-    fi
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force-config)
+            FORCE_CONFIG="--force-config"
+            shift
+            ;;
+        -j)
+            PARALLEL_JOBS="-j $2"
+            shift 2
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
 done
 
 # ========== 参数解析 ==========
@@ -67,7 +79,8 @@ if [ -z "$TRIPS_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
     echo "  $0 /path/to/trips /data/output"
     echo "  $0 /path/to/trips /data/output 640 360"
     echo "  $0 /path/to/trips /data/output 640 360 traffic_2 10.0"
-    echo "  $0 /path/to/trips /data/output 640 360 traffic_2 10.0 --force-config"
+    echo "  $0 /path/to/trips /data/output 640 360 -j 4"
+    echo "  $0 /path/to/trips /data/output 640 360 traffic_2 10.0 --force-config -j 2"
     echo ""
     echo "参数:"
     echo "  trips_dir      - trips 根目录（包含多个 trip 子目录）"
@@ -77,6 +90,7 @@ if [ -z "$TRIPS_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
     echo "  camera_name    - 相机名称（默认: traffic_2）"
     echo "  fps            - 目标帧率（默认: 10.0）"
     echo "  --force-config - 强制使用lidars.cfg外参替代bag外参"
+    echo "  -j N           - 并行处理trip数量（默认: 1=串行，推荐2~4）"
     exit 1
 fi
 
@@ -107,6 +121,9 @@ echo "  输出目录:      ${OUTPUT_DIR}"
 echo "  相机名称:      ${CAMERA_NAME}"
 echo "  目标帧率:      ${TARGET_FPS}"
 echo "  Resize 尺寸:   ${RESIZE_WIDTH}×${RESIZE_HEIGHT}"
+if [ -n "$PARALLEL_JOBS" ]; then
+    echo -e "  并行处理:      ${YELLOW}${PARALLEL_JOBS}${NC}"
+fi
 if [ -n "$FORCE_CONFIG" ]; then
     echo -e "  ${YELLOW}⚠️  强制使用lidars.cfg外参（忽略bag中的lidar外参）${NC}"
 fi
@@ -126,7 +143,8 @@ python3 "${BATCH_PREPARE_SCRIPT}" \
     --output_dir "${OUTPUT_DIR}" \
     --camera_name "${CAMERA_NAME}" \
     --target_fps "${TARGET_FPS}" \
-    ${FORCE_CONFIG}
+    ${FORCE_CONFIG} \
+    ${PARALLEL_JOBS}
 
 if [ $? -ne 0 ]; then
     echo -e "\n${RED}❌ 数据准备失败${NC}"
