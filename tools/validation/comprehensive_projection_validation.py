@@ -42,17 +42,36 @@ def load_pointcloud(bin_file):
     return points
 
 
+def undistort_image(img, calib):
+    """使用标定文件中的畸变系数去畸变图像
+
+    Returns:
+        undistorted image, or original image if D is not available
+    """
+    if 'D' not in calib:
+        return img
+    D = calib['D']
+    if len(D) < 4:
+        return img
+    P2 = calib['P2'].reshape(3, 4)
+    K = P2[:3, :3].copy()
+    dist_coeffs = np.zeros(5)
+    dist_coeffs[:len(D)] = D
+    return cv2.undistort(img, K, dist_coeffs)
+
+
 def project_points(points, calib, img_shape):
-    """投影点云到图像"""
-    # 获取标定参数
+    """投影LiDAR点云到图像
+    
+    Tr = Camera→LiDAR (KITTI标准), inv(Tr) = LiDAR→Camera
+    """
     Tr_3x4 = calib['Tr'].reshape(3, 4)
     Tr = np.vstack([Tr_3x4, [0, 0, 0, 1]])
     P2 = calib['P2'].reshape(3, 4)
     
-    # 转换为齐次坐标
     points_hom = np.hstack([points[:, :3], np.ones((points.shape[0], 1))])
     
-    # 变换到相机坐标系（使用inv(Tr)）
+    # LiDAR→Camera
     Tr_inv = np.linalg.inv(Tr)
     points_cam = (Tr_inv @ points_hom.T).T[:, :3]
     
@@ -99,6 +118,9 @@ def visualize_projection(dataset_root, sequence, frame, output_file):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     points = load_pointcloud(pc_file)
     calib = load_calib(calib_file)
+    
+    # 去畸变图像（P2是理想内参，需要先去畸变才能对齐）
+    img = undistort_image(img, calib)
     
     # 投影
     points_img, depths, num_visible = project_points(points, calib, img.shape)
@@ -153,6 +175,35 @@ def get_sample_frames(num_frames, num_samples=10):
     return sorted(list(set(indices)))  # 去重并排序
 
 
+def analyze_camera_direction(calib):
+    """分析相机朝向（基于Tr矩阵）
+    
+    Tr = Camera→LiDAR, 其旋转矩阵R的第3列 = 相机Z轴(前向)在LiDAR系中的方向
+    """
+    Tr_3x4 = calib['Tr'].reshape(3, 4)
+    R = Tr_3x4[:3, :3]
+    
+    cam_forward_in_lidar = R[:, 2]
+    
+    axis_labels = {0: 'X', 1: 'Y', 2: 'Z'}
+    dominant_idx = int(np.argmax(np.abs(cam_forward_in_lidar)))
+    dominant_sign = '+' if cam_forward_in_lidar[dominant_idx] > 0 else '-'
+    dominant_axis = axis_labels[dominant_idx]
+    
+    direction_map = {
+        (0, '+'): '前方(+X)', (0, '-'): '后方(-X)',
+        (1, '+'): '左侧(+Y)', (1, '-'): '右侧(-Y)',
+        (2, '+'): '上方(+Z)', (2, '-'): '下方(-Z)',
+    }
+    direction = direction_map.get((dominant_idx, dominant_sign), '未知')
+    
+    return {
+        'cam_forward_in_lidar': cam_forward_in_lidar.tolist(),
+        'dominant_axis': f'{dominant_sign}{dominant_axis}',
+        'direction': direction,
+    }
+
+
 def validate_sequence(dataset_root, sequence, output_base_dir):
     """验证单个序列的投影效果"""
     dataset_root = Path(dataset_root)
@@ -163,7 +214,6 @@ def validate_sequence(dataset_root, sequence, output_base_dir):
         print(f"  ❌ 序列 {sequence}: 图像目录不存在")
         return None
     
-    # 获取帧数
     images = sorted(image_dir.glob('*.png'))
     num_frames = len(images)
     
@@ -175,17 +225,22 @@ def validate_sequence(dataset_root, sequence, output_base_dir):
     print(f"验证序列 {sequence} ({num_frames} 帧)")
     print(f"{'='*80}")
     
-    # 创建序列输出目录
     seq_output_dir = output_base_dir / f'sequence_{sequence}'
     seq_output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 获取采样帧
+    calib_file = seq_dir / 'calib.txt'
+    calib = load_calib(calib_file) if calib_file.exists() else {}
+    
+    cam_info = analyze_camera_direction(calib) if 'Tr' in calib else None
+    if cam_info:
+        print(f"  相机朝向(LiDAR系): {cam_info['direction']} ({cam_info['dominant_axis']})")
+    
     sample_frames = get_sample_frames(num_frames, num_samples=10)
     print(f"采样帧: {sample_frames}")
     print(f"输出目录: {seq_output_dir}")
     
-    # 对每个采样帧进行投影
     results = []
+    zero_visible_count = 0
     for frame_idx in sample_frames:
         output_file = seq_output_dir / f'frame_{frame_idx:06d}.png'
         
@@ -197,39 +252,53 @@ def validate_sequence(dataset_root, sequence, output_base_dir):
             print(f"✓ ({result['visible_points']}/{result['total_points']} 点, {result['visible_ratio']*100:.1f}%)")
             results.append(result)
         else:
-            print("跳过")
+            zero_visible_count += 1
+            print("跳过 (0 可见点)")
     
-    # 保存序列统计
+    stats = {
+        'sequence': sequence,
+        'num_frames': num_frames,
+        'num_samples': len(results),
+        'num_attempted': len(sample_frames),
+        'num_zero_visible': zero_visible_count,
+        'sample_frames': sample_frames,
+        'results': results,
+        'camera_direction': cam_info,
+    }
+    
     if results:
-        stats = {
-            'sequence': sequence,
-            'num_frames': num_frames,
-            'num_samples': len(results),
-            'sample_frames': sample_frames,
-            'results': results,
-            'summary': {
-                'avg_visible_ratio': sum(r['visible_ratio'] for r in results) / len(results),
-                'avg_depth': sum(r['depth_mean'] for r in results) / len(results),
-                'min_depth': min(r['depth_min'] for r in results),
-                'max_depth': max(r['depth_max'] for r in results)
-            }
+        stats['summary'] = {
+            'avg_visible_ratio': sum(r['visible_ratio'] for r in results) / len(results),
+            'avg_depth': sum(r['depth_mean'] for r in results) / len(results),
+            'min_depth': min(r['depth_min'] for r in results),
+            'max_depth': max(r['depth_max'] for r in results),
+            'status': 'ok',
         }
-        
-        stats_file = seq_output_dir / 'statistics.json'
-        with open(stats_file, 'w', encoding='utf-8') as f:
-            json.dump(stats, f, indent=2, ensure_ascii=False)
-        
         print(f"\n  ✅ 序列 {sequence} 验证完成: {len(results)}/{len(sample_frames)} 帧成功")
         print(f"  平均可见率: {stats['summary']['avg_visible_ratio']*100:.1f}%")
-        
-        return stats
+    else:
+        stats['summary'] = {
+            'avg_visible_ratio': 0.0,
+            'status': 'no_visible_points',
+            'reason': f"相机朝向LiDAR系{cam_info['direction']}，与前向点云不匹配" if cam_info else "所有采样帧均无可见点",
+        }
+        print(f"\n  ⚠️  序列 {sequence}: 所有{len(sample_frames)}帧均无可见点投影")
+        if cam_info:
+            print(f"     原因: 相机朝向为{cam_info['direction']}，与前向LiDAR点云不在同一方向")
     
-    return None
+    stats_file = seq_output_dir / 'statistics.json'
+    with open(stats_file, 'w', encoding='utf-8') as f:
+        json.dump(stats, f, indent=2, ensure_ascii=False)
+    
+    return stats
 
 
-def generate_overview_report(all_results, output_dir):
+def generate_overview_report(all_results, output_dir, dataset_root=""):
     """生成总览报告"""
     report_file = output_dir / 'PROJECTION_VALIDATION_REPORT.md'
+    
+    ok_results = [r for r in all_results if r['summary'].get('status') == 'ok']
+    fail_results = [r for r in all_results if r['summary'].get('status') != 'ok']
     
     with open(report_file, 'w', encoding='utf-8') as f:
         f.write("# 点云投影验证报告\n\n")
@@ -237,26 +306,39 @@ def generate_overview_report(all_results, output_dir):
         f.write("---\n\n")
         
         f.write("## 总体概况\n\n")
-        f.write(f"- 验证序列数: {len(all_results)}\n")
+        f.write(f"- 验证序列数: {len(all_results)} (成功: {len(ok_results)}, 无可见点: {len(fail_results)})\n")
         total_samples = sum(r['num_samples'] for r in all_results)
         f.write(f"- 总采样帧数: {total_samples}\n")
         f.write(f"- 每序列采样: 10 帧 (均匀分布)\n\n")
         
         f.write("---\n\n")
         f.write("## 各序列投影效果\n\n")
-        f.write("| 序列 | 总帧数 | 采样数 | 平均可见率 | 深度范围 | 状态 |\n")
-        f.write("|------|--------|--------|-----------|----------|------|\n")
+        f.write("| 序列 | 总帧数 | 采样数 | 平均可见率 | 深度范围 | 相机朝向 | 状态 |\n")
+        f.write("|------|--------|--------|-----------|----------|----------|------|\n")
         
         for result in sorted(all_results, key=lambda x: x['sequence']):
             seq = result['sequence']
             num_frames = result['num_frames']
-            num_samples = result['num_samples']
-            avg_ratio = result['summary']['avg_visible_ratio'] * 100
-            min_depth = result['summary']['min_depth']
-            max_depth = result['summary']['max_depth']
+            cam_dir = result.get('camera_direction', {})
+            cam_label = cam_dir.get('direction', '未知') if cam_dir else '未知'
             
-            f.write(f"| {seq} | {num_frames:,} | {num_samples} | {avg_ratio:.1f}% | "
-                   f"{min_depth:.1f}-{max_depth:.1f}m | ✅ |\n")
+            if result['summary'].get('status') == 'ok':
+                num_samples = result['num_samples']
+                avg_ratio = result['summary']['avg_visible_ratio'] * 100
+                min_depth = result['summary']['min_depth']
+                max_depth = result['summary']['max_depth']
+                f.write(f"| {seq} | {num_frames:,} | {num_samples} | {avg_ratio:.1f}% | "
+                       f"{min_depth:.1f}-{max_depth:.1f}m | {cam_label} | ✅ |\n")
+            else:
+                reason = result['summary'].get('reason', '无可见点')
+                f.write(f"| {seq} | {num_frames:,} | 0 | 0.0% | N/A | {cam_label} | ⚠️ |\n")
+        
+        if fail_results:
+            f.write("\n**⚠️ 无可见点序列说明**:\n\n")
+            for result in fail_results:
+                reason = result['summary'].get('reason', '所有采样帧均无可见点')
+                f.write(f"- **序列 {result['sequence']}**: {reason}\n")
+            f.write("\n")
         
         f.write("\n---\n\n")
         f.write("## 详细结果\n\n")
@@ -265,42 +347,35 @@ def generate_overview_report(all_results, output_dir):
             seq = result['sequence']
             f.write(f"### 序列 {seq}\n\n")
             f.write(f"- **总帧数**: {result['num_frames']:,}\n")
-            f.write(f"- **采样帧**: {result['sample_frames']}\n")
-            f.write(f"- **平均可见率**: {result['summary']['avg_visible_ratio']*100:.1f}%\n")
-            f.write(f"- **深度范围**: {result['summary']['min_depth']:.1f}m - {result['summary']['max_depth']:.1f}m\n")
-            f.write(f"- **图像位置**: `sequence_{seq}/`\n\n")
             
-            f.write("| 帧 | 总点数 | 可见点 | 可见率 | 深度范围 | 图像 |\n")
-            f.write("|----|--------|--------|--------|----------|------|\n")
+            cam_dir = result.get('camera_direction', {})
+            if cam_dir:
+                f.write(f"- **相机朝向**: {cam_dir.get('direction', '未知')} (LiDAR系 {cam_dir.get('dominant_axis', '')})\n")
             
-            for r in result['results']:
-                frame = r['frame']
-                total = r['total_points']
-                visible = r['visible_points']
-                ratio = r['visible_ratio'] * 100
-                depth_min = r['depth_min']
-                depth_max = r['depth_max']
+            if result['summary'].get('status') == 'ok':
+                f.write(f"- **采样帧**: {result['sample_frames']}\n")
+                f.write(f"- **平均可见率**: {result['summary']['avg_visible_ratio']*100:.1f}%\n")
+                f.write(f"- **深度范围**: {result['summary']['min_depth']:.1f}m - {result['summary']['max_depth']:.1f}m\n")
+                f.write(f"- **图像位置**: `sequence_{seq}/`\n\n")
                 
-                f.write(f"| {frame:06d} | {total:,} | {visible:,} | {ratio:.1f}% | "
-                       f"{depth_min:.1f}-{depth_max:.1f}m | `frame_{frame:06d}.png` |\n")
+                f.write("| 帧 | 总点数 | 可见点 | 可见率 | 深度范围 | 图像 |\n")
+                f.write("|----|--------|--------|--------|----------|------|\n")
+                
+                for r in result['results']:
+                    frame = r['frame']
+                    total = r['total_points']
+                    visible = r['visible_points']
+                    ratio = r['visible_ratio'] * 100
+                    depth_min = r['depth_min']
+                    depth_max = r['depth_max']
+                    f.write(f"| {frame:06d} | {total:,} | {visible:,} | {ratio:.1f}% | "
+                           f"{depth_min:.1f}-{depth_max:.1f}m | `frame_{frame:06d}.png` |\n")
+            else:
+                reason = result['summary'].get('reason', '所有采样帧均无可见点')
+                f.write(f"- **状态**: ⚠️ 无可见投影点\n")
+                f.write(f"- **原因**: {reason}\n")
             
             f.write("\n")
-        
-        f.write("---\n\n")
-        f.write("## 文件结构\n\n")
-        f.write("```\n")
-        f.write("projection_validation/\n")
-        f.write("├── PROJECTION_VALIDATION_REPORT.md  # 本报告\n")
-        f.write("├── summary.json                      # JSON格式汇总\n")
-        
-        for result in sorted(all_results, key=lambda x: x['sequence']):
-            seq = result['sequence']
-            f.write(f"├── sequence_{seq}/\n")
-            f.write(f"│   ├── statistics.json            # 序列统计\n")
-            for r in result['results']:
-                f.write(f"│   ├── frame_{r['frame']:06d}.png\n")
-        
-        f.write("```\n\n")
         
         f.write("---\n\n")
         f.write("## 数据来源确认\n\n")
@@ -308,7 +383,8 @@ def generate_overview_report(all_results, output_dir):
         f.write("- **图像**: `sequences/{seq_id}/image_2/{frame:06d}.png`\n")
         f.write("- **点云**: `sequences/{seq_id}/velodyne/{frame:06d}.bin`\n")
         f.write("- **标定**: `sequences/{seq_id}/calib.txt`\n\n")
-        f.write("数据源位置: `/mnt/drtraining/user/dahailu/data/bevcalib/all_training_data/sequences/`\n\n")
+        if dataset_root:
+            f.write(f"数据源位置: `{dataset_root}`\n\n")
     
     print(f"\n✅ 总览报告已生成: {report_file}")
 
@@ -343,14 +419,12 @@ def main():
     print(f"输出目录: {output_dir}")
     print(f"{'='*80}")
     
-    # 验证每个序列
     all_results = []
     for seq in sequences:
         result = validate_sequence(dataset_root, seq, output_dir)
         if result:
             all_results.append(result)
     
-    # 保存汇总JSON
     summary_file = output_dir / 'summary.json'
     with open(summary_file, 'w', encoding='utf-8') as f:
         json.dump({
@@ -360,8 +434,7 @@ def main():
             'sequences': all_results
         }, f, indent=2, ensure_ascii=False)
     
-    # 生成报告
-    generate_overview_report(all_results, output_dir)
+    generate_overview_report(all_results, output_dir, dataset_root=str(dataset_root))
     
     print(f"\n{'='*80}")
     print(f"✅ 验证完成!")

@@ -3,57 +3,35 @@ from scipy.spatial.transform import Rotation as R
 
 def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5):
     """
-    Given a homogeneous transformation matrix T, generate a single perturbed transformation matrix
-    with random rotation and translation perturbations.
+    Vectorized batch perturbation: generates perturbed transformation matrices
+    without Python loops over the batch dimension.
 
     Parameters:
         T: np.ndarray, shape (B, 4, 4)
-           Original homogeneous transformation matrices (LiDAR/Sensing → Camera).
-           The upper left (3x3) sub-matrix is the rotation matrix, 
-           the first 3 elements of the last column are the translation vector, and the last row should be [0, 0, 0, 1].
-        angle_range_deg: float, the range of the rotation perturbation in degrees (absolute value)
-        trans_range: float, the range of translation perturbation (in meters)
+        angle_range_deg: float, rotation perturbation range in degrees
+        trans_range: float, translation perturbation range in meters
     """
     B = T.shape[0]
-    T_new = []
 
-    for i in range(B):
-        # Extract the rotation matrix and translation vector from T
-        orig_rot_matrix = T[i, :3, :3]
-        orig_trans = T[i, :3, 3]
+    orig_rots = R.from_matrix(T[:, :3, :3])
+    orig_trans = T[:, :3, 3]
 
-        # Create a Rotation object from the rotation matrix
-        orig_rot = R.from_matrix(orig_rot_matrix)
+    rand_axes = np.random.randn(B, 3)
+    rand_axes /= np.linalg.norm(rand_axes, axis=1, keepdims=True)
+    rand_angles = np.deg2rad(np.random.uniform(-angle_range_deg, angle_range_deg, B))
+    delta_rots = R.from_rotvec(rand_axes * rand_angles[:, None])
+    new_rots = delta_rots * orig_rots
 
-        # Generate random perturbation:
-        # Create a random axis and normalize it
-        rand_axis = np.random.randn(3)
-        rand_axis /= np.linalg.norm(rand_axis)
-        # Generate a random rotation angle (in radians)
-        rand_angle = np.deg2rad(np.random.uniform(-angle_range_deg, angle_range_deg))
-        # Create the rotation perturbation
-        delta_rot = R.from_rotvec(rand_angle * rand_axis)
-        # Apply the perturbation (right multiply) to the original rotation
-        new_rot = delta_rot * orig_rot
+    rand_dirs = np.random.randn(B, 3)
+    rand_dirs /= np.linalg.norm(rand_dirs, axis=1, keepdims=True)
+    rand_magnitudes = np.random.uniform(0, trans_range, B)
+    new_trans = orig_trans + rand_dirs * rand_magnitudes[:, None]
 
-        # Generate translation perturbation
-        # Random direction vector
-        rand_direction = np.random.randn(3)
-        # Normalize it
-        rand_direction = rand_direction / np.linalg.norm(rand_direction)
-        # Random magnitude within [0, trans_range]
-        delta_trans_magnitude = np.random.uniform(0, trans_range)
-        delta_trans = rand_direction * delta_trans_magnitude
-        # Apply the perturbation
-        new_trans = orig_trans + delta_trans
+    T_new = np.broadcast_to(np.eye(4), (B, 4, 4)).copy()
+    T_new[:, :3, :3] = new_rots.as_matrix()
+    T_new[:, :3, 3] = new_trans
 
-        # Construct a new 4x4 homogeneous transformation matrix
-        T_temp = np.eye(4)
-        T_temp[:3, :3] = new_rot.as_matrix()
-        T_temp[:3, 3] = new_trans
-        T_new.append(T_temp)
-
-    return np.array(T_new), np.rad2deg(rand_angle), delta_trans_magnitude
+    return T_new, np.rad2deg(rand_angles[-1]), rand_magnitudes[-1]
 
 def generate_intrinsic_matrix(fx, fy, cx, cy):
     intrinsic_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])

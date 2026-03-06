@@ -235,58 +235,55 @@ def render_projected_points(
     """
     if len(pts_2d) == 0:
         return image.copy()
-    
+
     img_copy = image.copy()
-    
-    # 按深度排序，远处的点先绘制，近处的点后绘制（覆盖）
-    if len(depths) > 0:
-        sorted_indices = np.argsort(-depths)  # 从远到近
-        pts_2d = pts_2d[sorted_indices]
-        depths = depths[sorted_indices]
-    
-    for i, (pt, depth) in enumerate(zip(pts_2d, depths)):
-        u, v = int(pt[0]), int(pt[1])
-        
-        if color_mode == 'depth':
-            # 根据深度映射颜色 - 使用JET colormap风格
-            # 近=红色(hot), 远=蓝色(cold)
-            normalized_depth = np.clip(depth / max_depth, 0.0, 1.0)
-            # 使用更鲜艳的颜色映射
-            if normalized_depth < 0.25:
-                # 红色到橙色
-                r = 255
-                g = int(normalized_depth * 4 * 255)
-                b = 0
-            elif normalized_depth < 0.5:
-                # 橙色到黄色到绿色
-                r = int((0.5 - normalized_depth) * 4 * 255)
-                g = 255
-                b = 0
-            elif normalized_depth < 0.75:
-                # 绿色到青色
-                r = 0
-                g = 255
-                b = int((normalized_depth - 0.5) * 4 * 255)
-            else:
-                # 青色到蓝色
-                r = 0
-                g = int((1.0 - normalized_depth) * 4 * 255)
-                b = 255
-            color = (b, g, r)  # BGR
-        elif color_mode == 'fixed_green':
-            color = (0, 255, 0)
-        elif color_mode == 'fixed_red':
-            color = (0, 0, 255)
-        elif color_mode == 'fixed_blue':
-            color = (255, 0, 0)
-        else:
-            color = (0, 255, 0)
-        
-        cv2.circle(img_copy, (u, v), point_radius, color, -1)
-    
+    H, W = img_copy.shape[:2]
+
+    sorted_indices = np.argsort(-depths)
+    pts_2d = pts_2d[sorted_indices]
+    depths = depths[sorted_indices]
+
+    u = pts_2d[:, 0].astype(np.int32)
+    v = pts_2d[:, 1].astype(np.int32)
+
+    if color_mode == 'depth':
+        nd = np.clip(depths / max_depth, 0.0, 1.0)
+        colors = np.zeros((len(nd), 3), dtype=np.uint8)
+        m0 = nd < 0.25
+        m1 = (nd >= 0.25) & (nd < 0.5)
+        m2 = (nd >= 0.5) & (nd < 0.75)
+        m3 = nd >= 0.75
+        colors[m0, 2] = 255
+        colors[m0, 1] = (nd[m0] * 4 * 255).astype(np.uint8)
+        colors[m1, 2] = ((0.5 - nd[m1]) * 4 * 255).astype(np.uint8)
+        colors[m1, 1] = 255
+        colors[m2, 1] = 255
+        colors[m2, 0] = ((nd[m2] - 0.5) * 4 * 255).astype(np.uint8)
+        colors[m3, 1] = ((1.0 - nd[m3]) * 4 * 255).astype(np.uint8)
+        colors[m3, 0] = 255
+    elif color_mode == 'fixed_green':
+        colors = np.full((len(u), 3), (0, 255, 0), dtype=np.uint8)
+    elif color_mode == 'fixed_red':
+        colors = np.full((len(u), 3), (0, 0, 255), dtype=np.uint8)
+    elif color_mode == 'fixed_blue':
+        colors = np.full((len(u), 3), (255, 0, 0), dtype=np.uint8)
+    else:
+        colors = np.full((len(u), 3), (0, 255, 0), dtype=np.uint8)
+
+    if point_radius <= 1:
+        valid = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        img_copy[v[valid], u[valid]] = colors[valid]
+    else:
+        for du in range(-point_radius, point_radius + 1):
+            for dv in range(-point_radius, point_radius + 1):
+                if du * du + dv * dv <= point_radius * point_radius:
+                    uc = np.clip(u + du, 0, W - 1)
+                    vc = np.clip(v + dv, 0, H - 1)
+                    img_copy[vc, uc] = colors
+
     if alpha < 1.0:
         img_copy = cv2.addWeighted(image, 1 - alpha, img_copy, alpha, 0)
-    
+
     return img_copy
 
 

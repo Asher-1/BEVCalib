@@ -8,16 +8,13 @@
 
 📌 重要说明 - Tr 矩阵约定：
 ----------------------------------
-- calib.txt 中的 Tr 矩阵遵循 KITTI 标准格式：
-  ✓ Tr = Camera → Sensing/Velodyne (3×4 或 4×4 矩阵)
+- calib.txt 中的 Tr 矩阵遵循 KITTI-Odometry 标准格式：
+  ✓ Tr = Camera → LiDAR (3×4 矩阵)
+  ✓ 点云在 LiDAR 坐标系
   
 - 投影使用时需要反向变换：
-  ✓ P_camera = inv(Tr) @ P_sensing
+  ✓ P_camera = inv(Tr) @ P_lidar
   ✓ 本工具的 project_points_to_camera() 函数会自动处理取逆
-  
-- 用户无需关心：
-  ✓ 只需提供正确的 calib.txt 文件
-  ✓ 工具会自动处理所有变换细节
 """
 
 import numpy as np
@@ -101,18 +98,11 @@ def load_calib(calib_file: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, str
         calib_file: 标定文件路径
     
     Returns:
-        Tr: (4, 4) Camera→点云坐标系 变换矩阵（KITTI标准格式）
-            - 对于标准KITTI: Camera → Velodyne
-            - 对于自定义数据集: Camera → Sensing（现已符合KITTI标准）
-            - 使用时需要取逆: P_camera = inv(Tr) @ P_lidar
+        Tr: (4, 4) Camera→LiDAR 变换矩阵（KITTI标准格式）
+            - 使用时取逆: P_camera = inv(Tr) @ P_lidar
         K: (3, 3) 相机内参矩阵
         D: (N,) 畸变系数 (pinhole: 5个, fisheye: 4个)
         camera_model: 相机模型 ('pinhole' 或 'fisheye')
-    
-    注意:
-        - 此函数直接返回calib.txt中的Tr，未取逆
-        - KITTI标准定义：Tr = Camera → Velodyne
-        - 实际投影时需要使用 inv(Tr) 得到 Velodyne → Camera
     """
     calib = {}
     with open(calib_file, 'r') as f:
@@ -554,7 +544,7 @@ def visualize_single_projection(dataset_root: Path,
         print(f"  D (畸变系数/针孔): k1={D[0]:.6f}, k2={D[1]:.6f}, p1={D[2]:.6f}, p2={D[3]:.6f}, k3={D[4]:.6f}")
     else:
         print(f"  D (畸变系数): {D}")
-    print(f"  点云坐标系: Sensing系（与C++一致）或LiDAR系（KITTI标准）")
+    print(f"  点云坐标系: LiDAR系（KITTI-Odometry标准）")
     
     # 4. 投影点云到图像（完全对齐C++）
     img_with_points, num_valid = project_and_render(
@@ -643,11 +633,11 @@ def compare_undistortion(dataset_root: Path,
     print(f"✓ 加载标定参数")
     print(f"  相机模型: {camera_model}")
     
-    # 打印Tr矩阵（KITTI标准格式：Camera → Sensing）
-    print(f"  Tr (Camera→Sensing, KITTI标准):")
+    # 打印Tr矩阵（KITTI标准格式：Camera → LiDAR）
+    print(f"  Tr (Camera→LiDAR, KITTI标准):")
     print(f"    旋转:\n{Tr[:3, :3]}")
     print(f"    平移: {Tr[:3, 3]}")
-    print(f"  注意：投影时会自动取逆得到 Sensing→Camera")
+    print(f"  注意：投影时会自动取逆得到 LiDAR→Camera")
     
     # 2. 加载去畸变后的点云和图像
     pc_after_path = seq_dir / 'velodyne' / f'{frame_idx:06d}.bin'
@@ -664,7 +654,7 @@ def compare_undistortion(dataset_root: Path,
     print(f"✓ 加载图像: {image.shape}")
     
     pc_after = np.fromfile(str(pc_after_path), dtype=np.float32).reshape(-1, 4)
-    print(f"✓ 加载去畸变后点云 (Sensing坐标系): {pc_after.shape}")
+    print(f"✓ 加载去畸变后点云 (LiDAR坐标系): {pc_after.shape}")
     print(f"  X: [{pc_after[:, 0].min():.2f}, {pc_after[:, 0].max():.2f}]")
     print(f"  Y: [{pc_after[:, 1].min():.2f}, {pc_after[:, 1].max():.2f}]")
     print(f"  Z: [{pc_after[:, 2].min():.2f}, {pc_after[:, 2].max():.2f}]")

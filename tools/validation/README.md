@@ -23,8 +23,20 @@
 # 查看帮助
 python tools/validation/validate_dataset.py --help
 
-# 快速摘要
+# 数据集摘要
 python tools/validation/validate_dataset.py summary /path/to/dataset
+
+# ===== 两种验证模式（二选一） =====
+
+# 快速验证 (~17秒，前3序列，各1帧投影)
+python tools/validation/validate_dataset.py quick /path/to/dataset \
+    --output-dir validation_results/
+
+# 完整验证 (~15分钟，所有序列 + 完整投影)
+python tools/validation/validate_dataset.py full /path/to/dataset \
+    --output-dir validation_results/
+
+# ===== 单项验证 =====
 
 # 验证单个序列格式
 python tools/validation/validate_dataset.py format /path/to/dataset --sequence 00
@@ -35,30 +47,22 @@ python tools/validation/validate_dataset.py format /path/to/dataset --all
 # 验证Tr矩阵
 python tools/validation/validate_dataset.py tr /path/to/dataset
 
-# 测试单帧投影
+# 单帧投影测试
 python tools/validation/validate_dataset.py projection /path/to/dataset \
     --sequence 00 --frame 0 --output test.png
 
-# 完整投影验证（每序列10帧）
+# 多序列投影验证（每序列多帧采样）
 python tools/validation/validate_dataset.py projection-full /path/to/dataset \
     --output-dir projections/
-
-# 快速完整验证（17秒）
-python tools/validation/validate_dataset.py full /path/to/dataset \
-    --output-dir validation_results/
-
-# 完整验证（15分钟，包含完整投影）
-python tools/validation/validate_dataset.py full /path/to/dataset \
-    --output-dir validation_results/ --full
 ```
 
 **验证模式对比**:
 
-| 模式 | 耗时 | 投影覆盖 | 适用场景 |
-|------|------|----------|----------|
-| `full` (快速) | ~17秒 | 前3序列，各1帧 | 日常检查 |
-| `full --full` | ~15分钟 | 所有序列，各10帧 | 首次验证、发布前 |
-| `projection-full` | ~10分钟 | 所有序列，各10帧 | 仅投影分析 |
+| 命令 | 耗时 | 格式验证范围 | 投影覆盖 | 适用场景 |
+|------|------|-------------|----------|----------|
+| `quick` | ~17秒 | 前3序列 | 前3序列，各1帧 | 日常检查 |
+| `full` | ~15分钟 | 所有序列 | 所有序列，各5帧 | 首次验证、发布前 |
+| `projection-full` | ~10分钟 | — | 所有序列，各10帧 | 仅投影分析 |
 
 详见 [../docs/VALIDATION_MODES.md](../docs/VALIDATION_MODES.md)
 
@@ -226,7 +230,7 @@ python tools/validation/validate_dataset.py summary /path/to/dataset
 
 # 2. 完整验证（~15分钟）
 python tools/validation/validate_dataset.py full /path/to/dataset \
-    --output-dir validation/ --full
+    --output-dir validation/
 
 # 3. 查看报告
 cat validation/VALIDATION_SUMMARY.md
@@ -236,8 +240,8 @@ cat validation/projection_validation/PROJECTION_VALIDATION_REPORT.md
 ### 场景2: 日常快速检查
 
 ```bash
-# 快速模式（~17秒）
-python tools/validation/validate_dataset.py full /path/to/dataset \
+# 快速验证（~17秒）
+python tools/validation/validate_dataset.py quick /path/to/dataset \
     --output-dir validation_quick/
 ```
 
@@ -305,9 +309,9 @@ python tools/validation/check_projection_headless.py \
 
 ## ⚠️ 注意事项
 
-1. **首次验证必须使用完整模式**
+1. **首次验证推荐使用完整模式**
    ```bash
-   python tools/validation/validate_dataset.py full dataset/ --full
+   python tools/validation/validate_dataset.py full dataset/ --output-dir results/
    ```
 
 2. **无头环境**
