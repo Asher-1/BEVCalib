@@ -70,7 +70,7 @@ class LSS(nn.Module):
         B, N, _ = img_trans.shape
         # restore data augmentation and convert to original image space
         points = self.frustum - img_post_trans.view(B, N, 1, 1, 1, 3) # (B, N, D, fH, fW, 3)
-        points = torch.inverse(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        points = torch.linalg.inv(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
         # before : (B, N, D, fH, fW, (x, y, z), 1), image space
         points = torch.cat(
             (
@@ -81,7 +81,7 @@ class LSS(nn.Module):
         )
         # after : (B, N, D, fH, fW, (x * z, y * z, z), 1), transfrom from image space to camera space, the frustum transforms from cuboid to pyramid. 
 
-        combine = img_rots.matmul(torch.inverse(cam_intrins))
+        combine = img_rots.matmul(torch.linalg.inv(cam_intrins))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += img_trans.view(B, N, 1, 1, 1, 3) # To ego space
 
@@ -158,7 +158,7 @@ class GaussianLSS(nn.Module):
         img_rots, img_trans, cam_intrins, img_post_rots, img_post_trans = cam2ego_rot, cam2ego_trans, cam_intrins, post_cam2ego_rot, post_cam2ego_trans
         B, N, _ = img_trans.shape
         points = self.frustum - img_post_trans.view(B, N, 1, 1, 1, 3) # (B, N, D, fH, fW, 3)
-        points = torch.inverse(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        points = torch.linalg.inv(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
         # before : (B, N, D, fH, fW, (x, y, z), 1), image space
         points = torch.cat(
             (
@@ -169,7 +169,7 @@ class GaussianLSS(nn.Module):
         )
         # after : (B, N, D, fH, fW, (x * z, y * z, z), 1), transfrom from image space to camera space, the frustum transforms from cuboid to pyramid. 
 
-        combine = img_rots.matmul(torch.inverse(cam_intrins))
+        combine = img_rots.matmul(torch.linalg.inv(cam_intrins))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += img_trans.view(B, N, 1, 1, 1, 3) # To ego space
 
@@ -247,12 +247,7 @@ class Cam2BEV(nn.Module):
         # Align the geometry to the voxel grid
         geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
-        batch_ix = torch.cat(
-            [
-                torch.full([Nprime // B, 1], ix, device=img_pc.device, dtype=torch.long)
-                for ix in range(B)
-            ]
-        )   
+        batch_ix = torch.arange(B, device=img_pc.device, dtype=torch.long).repeat_interleave(Nprime // B).unsqueeze(1)
         geom_feats = torch.cat([geom_feats, batch_ix], 1)
 
         # filter out points that are outside box
@@ -267,55 +262,20 @@ class Cam2BEV(nn.Module):
         img_pc = img_pc[kept]
         geom_feats = geom_feats[kept]
 
-        try:
-            cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) # (B, out_channels, nx[2], nx[0], nx[1])
-        except:
-            cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device = img_pc.device, dtype = img_pc.dtype)
-
-        cam_bev = torch.cat(cam_bev.unbind(dim = 2), 1)
-
-        return cam_bev
-    
-    def ref_bev_pool(self, img_depth_feature, geometry):
         with torch.no_grad():
-            img_pc = img_depth_feature
-            geom_feats = geometry
-            B, N, D, H, W, C = img_pc.shape
-            Nprime = B * N * D * H * W
-            img_pc = img_pc.reshape(Nprime, C)
+            nx0, nx1 = self.nx[0].item(), self.nx[1].item()
+            cam_bev_mask = torch.zeros(B, nx0, nx1, dtype=torch.bool, device=geom_feats.device)
+            if geom_feats.shape[0] > 0:
+                cam_bev_mask[geom_feats[:, 3].long(), geom_feats[:, 0].long(), geom_feats[:, 1].long()] = True
 
-            # Align the geometry to the voxel grid
-            geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
-            geom_feats = geom_feats.view(Nprime, 3)
-            batch_ix = torch.cat(
-                [
-                    torch.full([Nprime // B, 1], ix, device=img_pc.device, dtype=torch.long)
-                    for ix in range(B)
-                ]
-            )   
-            geom_feats = torch.cat([geom_feats, batch_ix], 1)
+        try:
+            cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1])
+        except:
+            cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device=img_pc.device, dtype=img_pc.dtype)
 
-            # filter out points that are outside box
-            kept = (
-                (geom_feats[:, 0] >= 0)
-                & (geom_feats[:, 0] < self.nx[0])
-                & (geom_feats[:, 1] >= 0)
-                & (geom_feats[:, 1] < self.nx[1])
-                & (geom_feats[:, 2] >= 0)
-                & (geom_feats[:, 2] < self.nx[2])
-            )
-            img_pc = img_pc[kept]
-            geom_feats = geom_feats[kept]
-            try:
-                cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) # (B, out_channels, nx[2], nx[0], nx[1])
-            except:
-                cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device = img_pc.device, dtype = img_pc.dtype)
+        cam_bev = torch.cat(cam_bev.unbind(dim=2), 1)
 
-            binary_bev = torch.max(cam_bev, dim=2)[0]
-
-            binary_bev = (binary_bev != 0).float()
-
-        return binary_bev
+        return cam_bev, cam_bev_mask
 
     def forward(self, 
                 cam2ego_T,
@@ -341,27 +301,13 @@ class Cam2BEV(nn.Module):
         imgs = (imgs - self.mean) / self.std
         img_feats = self.CamEncode(imgs) 
         geometry, img_depth_feature = self.lss(cam2ego_rot=cam2ego_rot, cam2ego_trans=cam2ego_trans, cam_intrins=cam_intrins, post_cam2ego_rot=post_cam2ego_rot, post_cam2ego_trans=post_cam2ego_trans, img_feats=img_feats)
-        bev_feats = self.bev_pool(geometry=geometry, img_depth_feature=img_depth_feature)
-        with torch.no_grad():
-            geom_detach = geometry.detach()
-            ones_feat = torch.ones_like(img_depth_feature).to(img_depth_feature.device).detach()
-            ref_feats = self.ref_bev_pool(geometry=geom_detach, img_depth_feature=ones_feat)
+        bev_feats, cam_bev_mask = self.bev_pool(geometry=geometry, img_depth_feature=img_depth_feature)
         B, C, H, W = bev_feats.shape
-        cam_bev_mask = ref_feats != 0
-        ref_mask = cam_bev_mask[:, 0:1, :, :]
-        try:
-            assert torch.all(cam_bev_mask == ref_mask) # The masks should be same for different channels.
-        except:
-            print(f"ERROR: cam_bev_mask != ref_mask")
-            torch.save(cam2ego_T, "cam2ego_T.pt")
-            torch.save(cam_intrins, "cam_intrins.pt")
-            torch.save(post_cam2ego_T, "post_cam2ego_T.pt")
-            torch.save(imgs, "imgs.pt")
 
         bev_feats = bev_feats.permute(0, 2, 3, 1).reshape(B*H*W, C)
         bev_feats = self.proj_head(bev_feats)
         bev_feats = bev_feats.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-        return bev_feats, cam_bev_mask[:, 0, :, :]
+        return bev_feats, cam_bev_mask
     
 def generate_random_rt_matrix(batch_size=1, r_range=(-torch.pi, torch.pi), t_range=(-1, 1)):
     rx = torch.rand(batch_size, 1) * (r_range[1] - r_range[0]) + r_range[0]

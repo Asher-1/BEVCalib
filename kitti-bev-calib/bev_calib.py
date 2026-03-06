@@ -178,7 +178,7 @@ class BEVCalib(nn.Module):
         init_T_to_camera = init_T_to_camera.unsqueeze(1)
         post_cam2ego_T = post_cam2ego_T.unsqueeze(1)
         cam_intrinsic = cam_intrinsic.unsqueeze(1)
-        cam2ego_T = torch.inverse(init_T_to_camera)
+        cam2ego_T = torch.linalg.inv(init_T_to_camera)
         cam_bev_feats, cam_bev_mask = self.img_branch(cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic, post_cam2ego_T=post_cam2ego_T, imgs=img) # B, C, H, W
 
         pc = pc.permute(0, 2, 1).contiguous() # (B, 3, N)

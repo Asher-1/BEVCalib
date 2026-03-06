@@ -111,10 +111,8 @@ class UndistortionUtils:
         Note:
             参考 math_utils.cpp:313-346
             C++版本只支持插值，不支持外推。时间戳超出范围直接返回false。
-            
-            🔧 改进：支持不连续的bag数据
-            - 当pose间隔超过max_gap时，认为数据不连续，不进行插值
-            - 这样可以正确处理线上过滤后的非连续bag数据
+            当pose间隔超过max_gap时，认为数据不连续，不进行插值。
+            精度优先：无法精确插值时返回None，让调用方跳过该帧。
         """
         if not poses or len(poses) < 2:
             return None
@@ -124,19 +122,13 @@ class UndistortionUtils:
             t1 = poses[i].timestamp
             t2 = poses[i + 1].timestamp
             
-            # 只在范围内插值（对应C++的 if (t1 <= t && t2 >= t)）
             if t1 <= timestamp <= t2:
-                # 🔧 改进：检查pose间隔是否过大（数据不连续）
                 if (t2 - t1) > max_gap:
-                    # pose间隔过大，说明这段时间没有连续的pose数据
-                    # 不进行插值，返回None
                     return None
                 
-                # 计算插值系数
                 alpha = (timestamp - t1) / (t2 - t1)
                 break
         else:
-            # 时间戳不在任何区间内，返回None（对应C++的return false）
             return None
         
         # 位姿1
@@ -242,12 +234,14 @@ class UndistortionUtils:
         return min_delta <= max_delta
     
     @staticmethod
-    def motion_extrapolate(poses: List[PoseMetadata], timestamp: float):
+    def motion_extrapolate(poses: List[PoseMetadata], timestamp: float,
+                           max_extrap_time: float = 1.0):
         """位姿外推（用于时间戳超出范围的情况）
         
         Args:
             poses: 位姿列表（按时间戳排序）
             timestamp: 目标时间戳（秒）
+            max_extrap_time: 允许的最大外推时间（秒），超过则拒绝外推
             
         Returns:
             (R, t): 旋转矩阵和平移向量，如果失败返回None
@@ -265,16 +259,20 @@ class UndistortionUtils:
             i = 0
             t1 = poses[0].timestamp
             t2 = poses[1].timestamp
+            extrap_dt = t1 - timestamp
         elif timestamp > poses[-1].timestamp:
             # 向后外推：使用后两个pose
             i = len(poses) - 2
             t1 = poses[i].timestamp
             t2 = poses[i + 1].timestamp
+            extrap_dt = timestamp - t2
         else:
             # 在范围内，应该使用插值
             return None
         
-        # 计算外推系数（会超出[0,1]范围）
+        if extrap_dt > max_extrap_time:
+            return None
+        
         if t2 == t1:
             return None
         alpha = (timestamp - t1) / (t2 - t1)
@@ -364,28 +362,9 @@ class UndistortionUtils:
         xyz = points_raw[:, :3]
         xyz_range = np.abs(xyz).max()
         
-        if xyz_range > 250.0:  # 如果坐标超过250m，认为已经在世界坐标系
-            if debug:
-                print(f"⚠️  检测到点云已在世界坐标系（范围: {xyz_range:.1f}m），将转换回传感器坐标系")
-            
-            # 获取点云时刻的位姿（Sensing→World）
-            cloud_pose = UndistortionUtils.motion_interpolate(poses, cloud_timestamp)
-            if cloud_pose is None:
-                return None
-            
-            R_world_sensing, t_world_sensing = cloud_pose
-            # 世界坐标系 → 传感器坐标系
-            R_sensing_world = R_world_sensing.T
-            t_sensing_world = -R_world_sensing.T @ t_world_sensing
-            
-            # 转换点云到传感器坐标系
-            xyz_sensing = (R_sensing_world @ xyz.T).T + t_sensing_world
-            
-            # 更新点云数据
-            points_raw = np.hstack([xyz_sensing, points_raw[:, 3:]])
-            
-            if debug:
-                print(f"  转换后范围: X=[{xyz_sensing[:, 0].min():.1f}, {xyz_sensing[:, 0].max():.1f}]")
+        if xyz_range > 500.0:
+            print(f"⚠️  [frame={frame_idx}] 点云坐标范围异常（{xyz_range:.1f}m > 500m），可能解析错误，跳过")
+            return None
         
         # 找到点云扫描的最大内部时间戳（单位：2微秒）
         # C++参考：math_utils.cpp:190-200
@@ -552,7 +531,7 @@ class UndistortionUtils:
         # - 激光雷达通常有效范围 200m
         # - 去畸变不应该显著改变点云的位置，只做微小调整
         # - 异常情况：位姿插值外推时可能产生极端变换
-        MAX_REASONABLE_RANGE = 250.0  # 最大合理距离 (米)
+        MAX_REASONABLE_RANGE = 350.0  # 最大合理距离 (米)，长距lidar可达300m+
         MAX_REASONABLE_HEIGHT = 50.0  # 最大合理高度 (米)
         
         x_min, x_max = xyz_undistorted[:, 0].min(), xyz_undistorted[:, 0].max()
@@ -566,10 +545,8 @@ class UndistortionUtils:
         )
         
         if is_abnormal:
-            print(f"⚠️  去畸变结果异常，范围超限！")
-            print(f"    X: [{x_min:.2f}, {x_max:.2f}], Y: [{y_min:.2f}, {y_max:.2f}], Z: [{z_min:.2f}, {z_max:.2f}]")
-            print(f"    合理范围: XY ±{MAX_REASONABLE_RANGE}m, Z ±{MAX_REASONABLE_HEIGHT}m")
-            # 返回 None 表示该帧应该被跳过
+            print(f"⚠️  去畸变结果异常 [frame={frame_idx}]: "
+                  f"X:[{x_min:.1f},{x_max:.1f}] Y:[{y_min:.1f},{y_max:.1f}] Z:[{z_min:.1f},{z_max:.1f}]")
             return None
         
         # 🔍 DEBUG: 打印结果统计（格式对齐C++ MLOG输出，便于逐行对比）
@@ -738,7 +715,12 @@ class ConfigParser:
     
     @staticmethod
     def parse_lidars_cfg(filepath: str) -> Dict:
-        """解析 lidars.cfg 文件（包含vehicle_to_sensing和sensor_to_lidar）"""
+        """解析 lidars.cfg 文件
+        
+        cfg字段名 → 内部key名 → 含义:
+        - vehicle_to_sensing → 'sensing_to_vehicle' → Sensing→Vehicle
+        - sensor_to_lidar   → 'lidar_to_sensing'   → LiDAR→Sensing
+        """
         with open(filepath, 'r') as f:
             content = f.read()
         
@@ -760,40 +742,40 @@ class ConfigParser:
         
         result = {}
         
-        # 1. 解析vehicle_to_sensing（在根级别）
-        v2s_blk = find_block(content, 'vehicle_to_sensing')
-        if v2s_blk:
-            pos = find_block(v2s_blk, 'position')
-            v2s_position = None
+        # 1. 解析vehicle_to_sensing (Sensing→Vehicle)
+        s2v_blk = find_block(content, 'vehicle_to_sensing')  # config file field name
+        if s2v_blk:
+            pos = find_block(s2v_blk, 'position')
+            s2v_position = None
             if pos:
                 x = re.search(r'x:\s*([-\d.e]+)', pos)
                 y = re.search(r'y:\s*([-\d.e]+)', pos)
                 z = re.search(r'z:\s*([-\d.e]+)', pos)
                 if x and y and z:
-                    v2s_position = np.array([float(x.group(1)), float(y.group(1)), float(z.group(1))])
+                    s2v_position = np.array([float(x.group(1)), float(y.group(1)), float(z.group(1))])
             
-            ori = find_block(v2s_blk, 'orientation')
-            v2s_orientation = None
+            ori = find_block(s2v_blk, 'orientation')
+            s2v_orientation = None
             if ori:
                 qx = re.search(r'qx:\s*([-\d.e]+)', ori)
                 qy = re.search(r'qy:\s*([-\d.e]+)', ori)
                 qz = re.search(r'qz:\s*([-\d.e]+)', ori)
                 qw = re.search(r'qw:\s*([-\d.e]+)', ori)
                 if qx and qy and qz and qw:
-                    v2s_orientation = [float(qx.group(1)), float(qy.group(1)), float(qz.group(1)), float(qw.group(1))]
+                    s2v_orientation = [float(qx.group(1)), float(qy.group(1)), float(qz.group(1)), float(qw.group(1))]
             
-            if v2s_position is not None and v2s_orientation is not None:
-                result['vehicle_to_sensing'] = {
-                    'position': v2s_position,
-                    'orientation': v2s_orientation  # [qx, qy, qz, qw]
+            if s2v_position is not None and s2v_orientation is not None:
+                result['sensing_to_vehicle'] = {
+                    'position': s2v_position,
+                    'orientation': s2v_orientation  # [qx, qy, qz, qw]
                 }
         
-        # 2. 解析sensor_to_lidar
-        blk = find_block(content, 'sensor_to_lidar')
+        # 2. 解析sensor_to_lidar (LiDAR→Sensing)
+        blk = find_block(content, 'sensor_to_lidar')  # config file field name
         if not blk:
             config_blk = find_block(content, 'config')
             if config_blk:
-                blk = find_block(config_blk, 'sensor_to_lidar')
+                blk = find_block(config_blk, 'sensor_to_lidar')  # config file field name
             if not blk:
                 raise ValueError(f'在 {filepath} 中未找到 sensor_to_lidar')
         
@@ -822,7 +804,7 @@ class ConfigParser:
         if position is None or orientation is None:
             raise ValueError(f'sensor_to_lidar 的 position 或 orientation 不完整: {filepath}')
         
-        # 将sensor_to_lidar的position和orientation添加到result中
+        # 将LiDAR→Sensing的position和orientation添加到result中
         result['position'] = position
         result['orientation'] = orientation
         
@@ -997,7 +979,7 @@ class ProtobufUtils:
     
     @staticmethod
     def _decode_varint(buf: bytes, pos: int):
-        """解析protobuf varint"""
+        """解析protobuf varint (支持最大10字节/64位)"""
         n, sh = 0, 0
         while pos < len(buf):
             b = buf[pos]
@@ -1006,7 +988,7 @@ class ProtobufUtils:
             if not (b & 0x80):
                 return n, pos
             sh += 7
-            if sh >= 35:
+            if sh >= 64:
                 break
         return n, pos
 
@@ -1014,7 +996,7 @@ class ProtobufUtils:
 class PointCloudParser:
     """点云解析器（proto 格式）- 完全对齐Self-Cali-GS实现
     
-    ✅ 新增：支持lidar_configs解析和decombine处理（对齐C++ DecombineProtoPointCloud）
+    ✅ 支持lidar_configs解析，提取BAG中的lidar外参和header frame_id
     """
     
     # DataType 常量（与 PointCloud2.proto 一致）
@@ -1030,9 +1012,19 @@ class PointCloudParser:
     # 静态缓存：避免重复打印lidar_configs日志
     _lidar_configs_logged = False
     
+    # 从BAG中提取的首个有效lidar外参（用于点云Sensing→LiDAR坐标转换）
+    _lidar_to_sensing_from_bag: Optional[np.ndarray] = None
+    _sensing_to_vehicle_from_bag_proto: Optional[np.ndarray] = None
+    _bag_lidar_frame_id: Optional[str] = None  # lidar_configs中的frame_id (如 "atx_202")
+    
+    # BAG消息header中的frame_id（指示点云所在坐标系）
+    # == "lidar": 点云在Sensing系（combined）→ 需要Sensing→LiDAR转换
+    # != "lidar": 点云已在LiDAR系 → 直接保存
+    _header_frame_id: Optional[str] = None
+    
     @staticmethod
     def _decode_varint(buf: bytes, pos: int):
-        """解析 protobuf varint"""
+        """解析 protobuf varint (支持最大10字节/64位)"""
         n, sh = 0, 0
         while pos < len(buf):
             b = buf[pos]
@@ -1041,7 +1033,7 @@ class PointCloudParser:
             if not (b & 0x80):
                 return n, pos
             sh += 7
-            if sh >= 35:
+            if sh >= 64:
                 break
         return n, pos
     
@@ -1225,7 +1217,7 @@ class PointCloudParser:
             'frame_id': None,
             'ring_id_start': 0,
             'ring_id_end': 255,
-            'sensor_to_lidar': None  # Transformation3
+            'lidar_to_sensing': None  # Transformation3
         }
         pos = 0
         
@@ -1253,10 +1245,9 @@ class PointCloudParser:
                         result['frame_id'] = chunk.decode('utf-8', errors='ignore')
                     except:
                         pass
-                elif field_num == 26:  # sensor_to_lidar (repeated)
-                    # 只取第一个sensor_to_lidar
-                    if result['sensor_to_lidar'] is None:
-                        result['sensor_to_lidar'] = PointCloudParser._parse_transformation3(chunk)
+                elif field_num == 26:  # proto: sensor_to_lidar (LiDAR→Sensing)
+                    if result['lidar_to_sensing'] is None:
+                        result['lidar_to_sensing'] = PointCloudParser._parse_transformation3(chunk)
             elif wire == 5:  # Fixed32
                 pos += 4
             elif wire == 1:  # Fixed64
@@ -1302,9 +1293,9 @@ class PointCloudParser:
         
         返回:
           {
-            'vehicle_to_sensing': 4x4 ndarray (Sensing→Vehicle),
+            'sensing_to_vehicle': 4x4 ndarray (Sensing→Vehicle),
             'configs': [
-              {'frame_id': str, 'ring_id_start': int, 'ring_id_end': int, 'sensor_to_lidar': 4x4 ndarray},
+              {'frame_id': str, 'ring_id_start': int, 'ring_id_end': int, 'lidar_to_sensing': 4x4 ndarray},
               ...
             ]
           }
@@ -1315,7 +1306,7 @@ class PointCloudParser:
           - 精确模式: main_lidar_frame_id="atx_202" → 只保留atx_202
         """
         result = {
-            'vehicle_to_sensing': None,
+            'sensing_to_vehicle': None,
             'configs': []
         }
         pos = 0
@@ -1336,8 +1327,8 @@ class PointCloudParser:
                 chunk = data[pos:pos + L]
                 pos += L
                 
-                if field_num == 1:  # vehicle_to_sensing
-                    result['vehicle_to_sensing'] = PointCloudParser._parse_transformation3(chunk)
+                if field_num == 1:  # proto: vehicle_to_sensing (Sensing→Vehicle)
+                    result['sensing_to_vehicle'] = PointCloudParser._parse_transformation3(chunk)
                 elif field_num == 2:  # config (repeated)
                     config = PointCloudParser._parse_lidar_config_single(chunk)
                     frame_id = config.get('frame_id')
@@ -1443,7 +1434,7 @@ class PointCloudParser:
                         # 尝试解析为 lidar_configs（只保留主lidar配置）
                         parsed = PointCloudParser._parse_lidar_configs(chunk, main_lidar_frame_id)
                         # 验证解析结果是否有效
-                        if parsed and (parsed.get('vehicle_to_sensing') is not None or parsed.get('configs')):
+                        if parsed and (parsed.get('sensing_to_vehicle') is not None or parsed.get('configs')):
                             lidar_configs = parsed
                             break
                 except:
@@ -1689,151 +1680,18 @@ class PointCloudParser:
             return None
     
     @staticmethod
-    def _decombine_pointcloud(points: np.ndarray, lidar_configs: dict, step: int, frame_id: str) -> np.ndarray:
-        """Decombine点云：将点云从Sensing系转回LiDAR系（对齐C++ DecombineProtoPointCloud）
-        
-        参考: modules/calib_utils/src/proto_instance.cpp:45-82
-        
-        C++逻辑（对齐实现）:
-        1. 如果frame_id != "lidar_uncalibrated"，说明点云已经被combined到Sensing系
-        2. 从lidar_configs提取每个lidar的sensor_to_lidar外参
-           - sensor_to_lidar表示: LiDAR坐标系到Sensing坐标系的变换
-           - C++: Eigen::Isometry3d (4x4变换矩阵)
-        3. 计算逆变换: transform = sensor_to_lidar.inverse()
-           - 作用: 将点从Sensing系转回原始LiDAR系
-        4. 按ring范围分割点云（splite_pointcloud_raw），对每个子点云分别应用逆变换
-        
-        关键对齐点:
-        - C++: transform = extrinsics[j].inverse().matrix()
-        - Python: T_sensing_to_lidar = np.linalg.inv(sensor_to_lidar)
-        
-        Args:
-            points: (N, 5) 点云 [x, y, z, intensity, timestamp] 或 (N, 6) [x, y, z, intensity, ring, timestamp]
-            lidar_configs: 解析后的lidar_configs字典 (包含configs列表)
-            step: 每点的字节数 (16表示包含ring字段)
-            frame_id: 原始frame_id
-        
-        Returns:
-            变换后的点云（已转换到LiDAR系，frame_id将设为"lidar_uncalibrated"）
-        """
-        configs = lidar_configs.get('configs', [])
-        
-        if not configs:
-            # 没有configs，无法decombine
-            # 按C++逻辑: 如果没有lidar_configs，应该返回错误
-            print(f"  ⚠️  没有找到lidar configs，无法decombine")
-            return points
-        
-        # 判断点云是否包含ring信息（step=16表示PointXYZIRT格式，有ring字段）
-        has_ring = (step == 16 and points.shape[1] >= 6)
-        
-        if not has_ring:
-            # 没有ring信息，无法按lidar分割，使用第一个config的变换应用到所有点
-            # 注意：这与C++行为不完全一致，C++要求有ring信息
-            if configs[0].get('sensor_to_lidar') is not None:
-                # 按C++命名约定（从右往左读）
-                T_sensing_to_lidar = configs[0]['sensor_to_lidar']  # LiDAR→Sensing (从config读取，从右往左读)
-                T_lidar_to_sensing = np.linalg.inv(T_sensing_to_lidar)  # Sensing→LiDAR (逆变换，从右往左读)
-                
-                # 应用变换：将点从Sensing系转回LiDAR系
-                # C++对齐: transformPointCloudXYZIRT(*source_cloud_raw, *source_cloud, transform)
-                #          其中 transform = extrinsics[j].inverse()
-                xyz = points[:, :3]
-                xyz_homo = np.hstack([xyz, np.ones((xyz.shape[0], 1))])
-                xyz_transformed = (T_lidar_to_sensing @ xyz_homo.T).T[:, :3]
-                
-                points_out = points.copy()
-                points_out[:, :3] = xyz_transformed
-                
-                # 打印decombine结果
-                if not hasattr(PointCloudParser, '_decombine_logged'):
-                    PointCloudParser._decombine_logged = True
-                    print(f"  ✓ 已应用decombine变换 (⚠️ 无ring信息，应用config[0]到所有点)")
-                    print(f"    T_sensing_to_lidar (LiDAR→Sensing, 从右往左读) translation: [{T_sensing_to_lidar[0, 3]:.4f}, {T_sensing_to_lidar[1, 3]:.4f}, {T_sensing_to_lidar[2, 3]:.4f}]")
-                    print(f"    T_lidar_to_sensing (Sensing→LiDAR, 从右往左读) translation: [{T_lidar_to_sensing[0, 3]:.4f}, {T_lidar_to_sensing[1, 3]:.4f}, {T_lidar_to_sensing[2, 3]:.4f}]")
-                    print(f"    变换前点云范围: x=[{xyz[:, 0].min():.2f}, {xyz[:, 0].max():.2f}], y=[{xyz[:, 1].min():.2f}, {xyz[:, 1].max():.2f}]")
-                    print(f"    变换后点云范围: x=[{xyz_transformed[:, 0].min():.2f}, {xyz_transformed[:, 0].max():.2f}], y=[{xyz_transformed[:, 1].min():.2f}, {xyz_transformed[:, 1].max():.2f}]")
-                
-                return points_out
-            else:
-                print(f"  ⚠️  config[0]没有sensor_to_lidar，跳过decombine")
-                return points
-        
-        # 有ring信息，按ring范围分割点云（对齐C++ splite_pointcloud_raw逻辑）
-        ring_col = 4 if points.shape[1] == 6 else -1  # ring在第5列（索引4）
-        
-        if ring_col < 0 or points.shape[1] < 6:
-            print(f"  ⚠️  点云格式不支持ring分割 (shape={points.shape})，跳过decombine")
-            return points
-        
-        rings = points[:, ring_col].astype(np.int32)
-        points_out = points.copy()
-        decombined_count = 0
-        
-        # 打印decombine详情（首次）
-        if not hasattr(PointCloudParser, '_decombine_logged'):
-            PointCloudParser._decombine_logged = True
-            print(f"  ✓ 按ring范围分割并应用decombine变换")
-            print(f"    点云包含ring信息，共{len(configs)}个lidar configs")
-        
-        for i, cfg in enumerate(configs):
-            ring_start = cfg['ring_id_start']
-            ring_end = cfg['ring_id_end']
-            sensor_to_lidar = cfg.get('sensor_to_lidar')
-            
-            if sensor_to_lidar is None:
-                print(f"    ⚠️  config[{i}] 没有sensor_to_lidar，跳过")
-                continue
-            
-            # 找到属于这个lidar的点（C++: splite_pointcloud_raw）
-            # C++: if (ring >= ring_start && ring < ring_end)  // 左闭右开区间 [ring_start, ring_end)
-            mask = (rings >= ring_start) & (rings < ring_end)
-            num_points_in_range = np.sum(mask)
-            
-            if num_points_in_range == 0:
-                continue
-            
-            # 计算逆变换（C++对齐: transform = extrinsics[j].inverse()）
-            # 按C++命名约定（从右往左读）：
-            T_sensing_to_lidar = sensor_to_lidar  # LiDAR→Sensing（从右往左读）
-            T_lidar_to_sensing = np.linalg.inv(T_sensing_to_lidar)  # Sensing→LiDAR（从右往左读）
-            
-            # 应用变换（C++对齐: transformPointCloudXYZIRT）
-            # 将点从Sensing系转回LiDAR系
-            xyz = points[mask, :3]
-            xyz_homo = np.hstack([xyz, np.ones((xyz.shape[0], 1))])
-            xyz_transformed = (T_lidar_to_sensing @ xyz_homo.T).T[:, :3]
-            
-            points_out[mask, :3] = xyz_transformed
-            decombined_count += num_points_in_range
-            
-            # 打印每个lidar的变换详情（首次）
-            if not PointCloudParser._lidar_configs_logged:
-                cfg_frame_id = cfg.get('frame_id', 'unknown')
-                print(f"    config[{i}]: frame_id='{cfg_frame_id}', ring=[{ring_start}, {ring_end}) (左闭右开), points={num_points_in_range}")
-                print(f"      T_sensing_to_lidar (LiDAR→Sensing, 从右往左读) translation: [{T_sensing_to_lidar[0, 3]:.4f}, {T_sensing_to_lidar[1, 3]:.4f}, {T_sensing_to_lidar[2, 3]:.4f}]")
-                print(f"      T_lidar_to_sensing (Sensing→LiDAR, 从右往左读) translation: [{T_lidar_to_sensing[0, 3]:.4f}, {T_lidar_to_sensing[1, 3]:.4f}, {T_lidar_to_sensing[2, 3]:.4f}]")
-        
-        if not PointCloudParser._lidar_configs_logged:
-            print(f"    总计变换点数: {decombined_count}/{len(points)} ({100*decombined_count/len(points):.1f}%)")
-        
-        return points_out
-    
-    @staticmethod
-    def parse_proto_pointcloud2(data: bytes, apply_decombine: bool = False, main_lidar_frame_id: str = "atx_202",
+    def parse_proto_pointcloud2(data: bytes, main_lidar_frame_id: str = "atx_202",
                                 config_for_comparison: Optional[dict] = None) -> Optional[np.ndarray]:
         """解析 PointCloud2 proto 数据
         
         参考: ~/develop/code/github/Self-Cali-GS/surround_calibration/data/lidar_utils.py
         
-        ✅ 性能优化：使用NumPy向量化操作替代Python循环，大幅提升解析速度
-        ✅ 新增：支持lidar_configs解析（对齐C++ DecombineProtoPointCloud）
+        点云坐标系取决于BAG header frame_id：
+        - "lidar": 点云在Sensing系（后续由_process_single_frame做Sensing→LiDAR转换）
+        - 其他值: 点云已在LiDAR系
         
         Args:
             data: protobuf消息bytes数据
-            apply_decombine: 是否应用decombine处理（如果点云在Sensing系，转回LiDAR系）
-                           ⚠️ 默认False：本脚本中点云需要保持在Sensing系用于后续去畸变
-                           ✅ 仅在需要原始LiDAR系点云时设置为True
             main_lidar_frame_id: 主lidar的标识，支持两种模式：
                                - 精确匹配: "atx_202" (完整frame_id)
                                - 后缀匹配: "_202" (以_开头，匹配所有_202结尾的lidar，如atx_202, hesai_202等)
@@ -1841,18 +1699,15 @@ class PointCloudParser:
                                ⚠️ 如果存在多个lidar，只提取和使用主lidar的外参
                                ✅ 设置为None则保留所有lidar配置
             config_for_comparison: 从lidars.cfg读取的配置，用于与bag提取的配置进行对比
-        
-        注意：
-            - 本脚本工作流程：bag提取(Sensing系) → 去畸变(Sensing系) → 保存(Sensing系)
-            - 去畸变假设点云在Sensing系，因此提取时不应做decombine变换
-            - 参考代码3222行注释："点云去畸变后在 Sensing 坐标系"
         """
         if data is None or len(data) < 16:
             return None
         
-        # ✅ 新增：提取frame_id和lidar_configs（对齐C++）
-        frame_id = None
+        # 提取frame_id和lidar_configs（对齐C++）
+        # 优化：_header_frame_id 已缓存后复用，无需每条消息重复提取
+        frame_id = PointCloudParser._header_frame_id
         lidar_configs = None
+        need_extract = (frame_id is None)
         
         # 尝试多个候选位置（可能有不同的前缀）
         candidates = [data]
@@ -1875,9 +1730,16 @@ class PointCloudParser:
             if n < 50:
                 continue
             
-            # ✅ 新增：在找到有效点云数据后，提取frame_id和lidar_configs（只保留主lidar配置）
-            if frame_id is None:
+            # 仅首次需要从proto中提取header frame_id和lidar_configs
+            if need_extract:
                 frame_id, lidar_configs = PointCloudParser._extract_frame_id_and_lidar_configs(to_parse, main_lidar_frame_id)
+                if frame_id is not None:
+                    PointCloudParser._header_frame_id = frame_id
+                    print(f"  📌 BAG header frame_id: '{frame_id}' "
+                          f"({'点云在Sensing系，需要转换到LiDAR系' if frame_id == 'lidar' else '点云已在LiDAR系'})")
+                    need_extract = False
+                else:
+                    continue
             
             # 构建 fields_map
             fields_map = {}
@@ -1885,9 +1747,20 @@ class PointCloudParser:
                 fmt, scale = PointCloudParser._datatype_to_fmt_scale(dt)
                 fields_map[name] = (off, fmt, scale)
             
-            # 如果没有找到完整的 x, y, z，使用默认映射（INT16）
-            if len(fields_map) != 3:
-                fields_map = {'x': (0, 'h', 0.01), 'y': (2, 'h', 0.01), 'z': (4, 'h', 0.01)}
+            # 如果proto字段解析不完整，根据point_step推断正确的格式
+            if 'x' not in fields_map or 'y' not in fields_map or 'z' not in fields_map:
+                if step == 16:
+                    # 16字节标准格式: x(f32,0), y(f32,4), z(f32,8), intensity(u8,12), ring(u8,13), ts(u16,14)
+                    fields_map = {'x': (0, 'f', 1.0), 'y': (4, 'f', 1.0), 'z': (8, 'f', 1.0)}
+                elif step == 10:
+                    fields_map = {'x': (0, 'h', 0.01), 'y': (2, 'h', 0.01), 'z': (4, 'h', 0.01)}
+                else:
+                    fields_map = {'x': (0, 'h', 0.01), 'y': (2, 'h', 0.01), 'z': (4, 'h', 0.01)}
+                if not hasattr(PointCloudParser, '_fallback_warned'):
+                    PointCloudParser._fallback_warned = True
+                    print(f"  ⚠️  proto字段解析不完整(got {len(flist)} fields)，"
+                          f"使用point_step={step}推断格式: "
+                          f"{'FLOAT32' if step == 16 else 'INT16'}")
             
             # ✅ 使用向量化快速解析（性能关键优化）
             points = PointCloudParser._parse_points_fast_numpy(raw, step, fields_map)
@@ -1922,90 +1795,105 @@ class PointCloudParser:
                     print(f"  has_lidar_configs: {'YES' if lidar_configs else 'NO'}")
                     
                     if lidar_configs:
-                        # 打印从bag提取的vehicle_to_sensing
-                        v2s_bag = lidar_configs.get('vehicle_to_sensing')
-                        if v2s_bag is not None:
-                            print(f"\n  【从BAG提取】vehicle_to_sensing (Sensing->Vehicle):")
-                            print(f"    position: [{v2s_bag[0, 3]:.6f}, {v2s_bag[1, 3]:.6f}, {v2s_bag[2, 3]:.6f}]")
+                        s2v_bag = lidar_configs.get('sensing_to_vehicle')
+                        if s2v_bag is not None:
+                            print(f"\n  【从BAG提取】Sensing→Vehicle:")
+                            print(f"    position: [{s2v_bag[0, 3]:.6f}, {s2v_bag[1, 3]:.6f}, {s2v_bag[2, 3]:.6f}]")
                             print(f"    rotation (3x3):")
                             for row_idx in range(3):
-                                print(f"      [{v2s_bag[row_idx, 0]:9.6f}, {v2s_bag[row_idx, 1]:9.6f}, {v2s_bag[row_idx, 2]:9.6f}]")
+                                print(f"      [{s2v_bag[row_idx, 0]:9.6f}, {s2v_bag[row_idx, 1]:9.6f}, {s2v_bag[row_idx, 2]:9.6f}]")
                         
-                        # 打印从bag提取的sensor_to_lidar
+                        # 打印从bag提取的 LiDAR→Sensing
                         configs = lidar_configs.get('configs', [])
                         print(f"\n  config_size: {len(configs)} (filtered: only main_lidar_frame_id='{main_lidar_frame_id}')")
                         for i, cfg in enumerate(configs):
-                            s2l_bag = cfg.get('sensor_to_lidar')
+                            l2s_bag = cfg.get('lidar_to_sensing')
                             cfg_frame_id = cfg.get('frame_id', 'unknown')
                             print(f"\n    【从BAG提取】config[{i}]: frame_id='{cfg_frame_id}', ring=[{cfg['ring_id_start']}, {cfg['ring_id_end']})")
-                            if s2l_bag is not None:
-                                print(f"      sensor_to_lidar (LiDAR->Sensing) translation: [{s2l_bag[0, 3]:.6f}, {s2l_bag[1, 3]:.6f}, {s2l_bag[2, 3]:.6f}]")
-                                print(f"      sensor_to_lidar rotation (3x3):")
+                            if l2s_bag is not None:
+                                print(f"      LiDAR→Sensing translation: [{l2s_bag[0, 3]:.6f}, {l2s_bag[1, 3]:.6f}, {l2s_bag[2, 3]:.6f}]")
+                                print(f"      LiDAR→Sensing rotation (3x3):")
                                 for row_idx in range(3):
-                                    print(f"        [{s2l_bag[row_idx, 0]:9.6f}, {s2l_bag[row_idx, 1]:9.6f}, {s2l_bag[row_idx, 2]:9.6f}]")
+                                    print(f"        [{l2s_bag[row_idx, 0]:9.6f}, {l2s_bag[row_idx, 1]:9.6f}, {l2s_bag[row_idx, 2]:9.6f}]")
                         
                         # 如果提供了lidars.cfg配置，进行对比
                         if config_for_comparison is not None:
                             print(f"\n=== 对比 lidars.cfg 配置 ===")
                             
-                            # 对比vehicle_to_sensing
-                            if 'vehicle_to_sensing' in config_for_comparison:
-                                v2s_cfg = config_for_comparison['vehicle_to_sensing']
-                                if 'position' in v2s_cfg and 'orientation' in v2s_cfg:
+                            # 对比 Sensing→Vehicle
+                            if 'sensing_to_vehicle' in config_for_comparison:
+                                s2v_cfg = config_for_comparison['sensing_to_vehicle']
+                                if 'position' in s2v_cfg and 'orientation' in s2v_cfg:
                                     from scipy.spatial.transform import Rotation as R
-                                    pos_cfg = np.array(v2s_cfg['position'])
-                                    ori_cfg = np.array(v2s_cfg['orientation'])  # [qx, qy, qz, qw]
+                                    pos_cfg = np.array(s2v_cfg['position'])
+                                    ori_cfg = np.array(s2v_cfg['orientation'])  # [qx, qy, qz, qw]
                                     T_cfg = np.eye(4)
                                     T_cfg[:3, :3] = R.from_quat(ori_cfg).as_matrix()
                                     T_cfg[:3, 3] = pos_cfg
                                     
-                                    print(f"\n  【从LIDARS.CFG】vehicle_to_sensing (Sensing->Vehicle):")
+                                    print(f"\n  【从LIDARS.CFG】Sensing→Vehicle:")
                                     print(f"    position: [{T_cfg[0, 3]:.6f}, {T_cfg[1, 3]:.6f}, {T_cfg[2, 3]:.6f}]")
                                     print(f"    rotation (3x3):")
                                     for row_idx in range(3):
                                         print(f"      [{T_cfg[row_idx, 0]:9.6f}, {T_cfg[row_idx, 1]:9.6f}, {T_cfg[row_idx, 2]:9.6f}]")
                                     
                                     # 计算差异
-                                    if v2s_bag is not None:
-                                        pos_diff = np.linalg.norm(T_cfg[:3, 3] - v2s_bag[:3, 3])
-                                        rot_diff = np.linalg.norm(T_cfg[:3, :3] - v2s_bag[:3, :3], 'fro')
-                                        print(f"\n  【GAP】vehicle_to_sensing:")
+                                    if s2v_bag is not None:
+                                        pos_diff = np.linalg.norm(T_cfg[:3, 3] - s2v_bag[:3, 3])
+                                        rot_diff = np.linalg.norm(T_cfg[:3, :3] - s2v_bag[:3, :3], 'fro')
+                                        print(f"\n  【GAP】Sensing→Vehicle:")
                                         print(f"    位置差异 (L2 norm): {pos_diff:.6f} m")
                                         print(f"    旋转差异 (Frobenius norm): {rot_diff:.6f}")
-                                        print(f"    位置分量差异: [{T_cfg[0,3]-v2s_bag[0,3]:.6f}, {T_cfg[1,3]-v2s_bag[1,3]:.6f}, {T_cfg[2,3]-v2s_bag[2,3]:.6f}]")
+                                        print(f"    位置分量差异: [{T_cfg[0,3]-s2v_bag[0,3]:.6f}, {T_cfg[1,3]-s2v_bag[1,3]:.6f}, {T_cfg[2,3]-s2v_bag[2,3]:.6f}]")
                             
-                            # 对比sensor_to_lidar
+                            # 对比 LiDAR→Sensing
                             if 'position' in config_for_comparison and 'orientation' in config_for_comparison:
                                 from scipy.spatial.transform import Rotation as R
                                 pos_cfg = np.array(config_for_comparison['position'])
                                 ori_cfg = np.array(config_for_comparison['orientation'])  # [qx, qy, qz, qw]
-                                T_s2l_cfg = np.eye(4)
-                                T_s2l_cfg[:3, :3] = R.from_quat(ori_cfg).as_matrix()
-                                T_s2l_cfg[:3, 3] = pos_cfg
+                                T_l2s_cfg = np.eye(4)
+                                T_l2s_cfg[:3, :3] = R.from_quat(ori_cfg).as_matrix()
+                                T_l2s_cfg[:3, 3] = pos_cfg
                                 
-                                print(f"\n  【从LIDARS.CFG】sensor_to_lidar (LiDAR->Sensing):")
-                                print(f"    position: [{T_s2l_cfg[0, 3]:.6f}, {T_s2l_cfg[1, 3]:.6f}, {T_s2l_cfg[2, 3]:.6f}]")
+                                print(f"\n  【从LIDARS.CFG】LiDAR→Sensing:")
+                                print(f"    position: [{T_l2s_cfg[0, 3]:.6f}, {T_l2s_cfg[1, 3]:.6f}, {T_l2s_cfg[2, 3]:.6f}]")
                                 print(f"    rotation (3x3):")
                                 for row_idx in range(3):
-                                    print(f"      [{T_s2l_cfg[row_idx, 0]:9.6f}, {T_s2l_cfg[row_idx, 1]:9.6f}, {T_s2l_cfg[row_idx, 2]:9.6f}]")
+                                    print(f"      [{T_l2s_cfg[row_idx, 0]:9.6f}, {T_l2s_cfg[row_idx, 1]:9.6f}, {T_l2s_cfg[row_idx, 2]:9.6f}]")
                                 
                                 # 计算差异
-                                if configs and s2l_bag is not None:
-                                    pos_diff = np.linalg.norm(T_s2l_cfg[:3, 3] - s2l_bag[:3, 3])
-                                    rot_diff = np.linalg.norm(T_s2l_cfg[:3, :3] - s2l_bag[:3, :3], 'fro')
-                                    print(f"\n  【GAP】sensor_to_lidar:")
+                                if configs and l2s_bag is not None:
+                                    pos_diff = np.linalg.norm(T_l2s_cfg[:3, 3] - l2s_bag[:3, 3])
+                                    rot_diff = np.linalg.norm(T_l2s_cfg[:3, :3] - l2s_bag[:3, :3], 'fro')
+                                    print(f"\n  【GAP】LiDAR→Sensing:")
                                     print(f"    位置差异 (L2 norm): {pos_diff:.6f} m")
                                     print(f"    旋转差异 (Frobenius norm): {rot_diff:.6f}")
-                                    print(f"    位置分量差异: [{T_s2l_cfg[0,3]-s2l_bag[0,3]:.6f}, {T_s2l_cfg[1,3]-s2l_bag[1,3]:.6f}, {T_s2l_cfg[2,3]-s2l_bag[2,3]:.6f}]")
+                                    print(f"    位置分量差异: [{T_l2s_cfg[0,3]-l2s_bag[0,3]:.6f}, {T_l2s_cfg[1,3]-l2s_bag[1,3]:.6f}, {T_l2s_cfg[2,3]-l2s_bag[2,3]:.6f}]")
                 
-                # ✅ 新增：Decombine处理（对齐C++ DecombineProtoPointCloud）
-                if apply_decombine and frame_id and frame_id != 'lidar_uncalibrated' and lidar_configs:
-                    points = PointCloudParser._decombine_pointcloud(points, lidar_configs, step, frame_id)
+                # 缓存首个有效的BAG lidar外参（供后续Tr矩阵决策使用）
+                if PointCloudParser._lidar_to_sensing_from_bag is None and lidar_configs:
+                    configs = lidar_configs.get('configs', [])
+                    for cfg in configs:
+                        l2s = cfg.get('lidar_to_sensing')
+                        if l2s is not None:
+                            PointCloudParser._lidar_to_sensing_from_bag = l2s.copy()
+                            PointCloudParser._bag_lidar_frame_id = cfg.get('frame_id')
+                            break
+                    s2v = lidar_configs.get('sensing_to_vehicle')
+                    if s2v is not None:
+                        PointCloudParser._sensing_to_vehicle_from_bag_proto = s2v.copy()
                 
                 return points
         
+        # frame_id始终为None → bag数据无效，不做fallback解析
+        if frame_id is None:
+            if not hasattr(PointCloudParser, '_invalid_bag_warned'):
+                PointCloudParser._invalid_bag_warned = True
+                print(f"  ❌ BAG无效: 所有候选偏移均无法提取frame_id，跳过此bag的点云数据")
+            return None
+        
         # Fallback: 尝试直接按float格式读取（如果wire format失败）
-        # 参考Self-Cali-GS: 尝试不同的起始偏移量
+        # 尝试不同的起始偏移量
         for offset_start in [0, 20, 40, 60, 80, 100, 150, 200, 300, 400, 500]:
             if len(data) < offset_start + 16:
                 continue
@@ -2063,6 +1951,8 @@ class BEVCalibDatasetPreparer:
         max_frames: int = None,  # 最大处理帧数（用于测试）
         save_debug_samples: int = 0,  # 保存调试样本数量（未去畸变点云）
         max_pose_gap: float = 0.5,  # 最大允许的pose间隔（秒），用于处理不连续bag数据
+        force_config: bool = False,  # 强制使用lidars.cfg外参替代bag外参
+        sequence_id: str = "00",  # sequence ID，用于隔离临时目录（并行安全）
     ):
         self.bag_path = Path(bag_path)
         self.config_dir = Path(config_dir)
@@ -2077,10 +1967,16 @@ class BEVCalibDatasetPreparer:
         self.max_frames = max_frames  # 最大处理帧数（用于测试）
         self.save_debug_samples = save_debug_samples  # 保存调试样本数量
         self.max_pose_gap = max_pose_gap  # 最大允许的pose间隔
+        self.force_config = force_config
+        self.sequence_id = sequence_id
         
-        # 创建输出目录
+        # 点云坐标系转换状态（由_update_transforms_from_bag设置）
+        self._need_sensing_to_lidar = False  # 是否需要Sensing→LiDAR转换
+        self._sensing_to_lidar_transform = None  # Sensing→LiDAR的4x4变换矩阵
+        
+        # 创建输出目录（temp目录按sequence_id隔离，支持并行处理多个trip）
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.temp_dir = self.output_dir / 'temp'
+        self.temp_dir = self.output_dir / f'temp_seq{sequence_id}'
         self.temp_dir.mkdir(exist_ok=True)
         self.temp_image_dir = self.temp_dir / 'images'
         self.temp_pc_dir = self.temp_dir / 'pointclouds'
@@ -2092,10 +1988,13 @@ class BEVCalibDatasetPreparer:
         self.pc_metadata: List[PointCloudMetadata] = []
         self.pose_metadata: List[PoseMetadata] = []
         
+        # bag文件按时间连续性分组的时间段 [(start_ts, end_ts), ...]
+        self.bag_segments: List[Tuple[float, float]] = []
+        
         # 从bag中提取的 Sensing→Vehicle 变换（优先级高于本地配置）
-        # C++命名：T_vehicle_to_sensing（从右往左读：Sensing→Vehicle）
+        # 从BAG提取的 Sensing→Vehicle 变换 (cfg字段: vehicle_to_sensing)
         # 注意：必须在_compute_transforms()之前初始化
-        self.vehicle_to_sensing_from_bag: Optional[np.ndarray] = None
+        self.sensing_to_vehicle_from_bag: Optional[np.ndarray] = None
         
         # 计数器
         self.image_counter = 0
@@ -2130,10 +2029,10 @@ class BEVCalibDatasetPreparer:
         print(f"  图像尺寸: {self.camera_config['intrinsic']['img_width']}x{self.camera_config['intrinsic']['img_height']}")
         print(f"  内参 fx={self.camera_config['intrinsic']['f_x']:.2f}, fy={self.camera_config['intrinsic']['f_y']:.2f}")
     
-    def _extract_vehicle_to_sensing_from_pc_msg(self, data: bytes) -> Optional[np.ndarray]:
-        """从点云protobuf消息中提取 vehicle_to_sensing (Sensing→Vehicle) 变换
+    def _extract_sensing_to_vehicle_from_pc_msg(self, data: bytes) -> Optional[np.ndarray]:
+        """从点云protobuf消息中提取 Sensing→Vehicle 变换
         
-        **命名约定**: vehicle_to_sensing = Sensing→Vehicle
+        proto字段名: vehicle_to_sensing
         
         参考：lidar_online_calibrator.cpp:1038-1054 + proto_utils.cpp:569-588
         
@@ -2142,13 +2041,13 @@ class BEVCalibDatasetPreparer:
         """
         try:
             # 手动解析protobuf wire format以查找lidar_configs字段
-            # 寻找vehicle_to_sensing的position和orientation
+            # 寻找 Sensing→Vehicle 的position和orientation
             
             # 尝试使用protobuf反序列化（如果消息包含lidar_configs）
             # 注意：我们不需要完整的proto定义，只需要提取特定字段
             
             # 简化方案：尝试搜索特定的字节模式
-            # vehicle_to_sensing包含: position(x,y,z) + orientation(qw,qx,qy,qz)
+            # Sensing→Vehicle 包含: position(x,y,z) + orientation(qw,qx,qy,qz)
             
             # 暂时返回None，使用fallback逻辑
             return None
@@ -2156,52 +2055,116 @@ class BEVCalibDatasetPreparer:
         except Exception as e:
             return None
     
-    def _get_vehicle_to_sensing_transform(self) -> np.ndarray:
-        """获取 Sensing→Vehicle 的变换
+    def _get_sensing_to_vehicle_transform(self) -> np.ndarray:
+        """获取 Sensing→Vehicle 的变换矩阵
         
         参考：proto_utils.cpp:569-588
         
-        **C++命名约定**（从右往左读）：
-        - vehicle_to_sensing = Sensing→Vehicle (Sensing在Vehicle系中的位姿)
-        - T_vehicle_to_sensing表示将Vehicle系变换到Sensing系 = Sensing→Vehicle
+        cfg字段: vehicle_to_sensing → 内部key: 'sensing_to_vehicle'
         
         优先级：
-        1. 从bag中的点云消息提取（self.vehicle_to_sensing_from_bag）
-        2. 从本地lidars.cfg的vehicle_to_sensing字段读取
+        1. 从bag中的点云消息提取（self.sensing_to_vehicle_from_bag）
+        2. 从本地lidars.cfg的 'sensing_to_vehicle' 读取
         3. 默认单位矩阵（Vehicle == Sensing）
         
         Returns:
-            T_vehicle_to_sensing: Sensing→Vehicle的4x4变换矩阵（从右往左读）
+            T_sensing_to_vehicle: Sensing→Vehicle的4x4变换矩阵
         """
-        # 优先使用从bag中提取的配置
-        if self.vehicle_to_sensing_from_bag is not None:
-            return self.vehicle_to_sensing_from_bag
+        if self.sensing_to_vehicle_from_bag is not None and not self.force_config:
+            return self.sensing_to_vehicle_from_bag
         
-        # 尝试从本地lidars.cfg读取vehicle_to_sensing = Sensing→Vehicle
-        # 按C++规范命名：T_vehicle_to_sensing（从右往左读：Sensing→Vehicle）
-        T_vehicle_to_sensing = np.eye(4)
+        T_sensing_to_vehicle = np.eye(4)
         
-        # 检查lidar_config是否包含vehicle_to_sensing
-        if isinstance(self.lidar_config, dict) and 'vehicle_to_sensing' in self.lidar_config:
-            v2s = self.lidar_config['vehicle_to_sensing']
-            if 'position' in v2s and 'orientation' in v2s:
-                pos = v2s['position']
-                ori = v2s['orientation']  # [qx, qy, qz, qw]
+        if isinstance(self.lidar_config, dict) and 'sensing_to_vehicle' in self.lidar_config:
+            s2v = self.lidar_config['sensing_to_vehicle']
+            if 'position' in s2v and 'orientation' in s2v:
+                pos = s2v['position']
+                ori = s2v['orientation']  # [qx, qy, qz, qw]
                 
-                # 构建变换矩阵：Sensing→Vehicle
                 r = R.from_quat(ori)
-                T_vehicle_to_sensing[:3, :3] = r.as_matrix()
-                T_vehicle_to_sensing[:3, 3] = pos
+                T_sensing_to_vehicle[:3, :3] = r.as_matrix()
+                T_sensing_to_vehicle[:3, 3] = pos
                 
-                print(f"✓ 从lidars.cfg读取 vehicle_to_sensing")
-                print(f"  (C++命名: T_vehicle_to_sensing = Sensing→Vehicle)")
+                print(f"✓ 从lidars.cfg读取 Sensing→Vehicle")
                 print(f"  position: {pos}")
                 print(f"  orientation: {ori}")
-                return T_vehicle_to_sensing
+                return T_sensing_to_vehicle
         
-        # 默认：Vehicle == Sensing（单位矩阵）
         print(f"ℹ️  使用默认假设: Vehicle == Sensing (单位矩阵)")
-        return T_vehicle_to_sensing
+        return T_sensing_to_vehicle
+    
+    def _update_transforms_from_bag(self):
+        """BAG提取后，根据header frame_id决定是否需要点云坐标转换
+        
+        **架构说明**：
+        - calib.txt的Tr始终由lidars.cfg + cameras.cfg合成，不受BAG外参影响
+        - BAG的 LiDAR→Sensing 仅用于：当header frame_id == "lidar"时，
+          将Sensing系点云转换到LiDAR系
+        
+        **header frame_id含义**：
+        - == "lidar": 点云在Sensing系（combined）→ 需要Sensing→LiDAR转换
+        - != "lidar": 点云已在LiDAR系 → 直接保存
+        
+        **--force-config作用**：
+        - 当需要Sensing→LiDAR转换时，控制使用哪个 LiDAR→Sensing 外参：
+          - 默认: BAG中的（录制时实际使用的外参）
+          - --force-config: lidars.cfg中的
+        """
+        header_fid = PointCloudParser._header_frame_id
+        l2s_bag = PointCloudParser._lidar_to_sensing_from_bag
+        bag_cfg_fid = PointCloudParser._bag_lidar_frame_id
+        
+        self._need_sensing_to_lidar = False
+        self._sensing_to_lidar_transform = None
+        
+        print(f"\n{'─'*60}")
+        print(f"  坐标系分析:")
+        print(f"    BAG header frame_id: '{header_fid}'")
+        print(f"    Tr矩阵: 始终由lidars.cfg + cameras.cfg合成 (Camera→LiDAR)")
+        
+        if header_fid == "lidar":
+            # 点云在Sensing系，需要转换到LiDAR系
+            self._need_sensing_to_lidar = True
+            
+            if self.force_config or l2s_bag is None:
+                # 使用lidars.cfg的 LiDAR→Sensing 进行转换
+                self._sensing_to_lidar_transform = self.T_sensing_to_lidar.copy()
+                source = "lidars.cfg"
+                if self.force_config:
+                    print(f"    ⚠️  --force-config: 点云Sensing→LiDAR转换使用lidars.cfg外参")
+                else:
+                    print(f"    ℹ️  BAG中未提取到LiDAR→Sensing外参，使用lidars.cfg进行转换")
+            else:
+                # 使用BAG的 LiDAR→Sensing 进行转换（录制时实际使用的外参）
+                self._sensing_to_lidar_transform = np.linalg.inv(l2s_bag)
+                source = "BAG"
+                print(f"    ✓ 点云Sensing→LiDAR转换使用BAG外参 (config frame_id='{bag_cfg_fid}')")
+            
+            print(f"    转换矩阵来源: {source}")
+            t = self._sensing_to_lidar_transform[:3, 3]
+            print(f"    Sensing→LiDAR平移: [{t[0]:.6f}, {t[1]:.6f}, {t[2]:.6f}]")
+        else:
+            print(f"    ✓ 点云已在LiDAR系，无需坐标转换")
+        
+        # 对比BAG和config的 LiDAR→Sensing（诊断信息）
+        if l2s_bag is not None:
+            cfg_l2s = self.T_lidar_to_sensing
+            pos_diff = np.linalg.norm(cfg_l2s[:3, 3] - l2s_bag[:3, 3])
+            rot_diff = np.linalg.norm(cfg_l2s[:3, :3] - l2s_bag[:3, :3], 'fro')
+            print(f"    [诊断] BAG vs lidars.cfg LiDAR→Sensing差异: "
+                  f"位置={pos_diff:.6f}m, 旋转={rot_diff:.6f}")
+        
+        # 更新 Sensing→Vehicle（如果BAG中有且合格，用于位姿转换）
+        s2v_bag = PointCloudParser._sensing_to_vehicle_from_bag_proto
+        if s2v_bag is not None:
+            s2v_rot_diff = np.linalg.norm(s2v_bag[:3, :3] - np.eye(3), 'fro')
+            s2v_trans_norm = np.linalg.norm(s2v_bag[:3, 3])
+            if s2v_rot_diff > 0.001 or s2v_trans_norm > 0.001:
+                self.sensing_to_vehicle_from_bag = s2v_bag
+                self.T_sensing_to_vehicle = s2v_bag
+                print(f"    ✓ 更新 Sensing→Vehicle (从BAG): "
+                      f"translation=[{s2v_bag[0, 3]:.6f}, {s2v_bag[1, 3]:.6f}, {s2v_bag[2, 3]:.6f}]")
+        print(f"{'─'*60}")
     
     def _convert_poses_to_sensing_frame(self):
         """将Vehicle系的pose转换为Sensing系（对齐C++实现）
@@ -2212,7 +2175,7 @@ class BEVCalibDatasetPreparer:
         
         变换理解：
         - 输入：vehicle_pose = Vehicle→World（Vehicle在World系中的位姿）
-        - 中间：T_vehicle_to_sensing = Sensing→Vehicle（从config读取）
+        - 中间：T_sensing_to_vehicle = Sensing→Vehicle
         - 输出：sensing_pose = (Vehicle→World) @ (Sensing→Vehicle) = Sensing→World
         
         含义：Sensing在World系中的位姿
@@ -2223,21 +2186,19 @@ class BEVCalibDatasetPreparer:
         """
         print(f"\n  转换位姿到Sensing坐标系...")
         print(f"  === 位姿坐标系转换 (对齐C++) ===")
-        print(f"  T_vehicle_to_sensing (Sensing→Vehicle):")
-        print(f"    旋转:\n{self.T_vehicle_to_sensing[:3, :3]}")
-        print(f"    平移: {self.T_vehicle_to_sensing[:3, 3]}")
+        print(f"  T_sensing_to_vehicle (Sensing→Vehicle):")
+        print(f"    旋转:\n{self.T_sensing_to_vehicle[:3, :3]}")
+        print(f"    平移: {self.T_sensing_to_vehicle[:3, 3]}")
         
-        # 打印转换前的第一个pose（便于与C++对比）
         if self.pose_metadata:
             pose0 = self.pose_metadata[0]
             print(f"  转换前(Vehicle系)第一个pose:")
             print(f"    timestamp(s): {pose0.timestamp:.6f}")
-            print(f"    timestamp(us): {int(pose0.timestamp * 1e6)}")  # 便于与C++对比
+            print(f"    timestamp(us): {int(pose0.timestamp * 1e6)}")
             print(f"    position: {pose0.position}")
             print(f"    orientation(quat): {pose0.orientation}")
         
         for i, pose in enumerate(self.pose_metadata):
-            # 构建Vehicle系的pose（Vehicle→World）
             R_vehicle = UndistortionUtils.quat_to_matrix(pose.orientation)
             t_vehicle = pose.position
             
@@ -2245,9 +2206,8 @@ class BEVCalibDatasetPreparer:
             iso_vehicle[:3, :3] = R_vehicle
             iso_vehicle[:3, 3] = t_vehicle
             
-            # 转换到Sensing系：sensing_pose = vehicle_pose * T_vehicle_to_sensing
-            # 其中T_vehicle_to_sensing = Sensing→Vehicle（C++命名约定）
-            iso_sensing = iso_vehicle @ self.T_vehicle_to_sensing
+            # sensing_pose = vehicle_pose @ T_sensing_to_vehicle = Sensing→World
+            iso_sensing = iso_vehicle @ self.T_sensing_to_vehicle
             
             # 更新pose（现在是Sensing系）
             R_sensing = iso_sensing[:3, :3]
@@ -2273,7 +2233,10 @@ class BEVCalibDatasetPreparer:
         """生成点云投影到图像的可视化图
         
         Args:
-            points: (N, 4+) 点云数据 [x, y, z, intensity, ...]，在Sensing系
+            points: (N, 4+) 点云数据 [x, y, z, intensity, ...]
+                    注意：此函数在sync_and_save的debug阶段调用，
+                    此时点云可能仍在Sensing系（未经Sensing→LiDAR转换），
+                    函数内部会按需转换到LiDAR系后再投影
             image: (H, W, 3) RGB图像
             output_path: 输出文件路径
             frame_idx: 帧索引
@@ -2283,28 +2246,23 @@ class BEVCalibDatasetPreparer:
             bool: 是否成功生成
         """
         try:
-            # 投影矩阵: Camera内参
             fx = self.camera_config['intrinsic']['f_x']
             fy = self.camera_config['intrinsic']['f_y']
-            cx = self.camera_config['intrinsic']['c_x']
-            cy = self.camera_config['intrinsic']['c_y']
+            cx = self.camera_config['intrinsic']['o_x']
+            cy = self.camera_config['intrinsic']['o_y']
             K = np.array([[fx, 0, cx],
                          [0, fy, cy],
                          [0,  0,  1]])
             
-            # Tr矩阵: Camera→LiDAR的逆 = LiDAR→Camera
-            # 这里点云在Sensing系，需要先转到LiDAR系，再转到Camera系
-            # 但由于我们的 T_camera_to_lidar 是 LiDAR→Camera（在Sensing系的LiDAR）
-            # 点云已经在Sensing系，所以直接使用即可
-            Tr_inv = np.linalg.inv(self.T_camera_to_lidar)  # Camera→LiDAR
-            
-            # 转换点云到齐次坐标
             points_hom = np.hstack([points[:, :3], np.ones((points.shape[0], 1))])
             
-            # 变换: Sensing(点云) → Camera
-            # T_camera_to_lidar 是 LiDAR→Camera，其中LiDAR和点云都在Sensing系
-            # 所以实际上就是 Sensing→Camera
-            points_cam = (self.T_camera_to_lidar @ points_hom.T).T[:, :3]
+            # 如果点云在Sensing系，先转换到LiDAR系
+            if self._need_sensing_to_lidar and self._sensing_to_lidar_transform is not None:
+                xyz_lidar = (self._sensing_to_lidar_transform @ points_hom.T).T[:, :3]
+                points_hom = np.hstack([xyz_lidar, np.ones((len(xyz_lidar), 1))])
+            
+            # LiDAR→Camera投影
+            points_cam = (self.T_lidar_to_cam @ points_hom.T).T[:, :3]
             
             # 过滤相机前方的点
             mask = points_cam[:, 2] > 0
@@ -2369,14 +2327,14 @@ class BEVCalibDatasetPreparer:
         
         参考：proto_utils.cpp:193-201, 274-323 + 坐标系文档
         
-        **C++命名约定**（从右往左读）：
-        - T_A_to_B 表示将A系坐标变换到B系 = B→A 的变换 = B在A系中的位姿
-        - 例如：T_sensing_to_camera = Camera→Sensing (将Sensing系变换到Camera系)
+        **命名约定**（从左往右读，与训练代码一致）：
+        - T_A_to_B 表示 A→B 的变换，将A系坐标变换到B系
+        - 例如：T_cam_to_sensing = Camera→Sensing
         
-        **config文件含义**：
-        - cameras.cfg: sensor_to_cam = Camera→Sensing (Camera在Sensing系中的位姿)
-        - lidars.cfg: sensor_to_lidar = LiDAR→Sensing (LiDAR在Sensing系中的位姿)
-        - lidars.cfg: vehicle_to_sensing = Sensing→Vehicle (Sensing在Vehicle系中的位姿)
+        **config文件字段** (cfg字段名 → 内部key名)：
+        - cameras.cfg: sensor_to_cam → Camera→Sensing
+        - lidars.cfg: sensor_to_lidar → 'lidar_to_sensing' → LiDAR→Sensing
+        - lidars.cfg: vehicle_to_sensing → 'sensing_to_vehicle' → Sensing→Vehicle
         
         **坐标系定义**：
         - Vehicle系：后轴中心，前左上=XYZ
@@ -2384,44 +2342,40 @@ class BEVCalibDatasetPreparer:
         - LiDAR系：前左上=XYZ（与KITTI Velodyne一致）
         - Camera系：光轴=Z，右下前=XYZ（OpenCV标准）
         """
-        # 1. 从config读取 sensor_to_cam = Camera→Sensing
-        # 按C++规范命名：T_sensing_to_camera（从右往左读：Camera→Sensing）
-        T_sensing_to_camera = np.eye(4)
+        # 1. 从config读取 Camera→Sensing (config字段: sensor_to_cam)
+        T_cam_to_sensing = np.eye(4)
         r = R.from_quat(self.camera_config['orientation'])
-        T_sensing_to_camera[:3, :3] = r.as_matrix()
-        T_sensing_to_camera[:3, 3] = self.camera_config['position']
+        T_cam_to_sensing[:3, :3] = r.as_matrix()
+        T_cam_to_sensing[:3, 3] = self.camera_config['position']
         
-        # 2. 取逆得到 Sensing→Camera (从右往左读)
-        T_camera_to_sensing = np.linalg.inv(T_sensing_to_camera)
+        # 2. 取逆得到 Sensing→Camera
+        T_sensing_to_cam = np.linalg.inv(T_cam_to_sensing)
         
-        # 3. 从config读取 sensor_to_lidar = LiDAR→Sensing
-        # 按C++规范命名：T_sensing_to_lidar（从右往左读：LiDAR→Sensing）
-        T_sensing_to_lidar = np.eye(4)
+        # 3. 从config读取 LiDAR→Sensing (cfg字段: sensor_to_lidar)
+        T_lidar_to_sensing = np.eye(4)
         r = R.from_quat(self.lidar_config['orientation'])
-        T_sensing_to_lidar[:3, :3] = r.as_matrix()
-        T_sensing_to_lidar[:3, 3] = self.lidar_config['position']
+        T_lidar_to_sensing[:3, :3] = r.as_matrix()
+        T_lidar_to_sensing[:3, 3] = self.lidar_config['position']
         
-        # 4. 取逆得到 Sensing→LiDAR (从右往左读)
-        T_lidar_to_sensing = np.linalg.inv(T_sensing_to_lidar)
+        # 4. 取逆得到 Sensing→LiDAR
+        T_sensing_to_lidar = np.linalg.inv(T_lidar_to_sensing)
         
-        # 5. 计算 LiDAR→Camera (KITTI标准Tr矩阵)
-        # 变换链：LiDAR → Sensing → Camera
-        # T_camera_to_lidar = T_camera_to_sensing @ T_sensing_to_lidar
-        #                   = (Sensing→Camera) @ (LiDAR→Sensing)
-        #                   = LiDAR → Camera
-        self.T_camera_to_lidar = T_camera_to_sensing @ T_sensing_to_lidar
+        # 5. 合成 LiDAR→Camera (KITTI标准Tr矩阵的逆)
+        # 变换链：LiDAR→Sensing→Camera
+        # T_lidar_to_cam = T_sensing_to_cam @ T_lidar_to_sensing
+        self.T_lidar_to_cam = T_sensing_to_cam @ T_lidar_to_sensing
         
-        # 6. 取逆得到 Camera→LiDAR (从右往左读)
-        self.T_lidar_to_camera = np.linalg.inv(self.T_camera_to_lidar)
+        # 6. 取逆得到 Camera→LiDAR (calib.txt的Tr)
+        self.T_cam_to_lidar = np.linalg.inv(self.T_lidar_to_cam)
         
         # 7. 保存用于去畸变和投影的变换
-        self.T_sensing_to_lidar = T_sensing_to_lidar    # LiDAR → Sensing (从右往左读)
-        self.T_lidar_to_sensing = T_lidar_to_sensing    # Sensing → LiDAR (从右往左读)
-        self.T_sensing_to_camera = T_sensing_to_camera  # Camera → Sensing (从右往左读)
-        self.T_camera_to_sensing = T_camera_to_sensing  # Sensing → Camera (从右往左读)
+        self.T_lidar_to_sensing = T_lidar_to_sensing  # LiDAR→Sensing
+        self.T_sensing_to_lidar = T_sensing_to_lidar  # Sensing→LiDAR
+        self.T_cam_to_sensing = T_cam_to_sensing      # Camera→Sensing
+        self.T_sensing_to_cam = T_sensing_to_cam      # Sensing→Camera
         
-        # 8. 获取并缓存 Vehicle→Sensing 变换（频繁使用，提前计算）
-        self.T_vehicle_to_sensing = self._get_vehicle_to_sensing_transform()
+        # 8. 获取并缓存 Sensing→Vehicle 变换（频繁使用，提前计算）
+        self.T_sensing_to_vehicle = self._get_sensing_to_vehicle_transform()
         
         # 9. 内参矩阵
         intrinsic = self.camera_config['intrinsic']
@@ -2431,28 +2385,39 @@ class BEVCalibDatasetPreparer:
             [0, 0, 1]
         ])
         
-        print(f"\n✓ 变换矩阵已计算 (C++命名约定，从右往左读):")
+        print(f"\n✓ 变换矩阵已计算 (从左往右读: T_A_to_B = A→B):")
         print(f"  === 坐标系变换矩阵 ===")
-        print(f"  T_sensing_to_camera (Camera→Sensing, 从config读取):")
-        print(f"    旋转:\n{T_sensing_to_camera[:3, :3]}")
-        print(f"    平移: {T_sensing_to_camera[:3, 3]}")
-        print(f"  T_camera_to_sensing (Sensing→Camera, Tr矩阵):")
-        print(f"    旋转:\n{self.T_camera_to_sensing[:3, :3]}")
-        print(f"    平移: {self.T_camera_to_sensing[:3, 3]}")
-        print(f"  T_sensing_to_lidar (LiDAR→Sensing, 从config读取):")
-        print(f"    旋转:\n{T_sensing_to_lidar[:3, :3]}")
-        print(f"    平移: {T_sensing_to_lidar[:3, 3]}")
-        print(f"  T_vehicle_to_sensing (Sensing→Vehicle):")
-        print(f"    旋转:\n{self.T_vehicle_to_sensing[:3, :3]}")
-        print(f"    平移: {self.T_vehicle_to_sensing[:3, 3]}")
+        print(f"  T_cam_to_sensing (Camera→Sensing, cameras.cfg):")
+        print(f"    旋转:\n{T_cam_to_sensing[:3, :3]}")
+        print(f"    平移: {T_cam_to_sensing[:3, 3]}")
+        print(f"  T_lidar_to_sensing (LiDAR→Sensing, lidars.cfg):")
+        print(f"    旋转:\n{T_lidar_to_sensing[:3, :3]}")
+        print(f"    平移: {T_lidar_to_sensing[:3, 3]}")
+        print(f"  T_lidar_to_cam (LiDAR→Camera, 合成):")
+        print(f"    平移: {self.T_lidar_to_cam[:3, 3]}")
+        print(f"  T_sensing_to_vehicle (Sensing→Vehicle):")
+        print(f"    平移: {self.T_sensing_to_vehicle[:3, 3]}")
         print(f"  ")
         print(f"  === 关键说明 ===")
-        print(f"  1. 点云保存在Sensing系（去畸变后）")
-        print(f"  2. 投影时使用 Tr = T_camera_to_sensing (Sensing→Camera)")
-        print(f"  3. 与C++ lidar_cam_fusion_manual 使用相同的变换链")
+        print(f"  1. 点云保存在LiDAR系 (KITTI-Odometry标准)")
+        print(f"  2. calib.txt Tr = Camera→LiDAR (由lidars.cfg + cameras.cfg合成)")
+        print(f"  3. calib.txt T_cam2sensing = Camera→Sensing (cameras.cfg相机外参)")
+        if self.force_config:
+            print(f"  ⚠️  --force-config: 点云坐标转换强制使用lidars.cfg外参")
     
     def extract_data_from_bag(self):
         """从 rosbag 提取数据（流式处理+并行加速）"""
+        # 重置PointCloudParser的静态缓存（避免多次运行时残留）
+        PointCloudParser._lidar_configs_logged = False
+        PointCloudParser._lidar_to_sensing_from_bag = None
+        PointCloudParser._sensing_to_vehicle_from_bag_proto = None
+        PointCloudParser._bag_lidar_frame_id = None
+        PointCloudParser._header_frame_id = None
+        if hasattr(PointCloudParser, '_invalid_bag_warned'):
+            del PointCloudParser._invalid_bag_warned
+        if hasattr(PointCloudParser, '_format_logged'):
+            del PointCloudParser._format_logged
+        
         print(f"\n{'='*80}")
         print(f"阶段 1/3: 从 rosbag 提取数据")
         print(f"{'='*80}")
@@ -2475,6 +2440,33 @@ class BEVCalibDatasetPreparer:
             except ImportError:
                 raise ImportError("需要安装 rosbag 或 rosbags: pip install rosbags")
         
+        # 第一步：扫描所有bag文件的时间范围并按连续性分组
+        print(f"\n扫描bag文件时间范围并分组...")
+        bag_ranges = self._scan_bag_time_ranges(bag_files, use_rosbags)
+        bag_groups = self._group_bags_by_continuity(bag_ranges, max_gap=1.0)
+        
+        # 计算每组的时间边界，存储到 self.bag_segments 供后续使用
+        self.bag_segments = []
+        for group in bag_groups:
+            group_start = group[0][1]   # 第一个bag的start_ts
+            group_end = group[-1][2]    # 最后一个bag的end_ts
+            self.bag_segments.append((group_start, group_end))
+        
+        print(f"  ✓ {len(bag_ranges)} 个bag → {len(bag_groups)} 个连续组（间隔阈值: 1.0s）")
+        if len(bag_groups) > 1:
+            for i, group in enumerate(bag_groups):
+                grp_start = group[0][1]
+                grp_end = group[-1][2]
+                duration = grp_end - grp_start
+                bag_names = [g[0].name for g in group]
+                print(f"    组 {i+1}: {len(group)} bags, {duration:.1f}s "
+                      f"[{bag_names[0]} ~ {bag_names[-1]}]")
+            gaps = []
+            for i in range(1, len(bag_groups)):
+                gap = bag_groups[i][0][1] - bag_groups[i-1][-1][2]
+                gaps.append(gap)
+            print(f"    组间间隔: {', '.join(f'{g:.0f}s' for g in gaps)}")
+        
         # 确定图像 topic
         possible_topics = [
             f'/sensors/camera/{self.camera_name}_raw_data/compressed_proto',
@@ -2484,7 +2476,7 @@ class BEVCalibDatasetPreparer:
         image_topic = None
         detected_pose_topic = None
         
-        # 关键修复：扫描所有bag文件以收集所有可用topics
+        # 扫描所有bag文件以收集所有可用topics
         # （因为不同的Topic Group有不同的topics！）
         print(f"\n扫描所有bag文件以检测topics...")
         all_available_topics = set()
@@ -2731,6 +2723,66 @@ class BEVCalibDatasetPreparer:
             return sorted(self.bag_path.glob('**/*.bag'))
         return []
     
+    def _scan_bag_time_ranges(self, bag_files: List[Path], use_rosbags: bool = True) -> List[Tuple[Path, float, float]]:
+        """扫描所有bag文件，提取每个bag的起止时间戳
+        
+        只读取bag的索引/元数据，不解析消息内容，非常快速。
+        
+        Returns:
+            [(bag_path, start_ts_sec, end_ts_sec), ...] 按start_ts排序
+        """
+        bag_ranges = []
+        for bf in bag_files:
+            try:
+                if use_rosbags:
+                    from rosbags.rosbag1 import Reader
+                    with Reader(str(bf)) as reader:
+                        start_ns = reader.start_time
+                        end_ns = reader.end_time
+                        bag_ranges.append((bf, start_ns / 1e9, end_ns / 1e9))
+                else:
+                    import rosbag as rb
+                    with rb.Bag(str(bf), 'r') as bag:
+                        start_t = bag.get_start_time()
+                        end_t = bag.get_end_time()
+                        bag_ranges.append((bf, start_t, end_t))
+            except Exception as e:
+                pass
+        
+        bag_ranges.sort(key=lambda x: x[1])
+        return bag_ranges
+    
+    def _group_bags_by_continuity(self, bag_ranges: List[Tuple[Path, float, float]], 
+                                   max_gap: float = 1.0) -> List[List[Tuple[Path, float, float]]]:
+        """按时间连续性将bag文件分组
+        
+        如果当前bag的开始时间与前一个bag的结束时间之差 < max_gap，
+        则认为连续，合并到同一组；否则另起新组。
+        
+        Args:
+            bag_ranges: [(bag_path, start_ts, end_ts), ...] 已按start_ts排序
+            max_gap: 最大允许间隔（秒），默认1.0s
+            
+        Returns:
+            groups: [[(path, start, end), ...], ...] 每组是一系列连续的bag
+        """
+        if not bag_ranges:
+            return []
+        
+        groups = [[bag_ranges[0]]]
+        
+        for i in range(1, len(bag_ranges)):
+            _, cur_start, _ = bag_ranges[i]
+            _, _, prev_end = bag_ranges[i - 1]
+            
+            gap = cur_start - prev_end
+            if gap < max_gap:
+                groups[-1].append(bag_ranges[i])
+            else:
+                groups.append([bag_ranges[i]])
+        
+        return groups
+    
     def _extract_poses_only(self, bag_file: Path, use_rosbags: bool = True):
         """只提取位姿数据（确保时间范围完整）
         
@@ -2828,6 +2880,8 @@ class BEVCalibDatasetPreparer:
         local_img_count = 0
         local_pc_count = 0
         local_pose_count = 0
+        lidar_consecutive_fail = 0
+        bag_invalid = False
         
         # 使用bag文件名的hash作为前缀，避免文件名冲突
         bag_hash = hashlib.md5(bag_file.name.encode()).hexdigest()[:8]
@@ -2846,6 +2900,9 @@ class BEVCalibDatasetPreparer:
                                                       desc=f"  提取数据",
                                                       unit="msg",
                                                       leave=False):  # 不保留进度条
+                if bag_invalid:
+                    break
+                
                 msg_count += 1
                 
                 # bag_record_time用作fallback（当header时间戳提取失败时）
@@ -2879,15 +2936,16 @@ class BEVCalibDatasetPreparer:
                         header_ts = ProtobufUtils.extract_header_timestamp(data)
                         ts_sec = header_ts if header_ts is not None else bag_record_time
                         
-                        # 尝试从首个点云消息提取 vehicle_to_sensing
-                        if self.vehicle_to_sensing_from_bag is None:
-                            v2s = self._extract_vehicle_to_sensing_from_pc_msg(data)
-                            if v2s is not None:
-                                self.vehicle_to_sensing_from_bag = v2s
-                                print(f"✓ 从bag点云消息中提取到 vehicle_to_sensing")
+                        # 尝试从首个点云消息提取 Sensing→Vehicle
+                        if self.sensing_to_vehicle_from_bag is None:
+                            s2v = self._extract_sensing_to_vehicle_from_pc_msg(data)
+                            if s2v is not None:
+                                self.sensing_to_vehicle_from_bag = s2v
+                                print(f"✓ 从bag点云消息中提取到 Sensing→Vehicle")
                         
                         points = PointCloudParser.parse_proto_pointcloud2(data, main_lidar_frame_id="_202", config_for_comparison=self.lidar_config)
                         if points is not None and points.shape[0] >= 50:
+                            lidar_consecutive_fail = 0
                             # 使用bag_hash+局部计数器作为文件名，避免冲突
                             filename = f"{bag_hash}_{local_pc_count:06d}.bin"
                             filepath = self.temp_pc_dir / filename
@@ -2904,6 +2962,22 @@ class BEVCalibDatasetPreparer:
                             ))
                             local_pc_count += 1
                             del points  # 立即释放
+                        else:
+                            lidar_consecutive_fail += 1
+                            if lidar_consecutive_fail >= 3 and local_pc_count == 0:
+                                print(f"\n  ❌ BAG无效: 连续{lidar_consecutive_fail}次点云解析失败"
+                                      f"(frame_id无法提取)，跳过此bag及其图像/位姿数据")
+                                bag_invalid = True
+                                # 清理已收集的图像文件和元数据
+                                for img_meta in out_images:
+                                    try:
+                                        Path(img_meta.file_path).unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+                                out_images.clear()
+                                out_pcs.clear()
+                                out_poses.clear()
+                                break
                 
                 # 提取位姿
                 elif pose_topic_available and connection.topic == self.active_pose_topic:
@@ -2924,6 +2998,13 @@ class BEVCalibDatasetPreparer:
         
         image_buffer = []
         pc_buffer = []
+        lidar_consecutive_fail = 0
+        local_pc_count = 0
+        bag_invalid = False
+        
+        # 记录进入此bag前的元数据数量，用于回滚
+        img_meta_before = len(self.image_metadata)
+        pose_meta_before = len(self.pose_metadata)
         
         # 检查可用topics
         with rosbag.Bag(str(bag_file), 'r') as bag:
@@ -2936,6 +3017,9 @@ class BEVCalibDatasetPreparer:
             for topic, msg, t in tqdm(bag.read_messages(),
                                      desc=f"  提取数据",
                                      unit="msg"):
+                if bag_invalid:
+                    break
+                
                 # 🔥 提前终止检查：每10条消息检查一次（快速模式用更细粒度）
                 msg_count += 1
                 if self.max_frames is not None and msg_count % 10 == 0:
@@ -2983,27 +3067,48 @@ class BEVCalibDatasetPreparer:
                         header_ts = ProtobufUtils.extract_header_timestamp(data)
                         ts_sec = header_ts if header_ts is not None else bag_record_time
                         
-                        # 尝试从首个点云消息提取 vehicle_to_sensing (Sensing→Vehicle)
-                        if self.vehicle_to_sensing_from_bag is None:
-                            v2s = self._extract_vehicle_to_sensing_from_pc_msg(data)
-                            if v2s is not None:
-                                self.vehicle_to_sensing_from_bag = v2s
-                                print(f"✓ 从bag点云消息中提取到 vehicle_to_sensing")
-                                print(f"   (C++命名: T_vehicle_to_sensing = Sensing→Vehicle)")
+                        # 尝试从首个点云消息提取 Sensing→Vehicle
+                        if self.sensing_to_vehicle_from_bag is None:
+                            s2v = self._extract_sensing_to_vehicle_from_pc_msg(data)
+                            if s2v is not None:
+                                self.sensing_to_vehicle_from_bag = s2v
+                                print(f"✓ 从bag点云消息中提取到 Sensing→Vehicle")
                         
                         points = PointCloudParser.parse_proto_pointcloud2(data, main_lidar_frame_id="_202", config_for_comparison=self.lidar_config)
                         if points is not None and points.shape[0] >= 50:
+                            lidar_consecutive_fail = 0
+                            local_pc_count += 1
                             pc_buffer.append((ts_sec, points))
-                            # ✅ 内存优化：点云数据更大，更频繁地保存
                             if len(pc_buffer) >= min(self.batch_size, 20):
                                 self._save_pc_batch(pc_buffer)
                                 pc_buffer.clear()
+                        else:
+                            lidar_consecutive_fail += 1
+                            if lidar_consecutive_fail >= 3 and local_pc_count == 0:
+                                print(f"\n  ❌ BAG无效: 连续{lidar_consecutive_fail}次点云解析失败"
+                                      f"(frame_id无法提取)，跳过此bag及其图像/位姿数据")
+                                bag_invalid = True
+                                break
                 
                 # 提取位姿
                 elif pose_topic_available and topic == self.active_pose_topic:
                     pose = self._decode_pose_msg(msg, fallback_timestamp=bag_record_time)
                     if pose is not None:
                         self.pose_metadata.append(pose)
+        
+        if bag_invalid:
+            # 回滚此bag已写入的图像和位姿元数据
+            rollback_imgs = self.image_metadata[img_meta_before:]
+            for img_meta in rollback_imgs:
+                try:
+                    Path(img_meta.file_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            del self.image_metadata[img_meta_before:]
+            del self.pose_metadata[pose_meta_before:]
+            image_buffer.clear()
+            pc_buffer.clear()
+            return
         
         if image_buffer:
             self._save_image_batch(image_buffer)
@@ -3461,28 +3566,25 @@ class BEVCalibDatasetPreparer:
         else:
             return False  # 格式异常
         
-        # ✅ 关键修复：点云保持在Sensing系（与C++实现一致）
-        # 
-        # C++实现参考：manual_sensor_calib.cpp
-        # - 点云去畸变后在 Sensing 坐标系
-        # - 投影时使用 Sensing→Camera 变换
-        # - 这样可以直接使用 kitti_dataset.py，无需额外的坐标转换
+        # 点云坐标系处理：确保保存到velodyne/的点云在LiDAR系（KITTI-Odometry标准）
         #
-        # 变换链：
-        # - 点云在Sensing系：P_sensing（去畸变后）
-        # - 变换到Camera系：P_camera = T_sensing_to_camera * P_sensing
-        # - 投影到图像：p = K * P_camera
-        #
-        # 注意：Tr矩阵也需要相应修改为 Sensing→Camera
-        
-        # 直接使用去畸变后的点云（Sensing系）
+        # 去畸变后点云所在坐标系取决于BAG header frame_id：
+        # - "lidar": 点云在Sensing系 → 需要Sensing→LiDAR转换
+        # - 其他值: 点云已在LiDAR系 → 直接保存
         points_final = points_undistorted
         
-        # 仅在第一帧且verbose模式打印坐标系信息
-        # if idx == 0 and self.verbose:
-        #     print(f"\n  点云坐标系: Sensing系（与C++一致）")
+        if self._need_sensing_to_lidar and self._sensing_to_lidar_transform is not None:
+            xyz_hom = np.hstack([points_final[:, :3], np.ones((len(points_final), 1))])
+            xyz_lidar = (self._sensing_to_lidar_transform @ xyz_hom.T).T[:, :3]
+            points_final = np.hstack([xyz_lidar, points_final[:, 3:4]])
+            if idx == 0 and self.verbose:
+                print(f"  ✓ 点云已从Sensing系转换到LiDAR系")
+                print(f"  Sensing→LiDAR转换后点云范围:")
+                print(f"    X: [{points_final[:, 0].min():.2f}, {points_final[:, 0].max():.2f}]")
+                print(f"    Y: [{points_final[:, 1].min():.2f}, {points_final[:, 1].max():.2f}]")
+                print(f"    Z: [{points_final[:, 2].min():.2f}, {points_final[:, 2].max():.2f}]")
         
-        # 保存点云（Sensing系，与C++一致）
+        # 保存点云（LiDAR系，KITTI-Odometry标准）
         # 格式：(N, 4) = [x, y, z, intensity]
         points_final.astype(np.float32).tofile(str(dst_pc))
         
@@ -3504,15 +3606,34 @@ class BEVCalibDatasetPreparer:
             2. 点云通过去畸变从LiDAR扫描时刻转换到图像时刻
             3. 位姿使用motion_interpolate插值到图像时刻
             4. 最终：图像、点云、位姿 在图像时刻完全对齐
+        
+        🔧 改进：基于bag文件分组处理不连续数据
+            - 在提取阶段预先扫描bag时间范围，按1s间隔阈值分组
+            - 同步阶段使用bag分组的时间段，严格过滤跨段帧
+            - 避免跨gap插值导致的失败
         """
         print(f"\n{'='*80}")
         print(f"阶段 2/3: 同步数据")
         print(f"{'='*80}")
         
+        # 分析BAG点云坐标系，决定是否需要Sensing→LiDAR转换
+        self._update_transforms_from_bag()
+        
         sync_start_time = time.time()
         
         if not self.image_metadata or not self.pc_metadata:
             raise ValueError("图像或点云数据为空")
+        
+        # 使用bag文件分组确定的时间段（在extract阶段已计算）
+        segment_boundaries = []
+        if hasattr(self, 'bag_segments') and self.bag_segments:
+            segment_boundaries = self.bag_segments  # [(start_ts, end_ts), ...]
+            if len(segment_boundaries) > 1:
+                print(f"\n🔍 基于bag文件分组，共 {len(segment_boundaries)} 个连续时间段:")
+                for i, (seg_start, seg_end) in enumerate(segment_boundaries):
+                    duration = seg_end - seg_start
+                    print(f"  段 {i+1}: [{seg_start:.3f}, {seg_end:.3f}] ({duration:.1f}s)")
+                print(f"  💡 将按段独立处理，只保留时间戳完全落在某一段内的帧")
         
         # 打印时间戳范围用于诊断
         if self.pose_metadata:
@@ -3609,40 +3730,33 @@ class BEVCalibDatasetPreparer:
             pose_ts_min = self.pose_metadata[0].timestamp
             pose_ts_max = self.pose_metadata[-1].timestamp
             
-            # ✅ 两种检查方式：
-            # 1. max_pose_gap: 用于插值时检查相邻pose的间隔
-            # 2. max_pose_delta: 用于最近邻方式检查最近pose的时间差
-            # 参考C++ manual_sensor_calib.cpp: min_delta < 0.1e9 (100ms)
-            MAX_POSE_GAP = self.max_pose_gap  # 用于插值检查
-            MAX_POSE_DELTA = 0.15  # 150ms，用于最近邻检查（比C++的100ms稍宽松）
+            MAX_POSE_GAP = self.max_pose_gap
             
             synced_pairs_filtered = []
-            skipped_reasons = {'no_file': 0, 'no_pose_coverage': 0, 'pose_too_far': 0}
+            skipped_reasons = {'no_file': 0, 'no_pose_coverage': 0, 'pose_too_far': 0, 'cross_segment': 0}
             
-            print(f"\n  检查pose覆盖（支持不连续bag数据）:")
-            print(f"    插值模式: 最大pose间隔 {MAX_POSE_GAP:.1f}s")
-            print(f"    最近邻模式: 最大时间差 {MAX_POSE_DELTA*1000:.0f}ms (参考C++ min_delta)")
+            print(f"\n  检查pose覆盖（严格插值模式，精度优先）:")
+            print(f"    最大pose间隔: {MAX_POSE_GAP:.1f}s")
+            if len(segment_boundaries) > 1:
+                print(f"    bag分组: {len(segment_boundaries)} 个连续段，过滤跨段帧")
             
             for img_idx, pc_idx in synced_pairs:
                 pc_meta = self.pc_metadata[pc_idx]
                 pc_ts = pc_meta.timestamp
                 img_ts = self.image_metadata[img_idx].timestamp
                 
-                # ✅ 修复：使用 pc_metadata 中存储的实际文件路径
                 temp_pc_file = Path(pc_meta.file_path)
                 
                 if not temp_pc_file.exists():
                     skipped_reasons['no_file'] += 1
                     continue
                 
-                # 读取点云获取扫描时间范围
                 try:
                     points_raw = np.fromfile(str(temp_pc_file), dtype=np.float32)
                     if len(points_raw) % 5 == 0:
                         points_raw = points_raw.reshape(-1, 5)
                     elif len(points_raw) % 4 == 0:
                         points_raw = points_raw.reshape(-1, 4)
-                        # 没有timestamp列，假设扫描时间为0.1秒
                         end_ts = pc_ts + 0.1
                     else:
                         skipped_reasons['no_file'] += 1
@@ -3650,13 +3764,31 @@ class BEVCalibDatasetPreparer:
                     
                     if points_raw.shape[1] >= 5:
                         max_inner_ts_us = points_raw[:, 4].max()
-                        delta_time_us = max_inner_ts_us * 2  # 单位是2微秒
+                        delta_time_us = max_inner_ts_us * 2
                         end_ts = pc_ts + delta_time_us * 1e-6
                     else:
-                        end_ts = pc_ts + 0.1  # 假设扫描时间为0.1秒
+                        end_ts = pc_ts + 0.1
                     
-                    # 🔧 改进：使用两种方式检查pose覆盖
-                    # 方式1：传统插值检查（要求时间戳在两个pose之间）
+                    # 检查帧是否完全落在某个bag分组的时间段内
+                    crosses_segment = False
+                    if len(segment_boundaries) > 1:
+                        found_segment = False
+                        BOUNDARY_TOLERANCE = 0.2
+                        for seg_min, seg_max in segment_boundaries:
+                            if (seg_min - BOUNDARY_TOLERANCE <= pc_ts <= seg_max + BOUNDARY_TOLERANCE and 
+                                seg_min - BOUNDARY_TOLERANCE <= end_ts <= seg_max + BOUNDARY_TOLERANCE and
+                                seg_min - BOUNDARY_TOLERANCE <= img_ts <= seg_max + BOUNDARY_TOLERANCE):
+                                found_segment = True
+                                break
+                        
+                        if not found_segment:
+                            crosses_segment = True
+                    
+                    if crosses_segment:
+                        skipped_reasons['cross_segment'] += 1
+                        continue
+                    
+                    # 严格插值检查：三个时间戳都必须可以精确插值
                     can_interp_pc_start = UndistortionUtils.can_interpolate(
                         self.pose_metadata, pc_ts, MAX_POSE_GAP)
                     can_interp_pc_end = UndistortionUtils.can_interpolate(
@@ -3664,29 +3796,13 @@ class BEVCalibDatasetPreparer:
                     can_interp_img = UndistortionUtils.can_interpolate(
                         self.pose_metadata, img_ts, MAX_POSE_GAP)
                     
-                    # 方式2：最近邻检查（参考C++ min_delta逻辑）
-                    # 只要有足够近的pose就可以使用
-                    can_nearest_pc_start = UndistortionUtils.can_interpolate_nearest(
-                        self.pose_metadata, pc_ts, MAX_POSE_DELTA)
-                    can_nearest_pc_end = UndistortionUtils.can_interpolate_nearest(
-                        self.pose_metadata, end_ts, MAX_POSE_DELTA)
-                    can_nearest_img = UndistortionUtils.can_interpolate_nearest(
-                        self.pose_metadata, img_ts, MAX_POSE_DELTA)
-                    
-                    # ✅ 只要满足任一方式即可
-                    can_process = (
-                        (can_interp_pc_start and can_interp_pc_end and can_interp_img) or
-                        (can_nearest_pc_start and can_nearest_pc_end and can_nearest_img)
-                    )
+                    can_process = (can_interp_pc_start and can_interp_pc_end and can_interp_img)
                     
                     if can_process:
                         synced_pairs_filtered.append((img_idx, pc_idx))
                     else:
-                        # 区分跳过原因
-                        if (pc_ts < pose_ts_min - MAX_POSE_DELTA or 
-                            end_ts > pose_ts_max + MAX_POSE_DELTA or 
-                            img_ts < pose_ts_min - MAX_POSE_DELTA or 
-                            img_ts > pose_ts_max + MAX_POSE_DELTA):
+                        if (pc_ts < pose_ts_min or end_ts > pose_ts_max or 
+                            img_ts < pose_ts_min or img_ts > pose_ts_max):
                             skipped_reasons['no_pose_coverage'] += 1
                         else:
                             skipped_reasons['pose_too_far'] += 1
@@ -3699,11 +3815,14 @@ class BEVCalibDatasetPreparer:
                 print(f"\n  ⚠️  过滤无法插值的帧: {len(synced_pairs)} → {len(synced_pairs_filtered)}")
                 if skipped_reasons['no_file'] > 0:
                     print(f"      - 文件不存在/读取失败: {skipped_reasons['no_file']}")
+                if skipped_reasons['cross_segment'] > 0:
+                    print(f"      - 不属于任何bag连续组: {skipped_reasons['cross_segment']}")
+                    print(f"        💡 这些帧的时间戳落在bag组之间的gap区域")
                 if skipped_reasons['no_pose_coverage'] > 0:
                     print(f"      - 超出pose时间范围: {skipped_reasons['no_pose_coverage']}")
                 if skipped_reasons['pose_too_far'] > 0:
-                    print(f"      - 最近pose时间差>{MAX_POSE_DELTA*1000:.0f}ms: {skipped_reasons['pose_too_far']}")
-                    print(f"        💡 提示: 这些帧附近没有足够近的pose数据")
+                    print(f"      - 相邻pose间隔>{MAX_POSE_GAP:.1f}s无法插值: {skipped_reasons['pose_too_far']}")
+                    print(f"        💡 提示: 这些帧处于pose数据不连续的gap区域")
             else:
                 print(f"    ✓ 所有 {len(synced_pairs)} 帧都有pose覆盖")
             synced_pairs = synced_pairs_filtered
@@ -4060,36 +4179,41 @@ class BEVCalibDatasetPreparer:
         print(f"  保存效率: {len(synced_pairs) / save_time:.2f} 帧/秒")
     
     def _save_calib_file(self, seq_dir: Path):
-        """保存标定文件（符合KITTI标准格式）
+        """保存标定文件（符合KITTI-Odometry标准格式）
         
-        参考：
-        - KITTI Odometry 数据集格式规范
-        - 坐标系文档：P_A = T^A_B * P_B
+        参考：KITTI Odometry 数据集格式规范
         
         **KITTI标准格式**：
-        - 点云在Sensing系（去畸变后）
-        - Tr矩阵：**Camera → Sensing**（从相机指向传感器的变换）
+        - 点云在LiDAR系（velodyne文件夹）
+        - Tr矩阵：**Camera → LiDAR**（Velodyne→Camera 的逆）
         
         **坐标变换链**：
-        - 点云在Sensing系：P_sensing（去畸变后）
-        - KITTI的Tr是反向变换：Tr = Camera → Sensing
-        - 使用时需要取逆：P_camera = inv(Tr) * P_sensing
+        - 点云在LiDAR系：P_lidar
+        - Tr = Camera → LiDAR
+        - 使用时取逆：P_camera = inv(Tr) * P_lidar
         - 投影到图像：p = K * P_camera（P_camera.z > 0时可见）
         
-        **重要**：
-        - 为了与KITTI标准格式兼容，这里写入 Camera→Sensing（Tr的逆矩阵）
-        - 这样 kitti_dataset.py 和 custom_dataset.py 可以使用相同的加载逻辑
+        **扩展字段**：
+        - T_cam2sensing: Camera→Sensing（cameras.cfg相机外参，系统已知量）
+        - D: 畸变系数
+        - camera_model: 相机模型类型
+        
+        **Tr合成方式**：
+        - 使用lidars.cfg的 LiDAR→Sensing + cameras.cfg的 Camera→Sensing 合成
+        - 不使用BAG中的 LiDAR→Sensing（BAG的仅用于点云坐标转换）
         """
         calib_path = seq_dir / 'calib.txt'
         
-        # P2: 左侧彩色相机的投影矩阵 (3x4)
         P2 = np.zeros((3, 4))
         P2[:3, :3] = self.K
         
-        # Tr: Camera到Sensing的变换矩阵（Camera → Sensing）符合KITTI标准
-        # self.T_camera_to_sensing 是 Sensing→Camera，需要取逆得到 Camera→Sensing
-        T_sensing_to_cam = np.linalg.inv(self.T_camera_to_sensing)  # Camera → Sensing (KITTI标准)
-        Tr_3x4 = T_sensing_to_cam[:3, :]  # 只取前3行（KITTI标准：3x4矩阵）
+        # Tr: Camera→LiDAR (KITTI标准: Velodyne→Camera的逆)
+        # self.T_cam_to_lidar = Camera→LiDAR = inv(T_lidar_to_cam)
+        # 由lidars.cfg LiDAR→Sensing + cameras.cfg Camera→Sensing 合成
+        Tr_3x4 = self.T_cam_to_lidar[:3, :]
+        
+        # T_cam2sensing: Camera→Sensing（cameras.cfg相机外参，系统已知量）
+        T_cam2sensing_3x4 = self.T_cam_to_sensing[:3, :]
         
         # D: 畸变系数（参考C++实现，投影时需要）
         # 支持两种模型：
@@ -4124,25 +4248,27 @@ class BEVCalibDatasetPreparer:
                 f.write(" ".join([f"{val:.12e}" for val in P2.flatten()]))
                 f.write("\n")
             
-            # Tr: 3x4矩阵（12个数）- Camera → Sensing (KITTI标准格式)
+            # Tr: Camera→LiDAR (KITTI标准: 3x4, 12个数)
             f.write("Tr: ")
             f.write(" ".join([f"{val:.12e}" for val in Tr_3x4.flatten()]))
             f.write("\n")
             
+            # T_cam2sensing: Camera→Sensing (系统已知相机外参, 3x4, 12个数)
+            f.write("T_cam2sensing: ")
+            f.write(" ".join([f"{val:.12e}" for val in T_cam2sensing_3x4.flatten()]))
+            f.write("\n")
+            
             # D: 畸变系数
-            # pinhole模型：k1, k2, p1, p2, k3 (5个参数)
-            # fisheye模型：k1, k2, k3, k4 (4个参数)
-            # C++参考：lidar_cam_fusion_manual需要畸变系数进行去畸变
             f.write("D: ")
             f.write(" ".join([f"{val:.12e}" for val in D]))
             f.write("\n")
             
-            # 保存相机模型类型（用于投影时选择正确的去畸变方法）
             f.write(f"camera_model: {model_type}\n")
         
-        print(f"标定文件已保存: {calib_path} (KITTI标准格式 + 畸变系数)")
-        print(f"  ✓ 点云坐标系: Sensing系")
-        print(f"  ✓ 投影变换: Tr (Camera→Sensing, KITTI标准)")
+        print(f"标定文件已保存: {calib_path}")
+        print(f"  ✓ 点云坐标系: LiDAR系 (KITTI-Odometry标准)")
+        print(f"  ✓ Tr: Camera→LiDAR (由lidars.cfg + cameras.cfg合成)")
+        print(f"  ✓ T_cam2sensing: Camera→Sensing (cameras.cfg相机外参)")
         
         # 根据模型类型打印畸变系数
         if model_type == 'fisheye':
@@ -4224,26 +4350,19 @@ class BEVCalibDatasetPreparer:
                         else:
                             poses_world.append(np.eye(4))
         
-        # ✅ 修复2：转换为相对于第0帧的位姿
-        # KITTI格式：T_0_to_i = inv(T_0_to_world) @ T_i_to_world
-        # 
-        # C++命名约定（从右往左读）：
-        #   T_0_to_world = 第0帧→World（第0帧在World系中的位姿）
-        #   T_i_to_world = 第i帧→World（第i帧在World系中的位姿）
-        #   T_world_to_0 = inv(T_0_to_world) = World→第0帧
-        #   T_0_to_i = World→第0帧 @ 第i帧→World = 第i帧→第0帧
+        # 转换为相对于第0帧的位姿 (KITTI格式)
+        # T_i_to_0 = T_world_to_0 @ T_i_to_world = framei→frame0
         if len(poses_world) == 0:
             print("警告: 没有有效的位姿数据")
             return
         
-        T_0_to_world = poses_world[0]  # 第0帧→World（C++命名约定）
-        T_world_to_0 = np.linalg.inv(T_0_to_world)  # World→第0帧
+        T_0_to_world = poses_world[0]                # frame0→World
+        T_world_to_0 = np.linalg.inv(T_0_to_world)  # World→frame0
         
         poses_relative = []
-        for T_i_to_world in poses_world:  # 第i帧→World
-            # 从第i帧到第0帧的变换
-            T_0_to_i = T_world_to_0 @ T_i_to_world  # 第i帧→第0帧
-            poses_relative.append(T_0_to_i)
+        for T_i_to_world in poses_world:             # framei→World
+            T_i_to_0 = T_world_to_0 @ T_i_to_world  # framei→frame0
+            poses_relative.append(T_i_to_0)
         
         # 写入文件（KITTI 格式：每行12个数，代表 3x4 变换矩阵）
         with open(poses_file, 'w') as f:
@@ -4352,6 +4471,11 @@ def main():
                        help='最大允许的pose间隔（秒）。用于处理不连续的bag数据。'
                             '超过此间隔的时间段将被认为数据不连续，相关帧会被跳过。'
                             '对于连续数据，默认0.5秒足够；对于不连续数据，可适当增大。')
+    parser.add_argument('--force-config', action='store_true', default=False,
+                       help='强制使用lidars.cfg中的lidar外参替代bag中的外参。'
+                            '默认行为：优先使用bag中提取的合格外参生成calib.txt，'
+                            '不合格则fallback到lidars.cfg。'
+                            '加此选项后，所有环节强制使用lidars.cfg中的参数。')
     args = parser.parse_args()
     
     # 打印配置信息
@@ -4367,6 +4491,8 @@ def main():
     print(f"  批次大小: {args.batch_size}")
     print(f"  线程数: {args.num_workers}")
     print(f"  最大pose间隔: {args.max_pose_gap}s（用于处理不连续bag数据）")
+    if args.force_config:
+        print(f"  ⚠️  强制使用lidars.cfg外参（忽略bag中的lidar外参）")
     
     total_start_time = time.time()
     
@@ -4384,6 +4510,8 @@ def main():
         max_frames=args.max_frames,
         save_debug_samples=args.save_debug_samples,
         max_pose_gap=args.max_pose_gap,
+        force_config=args.force_config,
+        sequence_id=args.sequence_id,
     )
     
     preparer.extract_data_from_bag()

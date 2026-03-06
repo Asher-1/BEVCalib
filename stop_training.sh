@@ -17,18 +17,27 @@ echo ""
 # 查找训练进程
 echo "查找训练进程..."
 TRAIN_PIDS=$(ps aux | grep -E "train_kitti.py" | grep -v grep | awk '{print $2}')
+TORCHRUN_PIDS=$(ps aux | grep -E "torchrun" | grep -v grep | awk '{print $2}')
 BASH_PIDS=$(ps aux | grep -E "train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep | awk '{print $2}')
+TB_PIDS=$(ps aux | grep -E "tensorboard.*--logdir" | grep -v grep | awk '{print $2}')
 
 # 显示当前进程
 echo ""
 echo "当前训练进程:"
-ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep || echo "  无运行中的训练进程"
+ps aux | grep -E "train_kitti.py|torchrun|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep || echo "  无运行中的训练进程"
+if [ -n "$TB_PIDS" ] && [ "$TB_PIDS" != "" ]; then
+    echo ""
+    echo "TensorBoard 进程:"
+    ps aux | grep -E "tensorboard.*--logdir" | grep -v grep
+fi
 echo ""
 
 # 统计进程数量
 TRAIN_COUNT=$(echo "$TRAIN_PIDS" | grep -v "^$" | wc -l)
+TORCHRUN_COUNT=$(echo "$TORCHRUN_PIDS" | grep -v "^$" | wc -l)
 BASH_COUNT=$(echo "$BASH_PIDS" | grep -v "^$" | wc -l)
-TOTAL_COUNT=$((TRAIN_COUNT + BASH_COUNT))
+TB_COUNT=$(echo "$TB_PIDS" | grep -v "^$" | wc -l)
+TOTAL_COUNT=$((TRAIN_COUNT + TORCHRUN_COUNT + BASH_COUNT + TB_COUNT))
 
 if [ "$TOTAL_COUNT" -eq 0 ]; then
     echo "✅ 没有找到运行中的训练进程"
@@ -36,7 +45,9 @@ if [ "$TOTAL_COUNT" -eq 0 ]; then
 fi
 
 echo "找到 $TRAIN_COUNT 个 Python 训练进程"
+echo "找到 $TORCHRUN_COUNT 个 torchrun 进程"
 echo "找到 $BASH_COUNT 个 Bash 训练脚本进程"
+echo "找到 $TB_COUNT 个 TensorBoard 进程"
 echo ""
 
 # 确认停止
@@ -62,11 +73,31 @@ if [ -n "$TRAIN_PIDS" ] && [ "$TRAIN_PIDS" != "" ]; then
     done
 fi
 
+# 停止 torchrun 进程
+if [ -n "$TORCHRUN_PIDS" ] && [ "$TORCHRUN_PIDS" != "" ]; then
+    for PID in $TORCHRUN_PIDS; do
+        if [ -n "$PID" ]; then
+            echo "  停止 torchrun 进程: $PID"
+            kill -TERM $PID 2>/dev/null || true
+        fi
+    done
+fi
+
 # 停止 Bash 脚本进程
 if [ -n "$BASH_PIDS" ] && [ "$BASH_PIDS" != "" ]; then
     for PID in $BASH_PIDS; do
         if [ -n "$PID" ]; then
             echo "  停止 Bash 进程: $PID"
+            kill -TERM $PID 2>/dev/null || true
+        fi
+    done
+fi
+
+# 停止 TensorBoard 进程
+if [ -n "$TB_PIDS" ] && [ "$TB_PIDS" != "" ]; then
+    for PID in $TB_PIDS; do
+        if [ -n "$PID" ]; then
+            echo "  停止 TensorBoard: $PID"
             kill -TERM $PID 2>/dev/null || true
         fi
     done
@@ -83,21 +114,23 @@ REMAINING=$(ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|st
 if [ "$REMAINING" -gt 0 ]; then
     echo "⚠️  还有 $REMAINING 个进程未停止，强制终止..."
     pkill -9 -f "train_kitti.py" 2>/dev/null || true
+    pkill -9 -f "torchrun" 2>/dev/null || true
     pkill -9 -f "train_B26A.sh" 2>/dev/null || true
     pkill -9 -f "train_universal.sh" 2>/dev/null || true
     pkill -9 -f "start_training.sh" 2>/dev/null || true
+    pkill -9 -f "tensorboard" 2>/dev/null || true
     sleep 2
 fi
 
 # 最终检查
-FINAL=$(ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep | wc -l)
+FINAL=$(ps aux | grep -E "train_kitti.py|torchrun|train_B26A.sh|train_universal.sh|start_training.sh|tensorboard" | grep -v grep | wc -l)
 
 echo ""
 if [ "$FINAL" -eq 0 ]; then
     echo "✅ 所有训练进程已停止"
 else
     echo "❌ 仍有 $FINAL 个进程运行中，请手动检查"
-    ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep
+    ps aux | grep -E "train_kitti.py|torchrun|train_B26A.sh|train_universal.sh|start_training.sh|tensorboard" | grep -v grep
 fi
 
 echo ""
