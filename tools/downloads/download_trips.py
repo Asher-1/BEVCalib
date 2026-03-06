@@ -30,11 +30,11 @@ class TripDownloader:
         初始化下载器
         
         Args:
-            output_dir: 输出目录，默认为当前目录下的 trips
+            output_dir: 输出目录，默认为终端当前工作目录下
             selective_download: 是否只下载特定目录（bags/important 和 configs）
         """
         if output_dir is None:
-            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trips')
+            output_dir = os.getcwd()
         
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)

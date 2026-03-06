@@ -13,7 +13,7 @@ torch==2.0.1
 torchvision==0.15.2
 transformers==4.29.1
 spconv-cu118==2.3.8
-spconv==2.3.8
+#spconv==2.3.8
 tensorboard
 pandas
 matplotlib

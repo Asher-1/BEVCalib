@@ -53,7 +53,7 @@ class KittiDataset(Dataset):
             self.sequences = self._detect_sequences()
             if not self.sequences:
                 # 如果自动检测失败，回退到标准KITTI序列
-                print(f"[KittiDataset] 自动检测未找到序列，尝试标准KITTI序列")
+                print(f"[KittiDataset] 自动检测未找到序列,尝试标准KITTI序列")
                 self.sequences = self.KITTI_SEQUENCES
         else:
             self.sequences = self.KITTI_SEQUENCES

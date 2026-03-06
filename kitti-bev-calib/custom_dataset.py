@@ -92,7 +92,7 @@ class CustomDataset(Dataset):
             self.sequences = self._detect_sequences()
             if not self.sequences:
                 # 如果自动检测失败，回退到标准KITTI序列
-                print(f"[CustomDataset] 自动检测未找到序列，尝试标准KITTI序列")
+                print(f"[CustomDataset] 自动检测未找到序列,尝试标准KITTI序列")
                 self.sequences = self.KITTI_SEQUENCES
         else:
             self.sequences = self.KITTI_SEQUENCES
@@ -173,7 +173,7 @@ class CustomDataset(Dataset):
                     ])
                 print(f"[CustomDataset] ✅ 使用预处理图像: {self._resized_dir_name}/ (跳过运行时4K PNG解码+resize)")
             else:
-                print(f"[CustomDataset] ⚠️ 预处理目录 {self._resized_dir_name}/ 未找到，使用原始4K PNG")
+                print(f"[CustomDataset] ⚠️ 预处理目录 {self._resized_dir_name}/ 未找到,使用原始4K PNG")
     
     def _detect_sequences(self):
         """自动检测数据集中存在的序列"""
