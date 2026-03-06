@@ -111,10 +111,8 @@ class UndistortionUtils:
         Note:
             参考 math_utils.cpp:313-346
             C++版本只支持插值，不支持外推。时间戳超出范围直接返回false。
-            
-            🔧 改进：支持不连续的bag数据
-            - 当pose间隔超过max_gap时，认为数据不连续，不进行插值
-            - 这样可以正确处理线上过滤后的非连续bag数据
+            当pose间隔超过max_gap时，认为数据不连续，不进行插值。
+            精度优先：无法精确插值时返回None，让调用方跳过该帧。
         """
         if not poses or len(poses) < 2:
             return None
@@ -124,19 +122,13 @@ class UndistortionUtils:
             t1 = poses[i].timestamp
             t2 = poses[i + 1].timestamp
             
-            # 只在范围内插值（对应C++的 if (t1 <= t && t2 >= t)）
             if t1 <= timestamp <= t2:
-                # 🔧 改进：检查pose间隔是否过大（数据不连续）
                 if (t2 - t1) > max_gap:
-                    # pose间隔过大，说明这段时间没有连续的pose数据
-                    # 不进行插值，返回None
                     return None
                 
-                # 计算插值系数
                 alpha = (timestamp - t1) / (t2 - t1)
                 break
         else:
-            # 时间戳不在任何区间内，返回None（对应C++的return false）
             return None
         
         # 位姿1
@@ -370,28 +362,9 @@ class UndistortionUtils:
         xyz = points_raw[:, :3]
         xyz_range = np.abs(xyz).max()
         
-        if xyz_range > 250.0:  # 如果坐标超过250m，认为已经在世界坐标系
-            if debug:
-                print(f"⚠️  检测到点云已在世界坐标系（范围: {xyz_range:.1f}m），将转换回传感器坐标系")
-            
-            # 获取点云时刻的位姿（Sensing→World）
-            cloud_pose = UndistortionUtils.motion_interpolate(poses, cloud_timestamp)
-            if cloud_pose is None:
-                return None
-            
-            R_world_sensing, t_world_sensing = cloud_pose
-            # 世界坐标系 → 传感器坐标系
-            R_sensing_world = R_world_sensing.T
-            t_sensing_world = -R_world_sensing.T @ t_world_sensing
-            
-            # 转换点云到传感器坐标系
-            xyz_sensing = (R_sensing_world @ xyz.T).T + t_sensing_world
-            
-            # 更新点云数据
-            points_raw = np.hstack([xyz_sensing, points_raw[:, 3:]])
-            
-            if debug:
-                print(f"  转换后范围: X=[{xyz_sensing[:, 0].min():.1f}, {xyz_sensing[:, 0].max():.1f}]")
+        if xyz_range > 500.0:
+            print(f"⚠️  [frame={frame_idx}] 点云坐标范围异常（{xyz_range:.1f}m > 500m），可能解析错误，跳过")
+            return None
         
         # 找到点云扫描的最大内部时间戳（单位：2微秒）
         # C++参考：math_utils.cpp:190-200
@@ -558,7 +531,7 @@ class UndistortionUtils:
         # - 激光雷达通常有效范围 200m
         # - 去畸变不应该显著改变点云的位置，只做微小调整
         # - 异常情况：位姿插值外推时可能产生极端变换
-        MAX_REASONABLE_RANGE = 250.0  # 最大合理距离 (米)
+        MAX_REASONABLE_RANGE = 350.0  # 最大合理距离 (米)，长距lidar可达300m+
         MAX_REASONABLE_HEIGHT = 50.0  # 最大合理高度 (米)
         
         x_min, x_max = xyz_undistorted[:, 0].min(), xyz_undistorted[:, 0].max()
@@ -572,10 +545,8 @@ class UndistortionUtils:
         )
         
         if is_abnormal:
-            print(f"⚠️  去畸变结果异常，范围超限！")
-            print(f"    X: [{x_min:.2f}, {x_max:.2f}], Y: [{y_min:.2f}, {y_max:.2f}], Z: [{z_min:.2f}, {z_max:.2f}]")
-            print(f"    合理范围: XY ±{MAX_REASONABLE_RANGE}m, Z ±{MAX_REASONABLE_HEIGHT}m")
-            # 返回 None 表示该帧应该被跳过
+            print(f"⚠️  去畸变结果异常 [frame={frame_idx}]: "
+                  f"X:[{x_min:.1f},{x_max:.1f}] Y:[{y_min:.1f},{y_max:.1f}] Z:[{z_min:.1f},{z_max:.1f}]")
             return None
         
         # 🔍 DEBUG: 打印结果统计（格式对齐C++ MLOG输出，便于逐行对比）
@@ -1776,9 +1747,20 @@ class PointCloudParser:
                 fmt, scale = PointCloudParser._datatype_to_fmt_scale(dt)
                 fields_map[name] = (off, fmt, scale)
             
-            # 如果没有找到完整的 x, y, z，使用默认映射（INT16）
-            if len(fields_map) != 3:
-                fields_map = {'x': (0, 'h', 0.01), 'y': (2, 'h', 0.01), 'z': (4, 'h', 0.01)}
+            # 如果proto字段解析不完整，根据point_step推断正确的格式
+            if 'x' not in fields_map or 'y' not in fields_map or 'z' not in fields_map:
+                if step == 16:
+                    # 16字节标准格式: x(f32,0), y(f32,4), z(f32,8), intensity(u8,12), ring(u8,13), ts(u16,14)
+                    fields_map = {'x': (0, 'f', 1.0), 'y': (4, 'f', 1.0), 'z': (8, 'f', 1.0)}
+                elif step == 10:
+                    fields_map = {'x': (0, 'h', 0.01), 'y': (2, 'h', 0.01), 'z': (4, 'h', 0.01)}
+                else:
+                    fields_map = {'x': (0, 'h', 0.01), 'y': (2, 'h', 0.01), 'z': (4, 'h', 0.01)}
+                if not hasattr(PointCloudParser, '_fallback_warned'):
+                    PointCloudParser._fallback_warned = True
+                    print(f"  ⚠️  proto字段解析不完整(got {len(flist)} fields)，"
+                          f"使用point_step={step}推断格式: "
+                          f"{'FLOAT32' if step == 16 else 'INT16'}")
             
             # ✅ 使用向量化快速解析（性能关键优化）
             points = PointCloudParser._parse_points_fast_numpy(raw, step, fields_map)
@@ -2005,6 +1987,9 @@ class BEVCalibDatasetPreparer:
         self.image_metadata: List[ImageMetadata] = []
         self.pc_metadata: List[PointCloudMetadata] = []
         self.pose_metadata: List[PoseMetadata] = []
+        
+        # bag文件按时间连续性分组的时间段 [(start_ts, end_ts), ...]
+        self.bag_segments: List[Tuple[float, float]] = []
         
         # 从bag中提取的 Sensing→Vehicle 变换（优先级高于本地配置）
         # 从BAG提取的 Sensing→Vehicle 变换 (cfg字段: vehicle_to_sensing)
@@ -2455,6 +2440,33 @@ class BEVCalibDatasetPreparer:
             except ImportError:
                 raise ImportError("需要安装 rosbag 或 rosbags: pip install rosbags")
         
+        # 第一步：扫描所有bag文件的时间范围并按连续性分组
+        print(f"\n扫描bag文件时间范围并分组...")
+        bag_ranges = self._scan_bag_time_ranges(bag_files, use_rosbags)
+        bag_groups = self._group_bags_by_continuity(bag_ranges, max_gap=1.0)
+        
+        # 计算每组的时间边界，存储到 self.bag_segments 供后续使用
+        self.bag_segments = []
+        for group in bag_groups:
+            group_start = group[0][1]   # 第一个bag的start_ts
+            group_end = group[-1][2]    # 最后一个bag的end_ts
+            self.bag_segments.append((group_start, group_end))
+        
+        print(f"  ✓ {len(bag_ranges)} 个bag → {len(bag_groups)} 个连续组（间隔阈值: 1.0s）")
+        if len(bag_groups) > 1:
+            for i, group in enumerate(bag_groups):
+                grp_start = group[0][1]
+                grp_end = group[-1][2]
+                duration = grp_end - grp_start
+                bag_names = [g[0].name for g in group]
+                print(f"    组 {i+1}: {len(group)} bags, {duration:.1f}s "
+                      f"[{bag_names[0]} ~ {bag_names[-1]}]")
+            gaps = []
+            for i in range(1, len(bag_groups)):
+                gap = bag_groups[i][0][1] - bag_groups[i-1][-1][2]
+                gaps.append(gap)
+            print(f"    组间间隔: {', '.join(f'{g:.0f}s' for g in gaps)}")
+        
         # 确定图像 topic
         possible_topics = [
             f'/sensors/camera/{self.camera_name}_raw_data/compressed_proto',
@@ -2464,7 +2476,7 @@ class BEVCalibDatasetPreparer:
         image_topic = None
         detected_pose_topic = None
         
-        # 关键修复：扫描所有bag文件以收集所有可用topics
+        # 扫描所有bag文件以收集所有可用topics
         # （因为不同的Topic Group有不同的topics！）
         print(f"\n扫描所有bag文件以检测topics...")
         all_available_topics = set()
@@ -2710,6 +2722,66 @@ class BEVCalibDatasetPreparer:
         elif self.bag_path.is_dir():
             return sorted(self.bag_path.glob('**/*.bag'))
         return []
+    
+    def _scan_bag_time_ranges(self, bag_files: List[Path], use_rosbags: bool = True) -> List[Tuple[Path, float, float]]:
+        """扫描所有bag文件，提取每个bag的起止时间戳
+        
+        只读取bag的索引/元数据，不解析消息内容，非常快速。
+        
+        Returns:
+            [(bag_path, start_ts_sec, end_ts_sec), ...] 按start_ts排序
+        """
+        bag_ranges = []
+        for bf in bag_files:
+            try:
+                if use_rosbags:
+                    from rosbags.rosbag1 import Reader
+                    with Reader(str(bf)) as reader:
+                        start_ns = reader.start_time
+                        end_ns = reader.end_time
+                        bag_ranges.append((bf, start_ns / 1e9, end_ns / 1e9))
+                else:
+                    import rosbag as rb
+                    with rb.Bag(str(bf), 'r') as bag:
+                        start_t = bag.get_start_time()
+                        end_t = bag.get_end_time()
+                        bag_ranges.append((bf, start_t, end_t))
+            except Exception as e:
+                pass
+        
+        bag_ranges.sort(key=lambda x: x[1])
+        return bag_ranges
+    
+    def _group_bags_by_continuity(self, bag_ranges: List[Tuple[Path, float, float]], 
+                                   max_gap: float = 1.0) -> List[List[Tuple[Path, float, float]]]:
+        """按时间连续性将bag文件分组
+        
+        如果当前bag的开始时间与前一个bag的结束时间之差 < max_gap，
+        则认为连续，合并到同一组；否则另起新组。
+        
+        Args:
+            bag_ranges: [(bag_path, start_ts, end_ts), ...] 已按start_ts排序
+            max_gap: 最大允许间隔（秒），默认1.0s
+            
+        Returns:
+            groups: [[(path, start, end), ...], ...] 每组是一系列连续的bag
+        """
+        if not bag_ranges:
+            return []
+        
+        groups = [[bag_ranges[0]]]
+        
+        for i in range(1, len(bag_ranges)):
+            _, cur_start, _ = bag_ranges[i]
+            _, _, prev_end = bag_ranges[i - 1]
+            
+            gap = cur_start - prev_end
+            if gap < max_gap:
+                groups[-1].append(bag_ranges[i])
+            else:
+                groups.append([bag_ranges[i]])
+        
+        return groups
     
     def _extract_poses_only(self, bag_file: Path, use_rosbags: bool = True):
         """只提取位姿数据（确保时间范围完整）
@@ -3534,6 +3606,11 @@ class BEVCalibDatasetPreparer:
             2. 点云通过去畸变从LiDAR扫描时刻转换到图像时刻
             3. 位姿使用motion_interpolate插值到图像时刻
             4. 最终：图像、点云、位姿 在图像时刻完全对齐
+        
+        🔧 改进：基于bag文件分组处理不连续数据
+            - 在提取阶段预先扫描bag时间范围，按1s间隔阈值分组
+            - 同步阶段使用bag分组的时间段，严格过滤跨段帧
+            - 避免跨gap插值导致的失败
         """
         print(f"\n{'='*80}")
         print(f"阶段 2/3: 同步数据")
@@ -3546,6 +3623,17 @@ class BEVCalibDatasetPreparer:
         
         if not self.image_metadata or not self.pc_metadata:
             raise ValueError("图像或点云数据为空")
+        
+        # 使用bag文件分组确定的时间段（在extract阶段已计算）
+        segment_boundaries = []
+        if hasattr(self, 'bag_segments') and self.bag_segments:
+            segment_boundaries = self.bag_segments  # [(start_ts, end_ts), ...]
+            if len(segment_boundaries) > 1:
+                print(f"\n🔍 基于bag文件分组，共 {len(segment_boundaries)} 个连续时间段:")
+                for i, (seg_start, seg_end) in enumerate(segment_boundaries):
+                    duration = seg_end - seg_start
+                    print(f"  段 {i+1}: [{seg_start:.3f}, {seg_end:.3f}] ({duration:.1f}s)")
+                print(f"  💡 将按段独立处理，只保留时间戳完全落在某一段内的帧")
         
         # 打印时间戳范围用于诊断
         if self.pose_metadata:
@@ -3642,40 +3730,33 @@ class BEVCalibDatasetPreparer:
             pose_ts_min = self.pose_metadata[0].timestamp
             pose_ts_max = self.pose_metadata[-1].timestamp
             
-            # ✅ 两种检查方式：
-            # 1. max_pose_gap: 用于插值时检查相邻pose的间隔
-            # 2. max_pose_delta: 用于最近邻方式检查最近pose的时间差
-            # 参考C++ manual_sensor_calib.cpp: min_delta < 0.1e9 (100ms)
-            MAX_POSE_GAP = self.max_pose_gap  # 用于插值检查
-            MAX_POSE_DELTA = 0.15  # 150ms，用于最近邻检查（比C++的100ms稍宽松）
+            MAX_POSE_GAP = self.max_pose_gap
             
             synced_pairs_filtered = []
-            skipped_reasons = {'no_file': 0, 'no_pose_coverage': 0, 'pose_too_far': 0}
+            skipped_reasons = {'no_file': 0, 'no_pose_coverage': 0, 'pose_too_far': 0, 'cross_segment': 0}
             
-            print(f"\n  检查pose覆盖（支持不连续bag数据）:")
-            print(f"    插值模式: 最大pose间隔 {MAX_POSE_GAP:.1f}s")
-            print(f"    最近邻模式: 最大时间差 {MAX_POSE_DELTA*1000:.0f}ms (参考C++ min_delta)")
+            print(f"\n  检查pose覆盖（严格插值模式，精度优先）:")
+            print(f"    最大pose间隔: {MAX_POSE_GAP:.1f}s")
+            if len(segment_boundaries) > 1:
+                print(f"    bag分组: {len(segment_boundaries)} 个连续段，过滤跨段帧")
             
             for img_idx, pc_idx in synced_pairs:
                 pc_meta = self.pc_metadata[pc_idx]
                 pc_ts = pc_meta.timestamp
                 img_ts = self.image_metadata[img_idx].timestamp
                 
-                # ✅ 修复：使用 pc_metadata 中存储的实际文件路径
                 temp_pc_file = Path(pc_meta.file_path)
                 
                 if not temp_pc_file.exists():
                     skipped_reasons['no_file'] += 1
                     continue
                 
-                # 读取点云获取扫描时间范围
                 try:
                     points_raw = np.fromfile(str(temp_pc_file), dtype=np.float32)
                     if len(points_raw) % 5 == 0:
                         points_raw = points_raw.reshape(-1, 5)
                     elif len(points_raw) % 4 == 0:
                         points_raw = points_raw.reshape(-1, 4)
-                        # 没有timestamp列，假设扫描时间为0.1秒
                         end_ts = pc_ts + 0.1
                     else:
                         skipped_reasons['no_file'] += 1
@@ -3683,13 +3764,31 @@ class BEVCalibDatasetPreparer:
                     
                     if points_raw.shape[1] >= 5:
                         max_inner_ts_us = points_raw[:, 4].max()
-                        delta_time_us = max_inner_ts_us * 2  # 单位是2微秒
+                        delta_time_us = max_inner_ts_us * 2
                         end_ts = pc_ts + delta_time_us * 1e-6
                     else:
-                        end_ts = pc_ts + 0.1  # 假设扫描时间为0.1秒
+                        end_ts = pc_ts + 0.1
                     
-                    # 🔧 改进：使用两种方式检查pose覆盖
-                    # 方式1：传统插值检查（要求时间戳在两个pose之间）
+                    # 检查帧是否完全落在某个bag分组的时间段内
+                    crosses_segment = False
+                    if len(segment_boundaries) > 1:
+                        found_segment = False
+                        BOUNDARY_TOLERANCE = 0.2
+                        for seg_min, seg_max in segment_boundaries:
+                            if (seg_min - BOUNDARY_TOLERANCE <= pc_ts <= seg_max + BOUNDARY_TOLERANCE and 
+                                seg_min - BOUNDARY_TOLERANCE <= end_ts <= seg_max + BOUNDARY_TOLERANCE and
+                                seg_min - BOUNDARY_TOLERANCE <= img_ts <= seg_max + BOUNDARY_TOLERANCE):
+                                found_segment = True
+                                break
+                        
+                        if not found_segment:
+                            crosses_segment = True
+                    
+                    if crosses_segment:
+                        skipped_reasons['cross_segment'] += 1
+                        continue
+                    
+                    # 严格插值检查：三个时间戳都必须可以精确插值
                     can_interp_pc_start = UndistortionUtils.can_interpolate(
                         self.pose_metadata, pc_ts, MAX_POSE_GAP)
                     can_interp_pc_end = UndistortionUtils.can_interpolate(
@@ -3697,29 +3796,13 @@ class BEVCalibDatasetPreparer:
                     can_interp_img = UndistortionUtils.can_interpolate(
                         self.pose_metadata, img_ts, MAX_POSE_GAP)
                     
-                    # 方式2：最近邻检查（参考C++ min_delta逻辑）
-                    # 只要有足够近的pose就可以使用
-                    can_nearest_pc_start = UndistortionUtils.can_interpolate_nearest(
-                        self.pose_metadata, pc_ts, MAX_POSE_DELTA)
-                    can_nearest_pc_end = UndistortionUtils.can_interpolate_nearest(
-                        self.pose_metadata, end_ts, MAX_POSE_DELTA)
-                    can_nearest_img = UndistortionUtils.can_interpolate_nearest(
-                        self.pose_metadata, img_ts, MAX_POSE_DELTA)
-                    
-                    # ✅ 只要满足任一方式即可
-                    can_process = (
-                        (can_interp_pc_start and can_interp_pc_end and can_interp_img) or
-                        (can_nearest_pc_start and can_nearest_pc_end and can_nearest_img)
-                    )
+                    can_process = (can_interp_pc_start and can_interp_pc_end and can_interp_img)
                     
                     if can_process:
                         synced_pairs_filtered.append((img_idx, pc_idx))
                     else:
-                        # 区分跳过原因
-                        if (pc_ts < pose_ts_min - MAX_POSE_DELTA or 
-                            end_ts > pose_ts_max + MAX_POSE_DELTA or 
-                            img_ts < pose_ts_min - MAX_POSE_DELTA or 
-                            img_ts > pose_ts_max + MAX_POSE_DELTA):
+                        if (pc_ts < pose_ts_min or end_ts > pose_ts_max or 
+                            img_ts < pose_ts_min or img_ts > pose_ts_max):
                             skipped_reasons['no_pose_coverage'] += 1
                         else:
                             skipped_reasons['pose_too_far'] += 1
@@ -3732,11 +3815,14 @@ class BEVCalibDatasetPreparer:
                 print(f"\n  ⚠️  过滤无法插值的帧: {len(synced_pairs)} → {len(synced_pairs_filtered)}")
                 if skipped_reasons['no_file'] > 0:
                     print(f"      - 文件不存在/读取失败: {skipped_reasons['no_file']}")
+                if skipped_reasons['cross_segment'] > 0:
+                    print(f"      - 不属于任何bag连续组: {skipped_reasons['cross_segment']}")
+                    print(f"        💡 这些帧的时间戳落在bag组之间的gap区域")
                 if skipped_reasons['no_pose_coverage'] > 0:
                     print(f"      - 超出pose时间范围: {skipped_reasons['no_pose_coverage']}")
                 if skipped_reasons['pose_too_far'] > 0:
-                    print(f"      - 最近pose时间差>{MAX_POSE_DELTA*1000:.0f}ms: {skipped_reasons['pose_too_far']}")
-                    print(f"        💡 提示: 这些帧附近没有足够近的pose数据")
+                    print(f"      - 相邻pose间隔>{MAX_POSE_GAP:.1f}s无法插值: {skipped_reasons['pose_too_far']}")
+                    print(f"        💡 提示: 这些帧处于pose数据不连续的gap区域")
             else:
                 print(f"    ✓ 所有 {len(synced_pairs)} 帧都有pose覆盖")
             synced_pairs = synced_pairs_filtered

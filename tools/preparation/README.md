@@ -3,11 +3,19 @@
 ## 流程概览
 
 ```
-原始 trips 目录          数据准备                    图像 Resize
-  /trips/              batch_prepare_trips.py       resize_images.py
-  ├── trip_A/   ──→    sequences/*/image_2/*.png    sequences/*/image_2_640x360/*.jpg
-  ├── trip_B/          sequences/*/velodyne/*.bin
-  └── trip_C/          sequences/*/calib.txt
+输入方式 A（批量）:        输入方式 B（单 trip）:
+  /trips/                    /trip_A/
+  ├── trip_A/                ├── bags/important/
+  ├── trip_B/                └── configs/
+  └── trip_C/
+
+          ↓  步骤 1                    ↓  步骤 2
+  batch_prepare_trips.py       resize_images.py
+  或 prepare_custom_dataset.py
+          ↓                            ↓
+  sequences/*/image_2/*.png    sequences/*/image_2_640x360/*.jpg
+  sequences/*/velodyne/*.bin
+  sequences/*/calib.txt
 ```
 
 **步骤 1** 从原始 bag 数据提取 PNG 图像 + 点云 + 标定文件（KITTI 格式）
@@ -33,42 +41,58 @@
 ### 方式 1：一键完成（推荐）
 
 ```bash
-./run_preparation_pipeline.sh <trips_dir> <output_dir> [width] [height] [camera] [fps] [--force-config]
+./run_preparation_pipeline.sh <input_dir> <output_dir> [width] [height] [camera] [fps] [--force-config]
 ```
+
+脚本会自动检测 `input_dir` 是**单个 trip 目录**（含 `bags/` 和 `configs/`）还是**trips 根目录**（含多个 trip 子目录），并选择对应的处理方式。
 
 **示例：**
 
 ```bash
 cd tools/preparation
 
-# 默认行为：优先使用bag中的合格lidar外参，不合格则fallback到lidars.cfg
+# ---- 批量模式：处理 trips_dir 下所有 trip ----
 ./run_preparation_pipeline.sh \
     /mnt/drtraining/user/dahailu/data/bevcalib/test_trips \
     /mnt/drtraining/user/dahailu/data/bevcalib/test_data \
     640 360
 
-# 强制使用lidars.cfg外参（当已知bag中的外参不准确时使用）
+# 批量 + 并行 + 强制config
 ./run_preparation_pipeline.sh \
     /mnt/drtraining/user/dahailu/data/bevcalib/test_trips \
-    /mnt/drtraining/user/dahailu/data/bevcalib/test_data_force_config \
-    640 360 traffic_2 10.0 --force-config
+    /mnt/drtraining/user/dahailu/data/bevcalib/test_data \
+    640 360 traffic_2 10.0 --force-config -j 4
+
+# ---- 单 trip 模式：直接指定一个 trip 目录 ----
+./run_preparation_pipeline.sh \
+    /mnt/drtraining/user/dahailu/data/bevcalib/test_trips/YR-C061-9_20260305_055658 \
+    /mnt/drtraining/user/dahailu/data/bevcalib/test_single \
+    640 360
+
+# 单 trip + 指定 sequence ID
+./run_preparation_pipeline.sh \
+    /mnt/drtraining/user/dahailu/data/bevcalib/test_trips/YR-C061-9_20260305_055658 \
+    /mnt/drtraining/user/dahailu/data/bevcalib/test_single \
+    640 360 traffic_2 10.0 --sequence-id 5
 ```
 
 | 参数 | 说明 | 默认值 |
 |----------|------|--------|
-| `$1` trips_dir | trips 根目录（包含多个 trip 子目录） | 必填 |
+| `$1` input_dir | trips 根目录（含多个 trip 子目录）**或**单个 trip 目录（含 `bags/` 和 `configs/`） | 必填 |
 | `$2` output_dir | 输出目录 | 必填 |
 | `$3` width | resize 目标宽度 | 640 |
 | `$4` height | resize 目标高度 | 360 |
 | `$5` camera_name | 相机名称 | traffic_2 |
 | `$6` target_fps | 目标帧率 | 10.0 |
 | `--force-config` | 强制使用 lidars.cfg 中的外参 | 不启用 |
+| `--sequence-id N` | 单 trip 模式的 sequence 编号 | 0 |
+| `-j N` | 批量模式并行处理 trip 数量 | 1 |
 
 ---
 
 ### 方式 2：分步执行
 
-#### 步骤 1：批量数据准备
+#### 步骤 1a：批量数据准备（多 trip）
 
 ```bash
 python batch_prepare_trips.py \
@@ -88,6 +112,27 @@ python batch_prepare_trips.py \
 | `--target_fps` | 目标帧率 | 10.0 |
 | `--start_sequence` | 起始 sequence ID | 0 |
 | `--force-config` | 强制使用 lidars.cfg 中的外参替代 bag 外参 | 不启用 |
+
+#### 步骤 1b：单 trip 数据准备
+
+```bash
+python prepare_custom_dataset.py \
+    --bag_dir /path/to/trip/bags/important \
+    --config_dir /path/to/trip/configs \
+    --output_dir /path/to/output \
+    --sequence_id 0 \
+    --camera_name traffic_2 \
+    --target_fps 10.0
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--bag_dir` | bag 文件目录 | 必填 |
+| `--config_dir` | 配置文件目录（含 cameras.cfg, lidars.cfg） | 必填 |
+| `--output_dir` | 输出目录 | 必填 |
+| `--sequence_id` | 生成的 sequence 编号 | 0 |
+| `--camera_name` | 相机名称 | traffic_2 |
+| `--target_fps` | 目标帧率 | 10.0 |
 
 执行完成后脚本会自动提示步骤 2 的命令。
 
@@ -166,13 +211,19 @@ output_dir/
 # 进入工具目录
 cd /mnt/drtraining/user/dahailu/code/BEVCalib/tools/preparation
 
-# === 方式 A：一键 ===
+# === 方式 A：一键批量处理所有 trips ===
 ./run_preparation_pipeline.sh \
     /mnt/drtraining/user/dahailu/data/bevcalib/test_trips \
     /mnt/drtraining/user/dahailu/data/bevcalib/test_data \
     640 360
 
-# === 方式 B：分步 ===
+# === 方式 B：一键处理单个 trip ===
+./run_preparation_pipeline.sh \
+    /mnt/drtraining/user/dahailu/data/bevcalib/test_trips/YR-C061-9_20260305_055658 \
+    /mnt/drtraining/user/dahailu/data/bevcalib/test_single \
+    640 360
+
+# === 方式 C：分步 ===
 # 步骤 1
 python batch_prepare_trips.py \
     --trips_dir /mnt/drtraining/user/dahailu/data/bevcalib/test_trips \

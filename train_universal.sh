@@ -86,8 +86,8 @@ KITTI_PRETRAIN="./ckpt/kitti.pth"
 CUDA_DEVICE=""
 TENSORBOARD_PORT=""
 LOG_SUFFIX=""
-ANGLE_RANGE_DEG="20"
-TRANS_RANGE="1.5"
+ANGLE_RANGE_DEG="10"
+TRANS_RANGE="0.3"
 BATCH_SIZE="16"
 DDP_NGPUS=""
 USE_COMPILE=0
@@ -442,7 +442,7 @@ case $MODE in
             --bev_encoder 1 \
             --xyz_only 1 \
             --scheduler 1 \
-            --lr 1.5e-4 \
+            --lr 2e-4 \
             --step_size 60 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG
@@ -514,7 +514,7 @@ case $MODE in
             --xyz_only 1 \
             --scheduler 1 \
             --lr 1.5e-4 \
-            --step_size 30 \
+            --step_size 20 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG
         ;;

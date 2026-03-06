@@ -299,7 +299,7 @@ def main():
     if is_main:
         tprint(f"目标图像尺寸: {target_size[0]}x{target_size[1]} (宽x高)")
         if args.use_custom_dataset > 0:
-            print(f"   (自定义数据集模式，保持16:9宽高比)")
+            print(f"   (自定义数据集模式,保持16:9宽高比)")
         else:
             print(f"   (KITTI数据集模式)")
     
@@ -878,132 +878,88 @@ def main():
             dist.barrier()
 
     if is_main:
-        print("\n" + "=" * 80)
-        print("训练完成总结 / Training Summary")
-        print("=" * 80)
-        
+        def _fmt_err(e):
+            return (f"{e['trans_error']:.4f}m (Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
+                    f"Rot: {e['rot_error']:.2f}° (R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
+
+        has_eval = checkpoint_records and any(r['eval'] is not None for r in checkpoint_records)
+        best_eval_idx = -1
+        if has_eval:
+            eval_scores = [(i, r['eval']['trans_error'] + r['eval']['rot_error'] * 0.1)
+                           for i, r in enumerate(checkpoint_records) if r['eval'] is not None]
+            if eval_scores:
+                best_eval_idx = min(eval_scores, key=lambda x: x[1])[0]
+
+        md_lines = []
+        md_lines.append("=" * 80)
+        md_lines.append("训练完成总结 / Training Summary")
+        md_lines.append("=" * 80)
+        md_lines.append("")
+
         if best_train['epoch'] > 0 and best_train['errors']:
             e = best_train['errors']
-            print(f"\n  Best Train  (Epoch {best_train['epoch']}):")
-            print(f"    Pose Error - Trans: {e['trans_error']:.4f}m "
-                  f"(Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
-                  f"Rot: {e['rot_error']:.2f}° "
-                  f"(R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
-        
+            md_lines.append(f"Best Train  (Epoch {best_train['epoch']}):")
+            md_lines.append(f"  Pose Error - Trans: {e['trans_error']:.4f}m "
+                            f"(Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
+                            f"Rot: {e['rot_error']:.2f}° "
+                            f"(R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
+            md_lines.append("")
+
         if best_val['epoch'] > 0 and best_val['errors']:
             e = best_val['errors']
-            print(f"\n  Best Val    (Epoch {best_val['epoch']}):")
-            print(f"    Pose Error - Trans: {e['trans_error']:.4f}m "
-                  f"(Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
-                  f"Rot: {e['rot_error']:.2f}° "
-                  f"(R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
-        
+            md_lines.append(f"Best Val    (Epoch {best_val['epoch']}):")
+            md_lines.append(f"  Pose Error - Trans: {e['trans_error']:.4f}m "
+                            f"(Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
+                            f"Rot: {e['rot_error']:.2f}° "
+                            f"(R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
+            md_lines.append("")
+
         if checkpoint_records:
-            has_eval = any(r['eval'] is not None for r in checkpoint_records)
-            
-            print(f"\n  Checkpoint Performance Table ({len(checkpoint_records)} checkpoints)")
-            print("  " + "-" * 150)
-            if has_eval:
-                print(f"  {'Ckpt':>6} | {'--- Train ---':^50s} | {'--- Eval (Validation) ---':^50s} | {'Gap':>6}")
-                print(f"  {'Epoch':>6} | {'Trans(m)':>8} {'Fwd':>6} {'Lat':>6} {'Ht':>6} | {'Rot(°)':>6} {'R':>5} {'P':>5} {'Y':>5}"
-                      f" | {'Trans(m)':>8} {'Fwd':>6} {'Lat':>6} {'Ht':>6} | {'Rot(°)':>6} {'R':>5} {'P':>5} {'Y':>5}"
-                      f" | {'ΔTrans':>6}")
-            else:
-                print(f"  {'Ckpt':>6} | {'--- Train ---':^50s}")
-                print(f"  {'Epoch':>6} | {'Trans(m)':>8} {'Fwd':>6} {'Lat':>6} {'Ht':>6} | {'Rot(°)':>6} {'R':>5} {'P':>5} {'Y':>5}")
-            print("  " + "-" * 150)
-            
-            best_eval_idx = -1
-            if has_eval:
-                eval_scores = [(i, r['eval']['trans_error'] + r['eval']['rot_error'] * 0.1) 
-                               for i, r in enumerate(checkpoint_records) if r['eval'] is not None]
-                if eval_scores:
-                    best_eval_idx = min(eval_scores, key=lambda x: x[1])[0]
-            
-            for i, rec in enumerate(checkpoint_records):
+            md_lines.append(f"Checkpoint Performance Table ({len(checkpoint_records)} checkpoints)")
+            md_lines.append("")
+
+            hdr = "| Epoch | Trans(m) | Fwd(X) | Lat(Y) | Ht(Z) | Rot(°) | R | P | Y |"
+            sep = "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+
+            md_lines.append("--- Train ---")
+            md_lines.append("")
+            md_lines.append(hdr)
+            md_lines.append(sep)
+            for rec in checkpoint_records:
                 t = rec['train']
-                marker = " *" if i == best_eval_idx else "  "
-                line = (f"  {rec['epoch']:>6} | {t['trans_error']:>8.4f} {t['fwd_error']:>6.4f} {t['lat_error']:>6.4f} {t['ht_error']:>6.4f}"
-                        f" | {t['rot_error']:>6.2f} {t['roll_error']:>5.2f} {t['pitch_error']:>5.2f} {t['yaw_error']:>5.2f}")
-                if has_eval:
+                md_lines.append(f"| {rec['epoch']} | {t['trans_error']:.4f} | {t['fwd_error']:.4f} | {t['lat_error']:.4f} | {t['ht_error']:.4f}"
+                                f" | {t['rot_error']:.2f} | {t['roll_error']:.2f} | {t['pitch_error']:.2f} | {t['yaw_error']:.2f} |")
+            md_lines.append("")
+
+            if has_eval:
+                md_lines.append("--- Eval (Validation) ---")
+                md_lines.append("")
+                md_lines.append(hdr.rstrip(" |") + " | ΔTrans |")
+                md_lines.append(sep.rstrip(" |") + " | ---: |")
+                for i, rec in enumerate(checkpoint_records):
                     if rec['eval'] is not None:
                         e = rec['eval']
+                        t = rec['train']
                         gap = e['trans_error'] - t['trans_error']
-                        line += (f" | {e['trans_error']:>8.4f} {e['fwd_error']:>6.4f} {e['lat_error']:>6.4f} {e['ht_error']:>6.4f}"
-                                 f" | {e['rot_error']:>6.2f} {e['roll_error']:>5.2f} {e['pitch_error']:>5.2f} {e['yaw_error']:>5.2f}"
-                                 f" | {gap:>+6.4f}{marker}")
+                        best_mark = " *" if i == best_eval_idx else ""
+                        md_lines.append(f"| {rec['epoch']} | {e['trans_error']:.4f} | {e['fwd_error']:.4f} | {e['lat_error']:.4f} | {e['ht_error']:.4f}"
+                                        f" | {e['rot_error']:.2f} | {e['roll_error']:.2f} | {e['pitch_error']:.2f} | {e['yaw_error']:.2f}"
+                                        f" | {gap:+.4f}{best_mark} |")
                     else:
-                        line += f" | {'N/A':>8} {'':>6} {'':>6} {'':>6} | {'N/A':>6} {'':>5} {'':>5} {'':>5} | {'':>6}{marker}"
-                print(line)
-            
-            print("  " + "-" * 150)
-            if best_eval_idx >= 0:
-                print(f"  * = Best eval checkpoint (Epoch {checkpoint_records[best_eval_idx]['epoch']})")
-            print(f"  ΔTrans = Eval Trans - Train Trans (泛化差距, 越小越好)")
-        
-        summary_path = os.path.join(log_dir, "training_summary.txt")
-        with open(summary_path, 'w') as f:
-            f.write("Training Summary\n")
-            f.write("=" * 80 + "\n")
-            f.write(f"Total Epochs: {num_epochs}\n")
-            f.write(f"Train Noise: angle={train_noise['angle_range_deg']}°, trans={train_noise['trans_range']}m\n")
-            f.write(f"Eval  Noise: angle={eval_noise['angle_range_deg']}°, trans={eval_noise['trans_range']}m\n\n")
-            
-            if best_train['epoch'] > 0 and best_train['errors']:
-                e = best_train['errors']
-                f.write(f"Best Train (Epoch {best_train['epoch']}):\n")
-                f.write(f"  Trans: {e['trans_error']:.4f}m (Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f})\n")
-                f.write(f"  Rot:   {e['rot_error']:.2f}° (R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})\n\n")
-            
-            if best_val['epoch'] > 0 and best_val['errors']:
-                e = best_val['errors']
-                f.write(f"Best Val (Epoch {best_val['epoch']}):\n")
-                f.write(f"  Trans: {e['trans_error']:.4f}m (Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f})\n")
-                f.write(f"  Rot:   {e['rot_error']:.2f}° (R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})\n\n")
-            
-            if checkpoint_records:
-                has_eval = any(r['eval'] is not None for r in checkpoint_records)
-                f.write(f"Checkpoint Performance Table ({len(checkpoint_records)} checkpoints)\n")
-                f.write("-" * 150 + "\n")
-                if has_eval:
-                    f.write(f"{'Ckpt':>6} | {'--- Train ---':^50s} | {'--- Eval (Validation) ---':^50s} | {'Gap':>6}\n")
-                    f.write(f"{'Epoch':>6} | {'Trans(m)':>8} {'Fwd':>6} {'Lat':>6} {'Ht':>6} | {'Rot(°)':>6} {'R':>5} {'P':>5} {'Y':>5}"
-                            f" | {'Trans(m)':>8} {'Fwd':>6} {'Lat':>6} {'Ht':>6} | {'Rot(°)':>6} {'R':>5} {'P':>5} {'Y':>5}"
-                            f" | {'ΔTrans':>6}\n")
-                else:
-                    f.write(f"{'Ckpt':>6} | {'--- Train ---':^50s}\n")
-                    f.write(f"{'Epoch':>6} | {'Trans(m)':>8} {'Fwd':>6} {'Lat':>6} {'Ht':>6} | {'Rot(°)':>6} {'R':>5} {'P':>5} {'Y':>5}\n")
-                f.write("-" * 150 + "\n")
-                
-                best_eval_idx = -1
-                if has_eval:
-                    eval_scores = [(i, r['eval']['trans_error'] + r['eval']['rot_error'] * 0.1) 
-                                   for i, r in enumerate(checkpoint_records) if r['eval'] is not None]
-                    if eval_scores:
-                        best_eval_idx = min(eval_scores, key=lambda x: x[1])[0]
-                
-                for i, rec in enumerate(checkpoint_records):
-                    t = rec['train']
-                    marker = " *" if i == best_eval_idx else "  "
-                    line = (f"{rec['epoch']:>6} | {t['trans_error']:>8.4f} {t['fwd_error']:>6.4f} {t['lat_error']:>6.4f} {t['ht_error']:>6.4f}"
-                            f" | {t['rot_error']:>6.2f} {t['roll_error']:>5.2f} {t['pitch_error']:>5.2f} {t['yaw_error']:>5.2f}")
-                    if has_eval:
-                        if rec['eval'] is not None:
-                            e = rec['eval']
-                            gap = e['trans_error'] - t['trans_error']
-                            line += (f" | {e['trans_error']:>8.4f} {e['fwd_error']:>6.4f} {e['lat_error']:>6.4f} {e['ht_error']:>6.4f}"
-                                     f" | {e['rot_error']:>6.2f} {e['roll_error']:>5.2f} {e['pitch_error']:>5.2f} {e['yaw_error']:>5.2f}"
-                                     f" | {gap:>+6.4f}{marker}")
-                        else:
-                            line += f" | {'N/A':>8} {'':>6} {'':>6} {'':>6} | {'N/A':>6} {'':>5} {'':>5} {'':>5} | {'':>6}{marker}"
-                    f.write(line + "\n")
-                
-                f.write("-" * 150 + "\n")
+                        md_lines.append(f"| {rec['epoch']} | N/A | | | | N/A | | | | |")
+                md_lines.append("")
                 if best_eval_idx >= 0:
-                    f.write(f"* = Best eval checkpoint (Epoch {checkpoint_records[best_eval_idx]['epoch']})\n")
-                f.write(f"ΔTrans = Eval Trans - Train Trans (generalization gap)\n")
-        
-        print(f"\n  训练总结已保存到: {summary_path}")
+                    md_lines.append(f"* = Best eval checkpoint (Epoch {checkpoint_records[best_eval_idx]['epoch']})")
+                md_lines.append("ΔTrans = Eval Trans - Train Trans (泛化差距, 越小越好)")
+
+        summary_text = "\n".join(md_lines)
+        print("\n" + summary_text)
+
+        summary_md_path = os.path.join(log_dir, "training_summary.md")
+        with open(summary_md_path, 'w') as f:
+            f.write(summary_text + "\n")
+
+        print(f"\n  训练总结已保存到: {summary_md_path}")
         print("=" * 80)
     
     if is_main and writer is not None:

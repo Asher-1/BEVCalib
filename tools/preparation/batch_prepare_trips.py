@@ -57,7 +57,7 @@ def _build_prepare_cmd(trip_dir, sequence_id, output_base_dir, camera_name, targ
         '--sequence_id', sequence_id,
         '--num_workers', str(num_workers),
         '--batch_size', str(batch_size),
-        '--save_debug_samples', '20',
+        # '--save_debug_samples', '20',
     ]
     if force_config:
         cmd.append('--force-config')

@@ -9,7 +9,7 @@
 #
 # ======================== 数据集选项 ========================
 #
-#   B26A         - B26A 数据集 (bevcalib_training_data, ~1544帧)
+#   B26A         - B26A 数据集 (b26a1_1_training_data, ~1544帧)
 #   all          - 全量数据集 (all_training_data, ~405GB)
 #   custom       - 自定义数据集 (需设置 CUSTOM_DATASET 环境变量)
 #
@@ -149,6 +149,15 @@ detect_gpus_per_node() {
 
 detect_local_ip() {
     hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
+}
+
+detect_public_ip() {
+    local ip=""
+    ip=$(curl -s --connect-timeout 3 ifconfig.me 2>/dev/null) || \
+    ip=$(curl -s --connect-timeout 3 icanhazip.com 2>/dev/null) || \
+    ip=$(curl -s --connect-timeout 3 ipinfo.io/ip 2>/dev/null) || \
+    ip=""
+    echo "${ip:-}"
 }
 
 # ============================================================================
@@ -479,7 +488,7 @@ fi
 # ============================================================================
 case $DATASET_CHOICE in
     B26A|b26a)
-        DATASET_ROOT="/mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data"
+        DATASET_ROOT="/mnt/drtraining/user/dahailu/data/bevcalib/b26a1_1_training_data"
         DATASET_NAME="B26A"
         echo "ℹ️  使用 B26A 数据集"
         ;;
@@ -595,7 +604,7 @@ fi
 
 # 激活conda环境
 source /opt/conda/etc/profile.d/conda.sh
-conda activate bevcalib
+# conda activate bevcalib
 
 # ============================================================================
 # 计算训练日志目录 (TensorBoard 和训练启动共用)
@@ -620,12 +629,30 @@ if [ "$NNODES" -gt 1 ] && [ "$NODE_RANK" -ne 0 ]; then
     IS_MASTER=0
 fi
 
+tb_msg() {
+    echo "$1"
+    echo "$1" >> "$TB_LOG_DIR/tb_startup.log"
+}
+
 if [ "$ENABLE_TB" -eq 1 ] && [ "$IS_MASTER" -eq 1 ]; then
+    > "$TB_LOG_DIR/tb_startup.log"
     TB_ALREADY_RUNNING=$(ps aux | grep -E "tensorboard.*--logdir" | grep -v grep | wc -l)
 
     if [ "$TB_ALREADY_RUNNING" -gt 0 ]; then
         EXISTING_TB_PORT=$(ps aux | grep -E "tensorboard.*--logdir" | grep -v grep | grep -oP -- '--port\s+\K[0-9]+' | head -1)
-        echo "ℹ️  TensorBoard 已在运行 (port: ${EXISTING_TB_PORT:-unknown})"
+        EXISTING_TB_PORT=${EXISTING_TB_PORT:-6006}
+        LOCAL_IP=$(detect_local_ip)
+        PUBLIC_IP=$(detect_public_ip)
+        tb_msg "========================================"
+        tb_msg "TensorBoard 已在运行"
+        tb_msg "========================================"
+        tb_msg "  本机: http://localhost:${EXISTING_TB_PORT}"
+        tb_msg "  内网: http://${LOCAL_IP}:${EXISTING_TB_PORT}"
+        if [ -n "$PUBLIC_IP" ]; then
+        tb_msg "  公网: http://${PUBLIC_IP}:${EXISTING_TB_PORT}"
+        fi
+        tb_msg "  日志目录: $TB_LOG_DIR"
+        tb_msg "========================================"
     else
         if [ -z "$TB_PORT" ]; then
             TB_PORT=$(find_free_port 6006)
@@ -634,7 +661,7 @@ if [ "$ENABLE_TB" -eq 1 ] && [ "$IS_MASTER" -eq 1 ]; then
                lsof -Pi ":$TB_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
                 OLD_TB_PORT=$TB_PORT
                 TB_PORT=$(find_free_port $TB_PORT)
-                echo "⚠️  TensorBoard端口 $OLD_TB_PORT 已占用, 使用: $TB_PORT"
+                tb_msg "⚠️  TensorBoard端口 $OLD_TB_PORT 已占用, 使用: $TB_PORT"
             fi
         fi
 
@@ -645,17 +672,21 @@ if [ "$ENABLE_TB" -eq 1 ] && [ "$IS_MASTER" -eq 1 ]; then
         sleep 2
         if kill -0 $TB_PID 2>/dev/null; then
             LOCAL_IP=$(detect_local_ip)
-            echo "========================================"
-            echo "TensorBoard 已启动"
-            echo "========================================"
-            echo "  本机: http://localhost:${TB_PORT}"
-            echo "  远程: http://${LOCAL_IP}:${TB_PORT}"
-            echo "  日志目录: $TB_LOG_DIR"
-            echo "  PID: $TB_PID"
-            echo "========================================"
+            PUBLIC_IP=$(detect_public_ip)
+            tb_msg "========================================"
+            tb_msg "TensorBoard 已启动"
+            tb_msg "========================================"
+            tb_msg "  本机: http://localhost:${TB_PORT}"
+            tb_msg "  内网: http://${LOCAL_IP}:${TB_PORT}"
+            if [ -n "$PUBLIC_IP" ]; then
+            tb_msg "  公网: http://${PUBLIC_IP}:${TB_PORT}"
+            fi
+            tb_msg "  日志目录: $TB_LOG_DIR"
+            tb_msg "  PID: $TB_PID"
+            tb_msg "========================================"
         else
-            echo "⚠️  TensorBoard 启动失败, 请手动启动:"
-            echo "  tensorboard --logdir $TB_LOG_DIR --port $TB_PORT"
+            tb_msg "⚠️  TensorBoard 启动失败, 请手动启动:"
+            tb_msg "  tensorboard --logdir $TB_LOG_DIR --port $TB_PORT"
         fi
     fi
     echo ""
