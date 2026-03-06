@@ -19,6 +19,7 @@
 #   --angle_range_deg DEG    - Rotation perturbation range in degrees (default: 20)
 #   --trans_range M          - Translation perturbation range in meters (default: 1.5)
 #   --batch_size N           - Batch size per GPU (default: 16)
+#   --learning_rate LR       - Initial learning rate (default: mode-specific, scratch=2e-4, finetune=7.5e-5, resume=1.5e-4)
 #   --ddp N                  - Enable DDP with N GPUs per node
 #   --nnodes N               - Number of nodes for multi-node DDP (default: 1)
 #   --node_rank R            - Rank of current node (0=master)
@@ -89,6 +90,7 @@ LOG_SUFFIX=""
 ANGLE_RANGE_DEG="10"
 TRANS_RANGE="0.3"
 BATCH_SIZE="16"
+LEARNING_RATE=""
 DDP_NGPUS=""
 USE_COMPILE=0
 NNODES="1"
@@ -164,6 +166,14 @@ while [[ $# -gt 0 ]]; do
             BATCH_SIZE="$2"
             shift 2
             ;;
+        --learning_rate|--lr)
+            if [ $# -lt 2 ]; then
+                echo "❌ Error: --learning_rate requires a value"
+                exit 1
+            fi
+            LEARNING_RATE="$2"
+            shift 2
+            ;;
         --ddp)
             if [ $# -lt 2 ]; then
                 echo "❌ Error: --ddp requires number of GPUs"
@@ -198,7 +208,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "❌ Unknown option: $1"
-            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile"
+            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --learning_rate, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile"
             exit 1
             ;;
     esac
@@ -265,7 +275,7 @@ if [ -n "$LOG_SUFFIX" ]; then
     LOG_DIR="${LOG_DIR}_${LOG_SUFFIX}"
 fi
 
-# 创建训练目录（如果不存在）
+
 mkdir -p "$LOG_DIR"
 
 # 设置日志文件路径
@@ -308,6 +318,8 @@ _print_sep
 _print_row "Batch Size:"    "$BATCH_SIZE"
 _print_row "Angle Range:"   "±${ANGLE_RANGE_DEG}°"
 _print_row "Trans Range:"   "${TRANS_RANGE}m"
+[ -n "$LEARNING_RATE" ] && \
+_print_row "Learning Rate:" "$LEARNING_RATE"
 _print_sep
 _print_row "Compute:"       "$COMPUTE_STR"
 _print_row "GPU:"           "${GPU_NAME} (${GPU_MEM}MB) x${AVAIL_GPUS}"
@@ -429,6 +441,7 @@ fi
 case $MODE in
     scratch)
         echo "Training from scratch..."
+        LR_SCRATCH=${LEARNING_RATE:-1e-4}
         $LAUNCHER kitti-bev-calib/train_kitti.py \
             --log_dir "$LOG_DIR" \
             --dataset_root "$DATASET_ROOT" \
@@ -442,7 +455,7 @@ case $MODE in
             --bev_encoder 1 \
             --xyz_only 1 \
             --scheduler 1 \
-            --lr 2e-4 \
+            --lr $LR_SCRATCH \
             --step_size 60 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG
@@ -463,6 +476,7 @@ case $MODE in
         echo ""
         
         FINETUNE_LOG_DIR="${LOG_DIR}_finetuned"
+        LR_FINETUNE=${LEARNING_RATE:-4e-5}
         
         $LAUNCHER kitti-bev-calib/train_kitti.py \
             --log_dir "$FINETUNE_LOG_DIR" \
@@ -474,7 +488,7 @@ case $MODE in
             --save_ckpt_per_epoches 10 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
-            --lr 7.5e-5 \
+            --lr $LR_FINETUNE \
             --scheduler 1 \
             --step_size 20 \
             --deformable 0 \
@@ -499,6 +513,8 @@ case $MODE in
         echo "✓ Found checkpoint: $LAST_CKPT"
         echo ""
         
+        LR_RESUME=${LEARNING_RATE:-1e-4}
+        
         $LAUNCHER kitti-bev-calib/train_kitti.py \
             --log_dir "$LOG_DIR" \
             --dataset_root "$DATASET_ROOT" \
@@ -513,7 +529,7 @@ case $MODE in
             --bev_encoder 1 \
             --xyz_only 1 \
             --scheduler 1 \
-            --lr 1.5e-4 \
+            --lr $LR_RESUME \
             --step_size 20 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG

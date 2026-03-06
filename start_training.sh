@@ -20,6 +20,7 @@
 #   --angle DEG            扰动角度范围 (默认: 5)
 #   --trans M              扰动平移范围 (默认: 0.3)
 #   --bs N                 batch size (默认: 16)
+#   --lr LR                初始学习率 (默认: 使用模型默认值)
 #   --fg                   前台阻塞执行 (不使用nohup, 输出到终端, Ctrl+C可停止)
 #   --no-tb                不自动启动 TensorBoard
 #   --tb_port PORT         TensorBoard端口 (默认: 自动检测空闲端口, 起始6006)
@@ -64,6 +65,9 @@
 #
 #   # DDP + 自定义扰动参数
 #   bash start_training.sh B26A v5 --ddp --angle 10 --trans 0.5
+#
+#   # DDP + 自定义学习率
+#   bash start_training.sh B26A v5 --ddp --lr 0.0001
 #
 #   # DDP多机: 手动指定 (2台机器各2GPU)
 #   # --- master (192.168.1.100) ---
@@ -182,6 +186,7 @@ USE_COMPILE=""
 DDP_ANGLE="5"
 DDP_TRANS="0.3"
 BATCH_SIZE="16"
+LEARNING_RATE="1e-4"
 FOREGROUND=0
 ENABLE_TB=1
 TB_PORT=""
@@ -220,6 +225,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bs|--batch_size)
             BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --lr|--learning_rate)
+            LEARNING_RATE="$2"
             shift 2
             ;;
         --fg|--foreground)
@@ -285,7 +294,7 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo ""
-            echo "可用选项: --ddp [N], --fg, --compile, --angle DEG, --trans M, --bs N, --no-tb, --tb_port PORT,"
+            echo "可用选项: --ddp [N], --fg, --compile, --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
             echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
             echo "          --rdzv_timeout SECONDS"
             exit 1
@@ -568,6 +577,8 @@ _print_row "Mode:"          "$MODE_STR"
 _print_row "Batch Size:"    "$BATCH_SIZE"
 _print_row "Angle Range:"   "±${DDP_ANGLE}°"
 _print_row "Trans Range:"   "${DDP_TRANS}m"
+[ -n "$LEARNING_RATE" ] && \
+_print_row "Learning Rate:" "$LEARNING_RATE"
 _print_row "Execution:"     "$([ "$FOREGROUND" -eq 1 ] && echo 'Foreground (Ctrl+C to stop)' || echo 'Background (nohup)')"
 _print_row "TensorBoard:"   "$([ "$ENABLE_TB" -eq 1 ] && echo 'auto-start' || echo 'disabled (--no-tb)')"
 if [ "$USE_DDP" -eq 1 ] && [ "$NNODES" -gt 1 ]; then
@@ -728,6 +739,9 @@ if [ "$USE_DDP" -eq 1 ]; then
         echo "[DDP] ${DDP_NGPUS}-GPU并行训练 (${DDP_ANGLE}deg, ${DDP_TRANS}m)..."
     fi
 
+    LR_ARG=""
+    [ -n "$LEARNING_RATE" ] && LR_ARG="--learning_rate $LEARNING_RATE"
+
     TRAIN_CMD="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
@@ -738,7 +752,8 @@ if [ "$USE_DDP" -eq 1 ]; then
         --log_suffix ${LOG_SUFFIX} \
         --rdzv_timeout $RDZV_TIMEOUT \
         $MULTI_NODE_ARGS \
-        $USE_COMPILE"
+        $USE_COMPILE \
+        $LR_ARG"
 
     if [ "$FOREGROUND" -eq 1 ]; then
         echo "  日志: $DDP_LOG_DIR/train.log (+ 终端输出)"
@@ -779,6 +794,9 @@ else
     GPU1_LOG_DIR="./logs/${DATASET_NAME}/model_small_5deg_${VERSION}"
     mkdir -p "$GPU0_LOG_DIR" "$GPU1_LOG_DIR"
 
+    LR_ARG=""
+    [ -n "$LEARNING_RATE" ] && LR_ARG="--learning_rate $LEARNING_RATE"
+
     TRAIN_CMD_0="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
@@ -787,7 +805,8 @@ else
         --trans_range 0.5 \
         --batch_size $BATCH_SIZE \
         --log_suffix small_10deg_${VERSION} \
-        $USE_COMPILE"
+        $USE_COMPILE \
+        $LR_ARG"
 
     TRAIN_CMD_1="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
@@ -797,7 +816,8 @@ else
         --trans_range 0.3 \
         --batch_size $BATCH_SIZE \
         --log_suffix small_5deg_${VERSION} \
-        $USE_COMPILE"
+        $USE_COMPILE \
+        $LR_ARG"
 
     if [ "$FOREGROUND" -eq 1 ]; then
         echo "[前台模式] 两个GPU训练并行执行, Ctrl+C 同时停止两个任务"
