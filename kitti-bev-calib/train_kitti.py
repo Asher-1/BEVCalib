@@ -382,6 +382,8 @@ def main():
         if is_main:
             tprint(f"Model wrapped with DistributedDataParallel on {world_size} GPUs")
     
+    tprint(f"The weight decay is: {args.wd}")
+    tprint(f"The initial learning rate is: {args.lr}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     scheduler_choice = args.scheduler > 0
