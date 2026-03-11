@@ -1,0 +1,115 @@
+# BEVCalib 批量训练配置文件 - 手动多机DDP训练（优化版）
+# 适用于非SLURM环境的多机训练
+
+# ============================================================================
+# 使用说明
+# ============================================================================
+#
+# 多机训练需要在每台机器上分别运行，配置不同的 node_rank
+#
+# 方式1: 为每台机器创建独立配置文件（推荐）
+#   使用 generate_multinode_configs.sh 自动生成
+#   bash configs/generate_multinode_configs.sh \
+#     configs/batch_train_multinode_manual.yaml 2 192.168.1.100
+#
+# 方式2: 手动修改此配置文件
+#   在每台机器上编辑 defaults.params.node_rank
+#
+# 启动顺序:
+#   1. 先在Master节点（192.168.1.100, rank=0）启动
+#   2. 30秒内在所有Worker节点启动
+#   3. 所有节点会自动握手并开始训练
+#
+# ============================================================================
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数（多机DDP公共配置）
+# ============================================================================
+defaults:
+  env: {}
+  
+  params:
+    # 扰动参数
+    angle_range_deg: 5
+    trans_range: 0.3
+    
+    # 训练参数
+    batch_size: 32              # 多机可用更大batch
+    learning_rate: null
+    
+    # DDP配置
+    use_ddp: true
+    ddp_gpus: 8                 # 每台机器8个GPU
+    
+    # 多机DDP配置（关键参数）
+    nnodes: 2                   # 总共2台机器
+    node_rank: 0                # ⚠️ Master节点设为0，Worker节点设为1
+    master_addr: "192.168.1.100"  # ⚠️ 改为实际的Master节点IP
+    master_port: 29500          # 通信端口（确保防火墙开放）
+    
+    # 训练模式
+    use_compile: false
+    rotation_only: false
+    
+    # 执行模式
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组配置
+# ============================================================================
+experiments:
+  # ============ 实验1: 多机DDP训练 ============
+  - name: "2机DDP训练"
+    description: "2台机器，每台8个GPU，共16个GPU"
+    dataset: "all"
+    version: "v1-2node"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+
+
+# ============================================================================
+# 快速配置生成
+# ============================================================================
+#
+# 使用自带的生成脚本:
+#   bash configs/generate_multinode_configs.sh \
+#     configs/batch_train_multinode_manual.yaml 2 192.168.1.100
+#
+# 这会生成:
+#   - batch_train_multinode_manual_node0.yaml (Master, rank=0)
+#   - batch_train_multinode_manual_node1.yaml (Worker, rank=1)
+#
+# 然后在对应节点运行生成的配置文件
+#
+# ============================================================================
+
+
+# ============================================================================
+# 调试技巧
+# ============================================================================
+#
+# 1. 先用 dry-run 验证命令:
+#    bash batch_train.sh --dry-run configs/batch_train_multinode_manual.yaml
+#
+# 2. 测试网络连通性:
+#    nc -zv 192.168.1.100 29500
+#
+# 3. 查看NCCL调试信息:
+#    在 defaults.env 中添加:
+#      NCCL_DEBUG: "INFO"
+#      NCCL_DEBUG_SUBSYS: "INIT,COLL"
+#
+# 4. 验证数据路径在所有机器上一致:
+#    ls -lh /mnt/drtraining/user/dahailu/data/bevcalib/
+#
+# 5. 检查PyTorch版本在所有机器上一致:
+#    conda run -n bevcalib python -c "import torch; print(torch.__version__)"
+#
+# ============================================================================

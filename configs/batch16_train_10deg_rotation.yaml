@@ -1,0 +1,69 @@
+# BEVCalib 批量训练配置文件 - 10度Rotation-Only实验（优化版）
+# Z分辨率对比 + 仅优化旋转参数
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数（所有实验继承）
+# ============================================================================
+defaults:
+  env: {}
+  
+  params:
+    # 扰动参数
+    angle_range_deg: 10         # 10度扰动
+    trans_range: 0.5            # rotation-only时trans_range用于数据增强
+    
+    # 训练参数
+    batch_size: 16
+    learning_rate: 1e-4
+    
+    # DDP配置
+    use_ddp: true
+    ddp_gpus: null
+    
+    # 训练模式
+    use_compile: false
+    rotation_only: true         # 仅优化旋转
+    
+    # 执行模式
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+    
+    # 多机DDP
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+# ============================================================================
+# 实验组配置
+# ============================================================================
+experiments:
+  # ============ 实验1: z=1 (10deg rotation) ============
+  - name: "z=1 (10deg rotation)"
+    description: "Z步长20.0, 10度扰动, 仅旋转, DDP训练"
+    dataset: "B26A"
+    version: "v5-z1_rotation"
+    env:
+      BEV_ZBOUND_STEP: 20.0
+
+  # ============ 实验2: z=5 (10deg rotation) ============
+  - name: "z=5 (10deg rotation)"
+    description: "Z步长4.0, 10度扰动, 仅旋转, DDP训练"
+    dataset: "B26A"
+    version: "v5-z5_rotation"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+
+  # ============ 实验3: z=10 (10deg rotation) ============
+  - name: "z=10 (10deg rotation)"
+    description: "Z步长2.0, 10度扰动, 仅旋转, DDP训练"
+    dataset: "B26A"
+    version: "v5-z10_rotation"
+    env:
+      BEV_ZBOUND_STEP: 2.0

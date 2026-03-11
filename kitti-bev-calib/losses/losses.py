@@ -103,16 +103,24 @@ class PC_reproj_loss(nn.Module):
             
 class realworld_loss(nn.Module):
     def __init__(self, weight_translation = 1.0, weight_quat_norm = 0.5, weight_rotation = 0.5, weight_PCreproj = 0.5, 
-                 weight_bev_reproj = 0.5, weight_feat_align = 1.0, l1 = False):
+                 weight_bev_reproj = 0.5, weight_feat_align = 1.0, l1 = False, rotation_only = False):
         super(realworld_loss, self).__init__()
-        self.weight_translation = weight_translation
-        self.weight_rotation = weight_rotation
-        self.weight_PCreproj = weight_PCreproj
-        self.weight_quat_norm = weight_quat_norm
+        self.rotation_only = rotation_only
+        if rotation_only:
+            self.weight_translation = 0.0
+            self.weight_rotation = weight_rotation * 2.0
+            self.weight_PCreproj = weight_PCreproj * 2.0
+            self.weight_quat_norm = weight_quat_norm
+        else:
+            self.weight_translation = weight_translation
+            self.weight_rotation = weight_rotation
+            self.weight_PCreproj = weight_PCreproj
+            self.weight_quat_norm = weight_quat_norm
         self.weight_bev_reproj = weight_bev_reproj
         self.weight_feat_align = weight_feat_align
-        self.translation_loss = translation_loss(l1 = True)
-        self.real_translation_loss = translation_loss(l1 = False)
+        if not rotation_only:
+            self.translation_loss = translation_loss(l1 = True)
+            self.real_translation_loss = translation_loss(l1 = False)
         self.rotation_loss = rotation_loss()
         self.quat_norm_loss = quat_norm_loss()
         self.PC_reproj_loss = PC_reproj_loss()
@@ -142,12 +150,21 @@ class realworld_loss(nn.Module):
                 torch.linalg.inv(T_pred.float()), init_T_to_camera.float()
             )
 
+        if self.rotation_only:
+            # Rotation-only mode: SE(3) composition couples rotation into translation,
+            # so override with init translation (== GT since no translation perturbation).
+            T_gt_expected = T_gt_expected.clone()
+            T_gt_expected[:, :3, 3] = init_T_to_camera[:, :3, 3]
+
         pred_translation = T_gt_expected[:, :3, 3]
         pred_rotation = T_gt_expected[:, :3, :3]
         gt_translation = gt_T_to_camera[:, :3, 3]
         gt_rotation = gt_T_to_camera[:, :3, :3]
 
-        translation_loss = self.translation_loss(pred_translation, gt_translation)
+        if not self.rotation_only:
+            translation_loss = self.translation_loss(pred_translation, gt_translation)
+        else:
+            translation_loss = torch.tensor(0.0, device=pcs.device)
 
         with torch.cuda.amp.autocast(enabled=False):
             rotation_loss = self.rotation_loss(pred_rotation.float(), gt_rotation.float())
@@ -158,8 +175,11 @@ class realworld_loss(nn.Module):
                 + self.weight_PCreproj * PC_reproj_loss \
                 + self.weight_quat_norm * quat_norm_loss
 
-        with torch.no_grad():
-            real_trans_loss = self.real_translation_loss(pred_translation, gt_translation)
+        if not self.rotation_only:
+            with torch.no_grad():
+                real_trans_loss = self.real_translation_loss(pred_translation, gt_translation)
+        else:
+            real_trans_loss = torch.tensor(0.0, device=pcs.device)
 
         ret = {
             "total_loss" : loss,

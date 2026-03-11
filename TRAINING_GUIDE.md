@@ -1,454 +1,1241 @@
-# BEVCalib 训练指南
+# 🚀 BEVCalib 训练完整指南
 
-本文档提供详细的训练参数说明和建议。
+完整的BEVCalib模型训练指南，涵盖数据准备、训练启动、参数调优、监控和最佳实践。
 
-> **📢 重要更新 (2026-03-01)**  
-> 训练脚本已重构！现在支持多数据集训练，日志按数据集分级组织。
-> 
-> **推荐使用新脚本**：
-> - 快速开始：`bash start_training.sh all v1`
-> - 详细配置：`bash train_universal.sh scratch --dataset_root /path/to/data`
-> 
-> **相关文档**：
-> - [README_TRAINING_SCRIPTS.md](README_TRAINING_SCRIPTS.md) - 新脚本使用说明（推荐首读）
-> - [QUICK_START_TRAINING.md](QUICK_START_TRAINING.md) - 快速开始指南
-> - [TRAINING_REFACTOR_SUMMARY.md](TRAINING_REFACTOR_SUMMARY.md) - 重构详细说明
-> 
-> 本文档保留了详细的参数调优指南，适合需要深入了解训练参数的用户。
+## 📋 目录
 
----
+- [前提条件](#前提条件)
+- [快速开始](#快速开始)
+- [训练脚本说明](#训练脚本说明)
+- [高级用法](#高级用法)
+- [监控训练](#监控训练)
+- [日志结构](#日志结构)
+- [典型工作流](#典型工作流)
+- [常见问题](#常见问题)
+- [最佳实践](#最佳实践)
 
-## 📋 快速开始
+## 前提条件
 
-### 推荐方式：使用新的训练脚本
+### 1. 环境准备
 
 ```bash
-# 训练 all_training_data 数据集
-bash start_training.sh all v1
+# 激活 conda 环境
+conda activate bevcalib
 
-# 训练 B26A 数据集
+# 检查环境
+python -c "import torch; print(f'PyTorch: {torch.__version__}')"
+nvidia-smi
+
+# 确保 bev_pool 扩展已编译
+cd kitti-bev-calib/img_branch/bev_pool && python setup.py build_ext --inplace
+```
+
+### 2. 数据集准备
+
+确保数据集符合 KITTI-Odometry 格式：
+
+```
+dataset_root/
+├── sequences/
+│   ├── 00/
+│   │   ├── image_2/       # 左相机图像
+│   │   ├── velodyne/      # 点云文件
+│   │   └── calib.txt      # 标定文件
+│   ├── 01/
+│   └── ...
+└── poses/
+    ├── 00.txt             # 位姿文件
+    ├── 01.txt
+    └── ...
+```
+
+**可用数据集**:
+- `B26A`: `/mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data/` (小数据集，快速验证)
+- `all_training_data`: `/mnt/drtraining/user/dahailu/data/bevcalib/all_training_data/` (完整训练)
+- 自定义数据集: 参考 [PREPARE_CUSTOM_DATASET.md](PREPARE_CUSTOM_DATASET.md)
+
+## 快速开始
+
+### 最简单的方式：使用 start_training.sh
+
+#### 训练 B26A 数据集
+
+```bash
+cd /mnt/drtraining/user/dahailu/code/BEVCalib
+
+# 启动训练（版本 v1）
 bash start_training.sh B26A v1
-
-# 单个GPU训练，更多配置选项
-bash train_universal.sh scratch \
-    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data \
-    --cuda_device 0 \
-    --angle_range_deg 10 \
-    --trans_range 0.5
 ```
 
-### 直接使用 Python 训练（高级用法）
+**说明**:
+- 自动启动 2 个训练进程（GPU 0 和 GPU 1）
+- GPU 0: 10° 扰动，0.5m 平移
+- GPU 1: 5° 扰动，0.3m 平移  
+- 日志位置: `./logs/B26A/model_*_v1/`
 
-如果需要完全自定义配置，可以直接调用 Python 脚本：
+#### 训练 all_training_data 数据集
 
 ```bash
-# KITTI 数据集训练
-python kitti-bev-calib/train_kitti.py \
-    --log_dir ./logs/kitti \
-    --dataset_root /path/to/kitti-odometry \
-    --batch_size 16 \
-    --num_epochs 500
-```
+cd /mnt/drtraining/user/dahailu/code/BEVCalib
 
-```bash
-# 自定义数据集训练
-python kitti-bev-calib/train_kitti.py \
-    --log_dir ./logs/custom_model \
-    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data \
-    --batch_size 4 \
-    --num_epochs 100 \
-    --use_custom_dataset 1
-```
-
----
-
-## 🎯 训练参数详解
-
-### 必需参数
-
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| `--dataset_root` | 数据集根目录 | `/path/to/dataset` |
-| `--log_dir` | 日志输出目录 | `./logs/my_model` |
-
-### 核心训练参数
-
-| 参数 | 默认值 | KITTI 推荐 | 自定义数据集推荐 | 说明 |
-|------|--------|-----------|----------------|------|
-| `--batch_size` | 16 | 16 | 4-8 | 批大小 |
-| `--num_epochs` | 500 | 500 | 100-200 | 训练轮数 |
-| `--lr` | 1e-4 | 1e-4 | 1e-4 / 5e-5 | 学习率 |
-| `--scheduler` | 0 | 1 | 1 | 学习率调度器 |
-| `--step_size` | 80 | 80 | 40-80 | 学习率衰减步长 |
-
-### 模型架构参数
-
-| 参数 | 默认值 | 推荐值 | 说明 |
-|------|--------|--------|------|
-| `--bev_encoder` | 1 | 1 | 使用 BEV 编码器 |
-| `--deformable` | 0 | 0 | 可变形注意力 |
-| `--xyz_only` | 1 | 1 | 只使用 XYZ 坐标（不使用强度） |
-
-### 标定参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--angle_range_deg` | 20.0 | 旋转扰动范围（度）|
-| `--trans_range` | 1.5 | 平移扰动范围（米）|
-| `--label` | - | 实验标签 |
-
-### 保存参数
-
-| 参数 | 默认值 | KITTI 推荐 | 自定义推荐 | 说明 |
-|------|--------|-----------|----------|------|
-| `--save_ckpt_per_epoches` | 40 | 40 | 20 | 保存检查点间隔 |
-| `--pretrain_ckpt` | None | - | `./ckpt/kitti.pth` | 预训练模型路径 |
-
----
-
-## 📊 训练配置推荐
-
-### 场景 1: 小数据集（< 1000 帧）
-
-```bash
-python kitti-bev-calib/train_kitti.py \
-    --dataset_root /path/to/small_dataset \
-    --log_dir ./logs/small_model \
-    --batch_size 4 \
-    --num_epochs 100 \
-    --save_ckpt_per_epoches 10 \
-    --lr 1e-4 \
-    --scheduler 1 \
-    --step_size 30
-```
-
-**特点**：
-- 小批量（避免过拟合）
-- 较少轮数（数据量小）
-- 频繁保存（监控训练）
-
-### 场景 2: 中等数据集（1000-5000 帧）
-
-```bash
-python kitti-bev-calib/train_kitti.py \
-    --dataset_root /home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data \
-    --log_dir ./logs/medium_model \
-    --batch_size 8 \
-    --num_epochs 200 \
-    --save_ckpt_per_epoches 20 \
-    --lr 1e-4 \
-    --scheduler 1 \
-    --step_size 60 \
-    --angle_range_deg 20 \
-    --trans_range 1.5 \
-    --label B26A_20_1.5
-```
-
-**特点**：
-- 适中批量
-- 充足训练轮数
-- 标准学习率调度
-
-### 场景 3: 大数据集（> 5000 帧）
-
-```bash
-python kitti-bev-calib/train_kitti.py \
-    --dataset_root /path/to/large_dataset \
-    --log_dir ./logs/large_model \
-    --batch_size 16 \
-    --num_epochs 500 \
-    --save_ckpt_per_epoches 40 \
-    --lr 1e-4 \
-    --scheduler 1 \
-    --step_size 80
-```
-
-**特点**：
-- 大批量（加速训练）
-- 更多轮数（充分学习）
-- KITTI 标准配置
-
-### 场景 4: 从 KITTI 微调
-
-```bash
-python kitti-bev-calib/train_kitti.py \
-    --dataset_root /home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data \
-    --log_dir ./logs/finetuned_model \
-    --pretrain_ckpt ./ckpt/kitti.pth \
-    --batch_size 4 \
-    --num_epochs 50 \
-    --save_ckpt_per_epoches 10 \
-    --lr 5e-5 \
-    --scheduler 1 \
-    --step_size 20
-```
-
-**特点**：
-- 加载预训练权重
-- 较小学习率（微调）
-- 较少轮数（快速适应）
-
----
-
-## 🔧 参数调优指南
-
-### 学习率（`--lr`）
-
-**建议值**：
-- 从头训练：`1e-4`
-- 微调：`5e-5` 或 `1e-5`
-
-**调整策略**：
-- 损失震荡：降低学习率
-- 损失下降慢：增大学习率
-- 使用 `--scheduler 1` 自动衰减
-
-### 批大小（`--batch_size`）
-
-**建议值**：
-- 16GB GPU：4-8
-- 24GB GPU：8-16
-- 多 GPU：16-32
-
-**影响**：
-- 大批量：训练快，但可能欠拟合
-- 小批量：泛化好，但训练慢
-
-### 训练轮数（`--num_epochs`）
-
-**建议值**：
-- 小数据集：50-100
-- 中等数据集：100-200
-- 大数据集：200-500
-
-**判断标准**：
-- 验证损失不再下降时停止
-- 使用早停策略
-
-### 扰动范围
-
-**旋转（`--angle_range_deg`）**：
-- 低噪声：10-15 度
-- 标准：20 度
-- 高噪声：25-30 度
-
-**平移（`--trans_range`）**：
-- 低噪声：0.5-1.0 米
-- 标准：1.5 米
-- 高噪声：2.0-3.0 米
-
----
-
-## 📈 训练监控
-
-### TensorBoard
-
-```bash
-tensorboard --logdir ./logs
-```
-
-访问：http://localhost:6006
-
-**关键指标**：
-- `train/loss`：训练损失
-- `train/rotation_error`：旋转误差
-- `train/translation_error`：平移误差
-
-### WandB（可选）
-
-如果启用了 WandB：
-```bash
-wandb login
-# 训练时会自动上传
-```
-
----
-
-## 🎯 实际案例
-
-### 案例 1: B26A 车载数据集
-
-**数据集信息**：
-- 路径：`/home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data`
-- 序列：自动检测
-- 场景：车载 LiDAR-Camera 标定
-
-**训练命令**：
-```bash
-python kitti-bev-calib/train_kitti.py \
-    --dataset_root /home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data \
-    --log_dir ./logs/B26A_model \
-    --label B26A_20_1.5 \
-    --batch_size 8 \
-    --num_epochs 150 \
-    --save_ckpt_per_epoches 15 \
-    --angle_range_deg 20 \
-    --trans_range 1.5 \
-    --bev_encoder 1 \
-    --deformable 0 \
-    --xyz_only 1 \
-    --scheduler 1 \
-    --lr 1e-4 \
-    --step_size 50
-```
-
-**微调版本**（使用 KITTI 预训练）：
-```bash
-python kitti-bev-calib/train_kitti.py \
-    --dataset_root /home/ludahai/develop/data/eol/B26A_online/YR-B26A1-1_20251117_031232_lidar/bevcalib_training_data \
-    --log_dir ./logs/B26A_finetuned \
-    --pretrain_ckpt ./ckpt/kitti.pth \
-    --label B26A_finetuned \
-    --batch_size 4 \
-    --num_epochs 50 \
-    --save_ckpt_per_epoches 10 \
-    --lr 5e-5 \
-    --scheduler 1 \
-    --step_size 20
-```
-
-### 案例 2: 多序列数据集
-
-**数据集结构**：
-```
-dataset/
-└── sequences/
-    ├── 00/  # 1000 帧
-    ├── 01/  # 800 帧
-    └── 02/  # 1200 帧
-```
-
-**训练命令**：
-```bash
-python kitti-bev-calib/train_kitti.py \
-    --dataset_root /path/to/multi_sequence_dataset \
-    --log_dir ./logs/multi_seq_model \
-    --batch_size 8 \
-    --num_epochs 200 \
-    --save_ckpt_per_epoches 20
-```
-
----
-
-## ⚠️ 常见问题
-
-### Q1: CUDA Out of Memory
-
-**解决方案**：
-1. 减小 `--batch_size`（如 16 → 8 → 4）
-2. 减小图像尺寸（修改数据集）
-3. 使用梯度累积
-
-### Q2: 训练损失不下降
-
-**可能原因**：
-1. 学习率过大或过小
-2. 数据集问题（标定不准）
-3. 批量过大
-
-**解决方案**：
-1. 调整 `--lr`（尝试 5e-5 或 2e-4）
-2. 检查数据集质量
-3. 减小 `--batch_size`
-
-### Q3: 过拟合
-
-**现象**：训练损失低，但验证损失高
-
-**解决方案**：
-1. 增加数据（更多序列）
-2. 减少训练轮数
-3. 增加扰动范围
-4. 使用预训练模型微调
-
-### Q4: 训练太慢
-
-**解决方案**：
-1. 增大 `--batch_size`
-2. 使用多 GPU
-3. 减少数据增强
-4. 降低图像分辨率
-
----
-
-## 📝 训练检查清单
-
-开始训练前，确认：
-
-- [ ] 数据集路径正确
-- [ ] 数据集格式符合 KITTI 标准
-- [ ] 已检查数据质量（使用 `validate_kitti_odometry.py`）
-- [ ] GPU 内存足够（根据 batch_size）
-- [ ] 日志目录已创建
-- [ ] 选择合适的超参数
-- [ ] （可选）下载了预训练模型
-
----
-
-## 🔗 相关文档
-
-- [数据集准备](README.md#custom-dataset)
-- [自定义数据集训练](CUSTOM_DATASET_TRAINING.md)
-- [KITTI 数据集结构](README.md#kitti-odometry)
-
----
-
-## 🚀 使用新脚本的优势
-
-### 为什么推荐使用新脚本？
-
-**旧方式**（直接调用 Python）：
-```bash
-python kitti-bev-calib/train_kitti.py --dataset_root /path/to/data --log_dir ./logs/my_model --batch_size 8 ...
-```
-- ❌ 需要手动指定所有参数
-- ❌ 日志目录混乱
-- ❌ 切换数据集需要修改命令
-
-**新方式**（使用脚本）：
-```bash
+# 启动训练（版本 v1）
 bash start_training.sh all v1
 ```
-- ✅ 一行启动，自动配置
-- ✅ 日志按数据集分级组织
-- ✅ 支持多数据集，轻松切换
-- ✅ 内置参数验证和错误检查
 
-### 日志组织对比
+**说明**:
+- 自动启动 2 个训练进程（GPU 0 和 GPU 1）
+- GPU 0: 10° 扰动，0.5m 平移
+- GPU 1: 5° 扰动，0.3m 平移
+- 日志位置: `./logs/all_training_data/model_*_v1/`
 
-**旧方式**：
+#### 训练自定义数据集
+
+```bash
+cd /mnt/drtraining/user/dahailu/code/BEVCalib
+
+# 设置数据集路径并启动
+CUSTOM_DATASET=/path/to/your/dataset bash start_training.sh custom v1
+```
+
+## 训练脚本说明
+
+### 1. start_training.sh（推荐）
+
+快速启动脚本，自动配置并启动多GPU训练。
+
+**用法**:
+```bash
+bash start_training.sh [dataset] [version] [--ddp] [--lr LR]
+
+# 数据集选项:
+#   B26A   - B26A 数据集
+#   all    - all_training_data 数据集
+#   custom - 自定义数据集（需设置 CUSTOM_DATASET 环境变量）
+
+# 选项:
+#   --ddp           - 使用分布式数据并行（DDP）模式
+#   --lr LR         - 设置初始学习率（默认：2e-4 for scratch）
+
+# 示例:
+bash start_training.sh B26A v1
+bash start_training.sh all v1 --ddp
+bash start_training.sh B26A v2 --lr 0.0001
+CUSTOM_DATASET=/path/to/data bash start_training.sh custom v1
+```
+
+**特性**:
+- ✅ 自动选择可用GPU
+- ✅ 自动配置数据集路径
+- ✅ 支持DDP分布式训练
+- ✅ 自定义学习率
+- ✅ 后台运行，日志重定向
+
+### 2. train_universal.sh
+
+通用训练脚本，支持详细配置和多种训练模式。
+
+**用法**:
+```bash
+bash train_universal.sh [mode] --dataset_root PATH [options]
+
+# 模式:
+#   scratch   - 从头训练（默认）
+#   finetune  - 从 KITTI 预训练模型微调
+#   resume    - 从最后的检查点恢复
+
+# 必需参数:
+#   --dataset_root PATH     - 数据集根目录
+
+# 可选参数:
+#   --dataset_name NAME     - 数据集名称（自动检测）
+#   --cuda_device ID        - CUDA 设备 ID（如 0, 1, 2）
+#   --angle_range_deg DEG   - 旋转扰动范围（默认 20）
+#   --trans_range M         - 平移扰动范围（默认 1.5）
+#   --log_suffix SUFFIX     - 日志目录后缀
+#   --tensorboard_port PORT - TensorBoard 端口（默认 6006）
+#   --learning_rate LR      - 初始学习率
+```
+
+**示例**:
+
+```bash
+# 1. 从头训练，10° 扰动
+bash train_universal.sh scratch \
+  --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data \
+  --cuda_device 0 \
+  --angle_range_deg 10 \
+  --trans_range 0.5 \
+  --log_suffix small_10deg_v1
+
+# 2. 微调KITTI预训练模型
+bash train_universal.sh finetune \
+  --dataset_root /path/to/custom_data \
+  --cuda_device 1 \
+  --angle_range_deg 5 \
+  --trans_range 0.3
+
+# 3. 恢复训练
+bash train_universal.sh resume \
+  --dataset_root /path/to/data \
+  --cuda_device 0
+
+# 4. 自定义学习率
+bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 0 \
+  --learning_rate 0.0001
+```
+
+### 3. batch_train.sh
+
+**配置文件驱动的批量训练脚本**，支持一次性启动多组对比实验。
+
+**用法**:
+```bash
+bash batch_train.sh [config_file]
+
+# 使用默认配置（5deg Z分辨率对比）
+bash batch_train.sh
+
+# 使用指定配置
+bash batch_train.sh configs/batch_train_5deg.yaml
+bash batch_train.sh configs/batch_train_10deg_rotation.yaml
+bash batch_train.sh configs/batch_train_lr_ablation.yaml
+
+# 查看会执行的命令（不实际运行）
+bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
+
+# 后台运行
+nohup bash batch_train.sh configs/batch_train_5deg.yaml > batch.log 2>&1 &
+```
+
+**预配置实验组**:
+| 配置文件 | 实验内容 | 实验数 |
+| --- | --- | --- |
+| `configs/batch_train_5deg.yaml` | 5度扰动 + Z分辨率对比 (z=1,5,10) | 3组 |
+| `configs/batch_train_10deg_rotation.yaml` | 10度rotation-only + Z对比 | 3组 |
+| `configs/batch_train_lr_ablation.yaml` | 学习率消融 (1e-4, 2e-4, 5e-4, 1e-3) | 4组 |
+
+**特性**:
+- ✅ 配置文件驱动，无需修改脚本代码
+- ✅ **defaults 继承机制**（消除重复配置，v2.1+）
+- ✅ 支持 `start_training.sh` 的所有参数
+- ✅ 串行执行，自动管理GPU资源
+- ✅ **智能TensorBoard管理**（监控当前实验具体目录，v2.1+）
+- ✅ 实验间自动等待释放资源
+- ✅ 详细的日志记录
+
+**创建自定义配置**:
+```bash
+# 复制模板
+cp configs/batch_train_5deg.yaml configs/my_experiments.yaml
+
+# 编辑配置文件
+vim configs/my_experiments.yaml
+
+# 运行
+bash batch_train.sh configs/my_experiments.yaml
+```
+
+**配置文件格式**: 见 [configs/README.md](configs/README.md)
+
+### 4. train_B26A.sh（向后兼容）
+
+B26A 专用训练脚本，保持向后兼容。
+
+```bash
+bash train_B26A.sh scratch --cuda_device 0
+```
+
+## 批量训练配置系统
+
+### 配置文件驱动
+
+`batch_train.sh` 现在支持通过YAML配置文件定义批量训练实验，无需修改脚本代码。
+
+#### 预配置实验模板
+
+| 配置文件 | 实验内容 | 实验数 | 用途 |
+| --- | --- | --- | --- |
+| `configs/batch_train_5deg.yaml` | 5度扰动 + Z分辨率对比 | 3组 | Z消融实验 |
+| `configs/batch_train_10deg_rotation.yaml` | 10度rotation-only + Z对比 | 3组 | Rotation模式实验 |
+| `configs/batch_train_lr_ablation.yaml` | 学习率对比 | 4组 | 学习率消融 |
+| `configs/batch_train_multinode.yaml` | 多机DDP训练示例 | 2组 | 多机训练模板 |
+| `configs/batch_train_multinode_slurm.yaml` | SLURM集群训练 | 2组 | SLURM自动化 |
+| `configs/batch_train_template.yaml` | 通用模板 | - | 自定义实验 |
+
+#### 快速使用
+
+```bash
+# 使用默认配置（5deg Z对比）
+bash batch_train.sh
+
+# 使用指定配置
+bash batch_train.sh configs/batch_train_10deg_rotation.yaml
+
+# 查看会执行的命令（不实际运行）
+bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
+
+# 后台运行
+nohup bash batch_train.sh configs/batch_train_5deg.yaml > batch.log 2>&1 &
+```
+
+#### 创建自定义配置
+
+```bash
+# 1. 复制模板
+cp configs/batch_train_5deg.yaml configs/my_experiments.yaml
+
+# 2. 编辑配置文件
+vim configs/my_experiments.yaml
+
+# 3. 运行
+bash batch_train.sh configs/my_experiments.yaml
+```
+
+#### 配置文件示例
+
+```yaml
+# 全局配置
+global:
+  dry_run: false                 # 仅打印命令不执行
+  wait_between_experiments: 10   # 实验间等待时间（秒）
+
+# 实验组配置
+experiments:
+  - name: "实验1"                # 实验名称
+    description: "实验描述"       # 可选描述
+    
+    dataset: "B26A"              # 数据集: B26A / all / custom
+    version: "v1"                # 版本标签
+    
+    env:
+      BEV_ZBOUND_STEP: 2.0       # 环境变量
+    
+    params:
+      angle_range_deg: 5         # 旋转扰动
+      trans_range: 0.3           # 平移扰动
+      batch_size: 16             # Batch size
+      learning_rate: 0.0002      # 学习率
+      use_ddp: true              # 使用DDP
+      rotation_only: false       # 仅优化旋转
+      foreground: true           # 前台执行（批量训练推荐）
+      no_tensorboard: true       # 不启动TB（批量训练统一管理）
+
+  - name: "实验2"
+    dataset: "B26A"
+    version: "v2"
+    params:
+      angle_range_deg: 10
+      use_ddp: true
+```
+
+**支持的所有参数**:
+
+配置文件支持 `start_training.sh` 的所有命令行选项：
+
+| 配置参数 | 命令行选项 | 说明 |
+| --- | --- | --- |
+| `angle_range_deg` | `--angle` | 旋转扰动范围 |
+| `trans_range` | `--trans` | 平移扰动范围 |
+| `batch_size` | `--bs` | Batch size |
+| `learning_rate` | `--lr` | 学习率 |
+| `use_ddp` | `--ddp` | 使用DDP |
+| `ddp_gpus` | `--ddp N` | DDP GPU数 |
+| `use_compile` | `--compile` | torch.compile |
+| `rotation_only` | `--rotation_only` | 仅优化旋转 |
+| `foreground` | `--fg` | 前台执行 |
+| `no_tensorboard` | `--no-tb` | 不启动TB |
+| `tensorboard_port` | `--tb_port` | TB端口 |
+| `nnodes` | `--nnodes` | 多机DDP-机器数 |
+| `node_rank` | `--node_rank` | 多机DDP-机器编号 |
+| `master_addr` | `--master_addr` | 多机DDP-master IP |
+| `master_port` | `--master_port` | 多机DDP-master端口 |
+
+详细配置说明见: [configs/README.md](configs/README.md)
+
+#### 配置文件优势
+
+**之前（硬编码）**:
+```bash
+# 需要修改脚本代码
+EXPERIMENTS=(
+    "20.0|B26A|v4-z1|--ddp --angle 5"
+    "4.0|B26A|v4-z5|--ddp --angle 5"
+)
+```
+
+**现在（配置文件）**:
+```yaml
+# 清晰的YAML格式，易于阅读和修改
+experiments:
+  - name: "z=1"
+    dataset: "B26A"
+    version: "v4-z1"
+    env:
+      BEV_ZBOUND_STEP: 20.0
+    params:
+      angle_range_deg: 5
+      use_ddp: true
+```
+
+## 高级用法
+
+### 不同扰动级别
+
+根据初始标定误差选择合适的扰动范围：
+
+```bash
+# 小扰动 (5°, 0.3m) - 标定误差 < 5°
+bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 0 \
+  --angle_range_deg 5 \
+  --trans_range 0.3 \
+  --log_suffix small_5deg_v1
+
+# 中等扰动 (10°, 0.5m) - 标定误差 5-10°（推荐）
+bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 1 \
+  --angle_range_deg 10 \
+  --trans_range 0.5 \
+  --log_suffix medium_10deg_v1
+
+# 大扰动 (20°, 1.5m) - 标定误差 > 10°
+bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 2 \
+  --angle_range_deg 20 \
+  --trans_range 1.5 \
+  --log_suffix large_20deg_v1
+```
+
+### BEV Z分辨率实验
+
+通过环境变量 `BEV_ZBOUND_STEP` 控制BEV高度方向的体素分辨率：
+
+```bash
+# z=1: 更细粒度（20.0步长，200个体素层）
+BEV_ZBOUND_STEP=20.0 bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 0 \
+  --log_suffix z1_experiment
+
+# z=5: 平衡（4.0步长，40个体素层，推荐）
+BEV_ZBOUND_STEP=4.0 bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 1 \
+  --log_suffix z5_experiment
+
+# z=10: 粗粒度（2.0步长，20个体素层）
+BEV_ZBOUND_STEP=2.0 bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 2 \
+  --log_suffix z10_experiment
+```
+
+**推荐**: z=5 (BEV_ZBOUND_STEP=4.0) 在精度和泛化能力之间取得最佳平衡。
+
+### Rotation-Only模式
+
+仅标定旋转参数，固定平移：
+
+```bash
+bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 0 \
+  --angle_range_deg 10 \
+  --trans_range 0.5 \
+  --log_suffix rotation_only \
+  --rotation_only 1  # 启用rotation-only模式
+```
+
+### 分布式训练（DDP）
+
+使用多GPU加速训练：
+
+```bash
+# 使用start_training.sh的DDP模式
+bash start_training.sh B26A v1 --ddp
+
+# 或手动配置DDP
+bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --use_ddp \
+  --nnodes 1 \
+  --node_rank 0 \
+  --master_addr localhost \
+  --master_port 29500
+```
+
+## 监控训练
+
+### 实时监控
+
+```bash
+# 查看 GPU 使用情况
+nvidia-smi -l 1
+
+# 查看训练进程
+ps aux | grep train_kitti
+
+# 实时日志
+tail -f logs/B26A/model_small_10deg_v1/train.log
+
+# 查看最近的epoch统计
+tail -100 logs/B26A/model_small_10deg_v1/train.log | grep "Epoch \["
+```
+
+### TensorBoard 可视化
+
+```bash
+# 查看所有训练
+tensorboard --logdir logs/ --port 6006
+
+# 只查看 B26A 数据集
+tensorboard --logdir logs/B26A/ --port 6006
+
+# 只查看 all_training_data 数据集
+tensorboard --logdir logs/all_training_data/ --port 6007
+
+# 对比多个实验
+tensorboard --logdir logs/B26A/model_small_5deg_v1/:5deg,logs/B26A/model_small_10deg_v1/:10deg --port 6006
+```
+
+然后在浏览器访问: `http://localhost:6006`
+
+### 检查训练状态
+
+```bash
+# 查找最新检查点
+find logs/B26A/model_small_10deg_v1/ -name "*.pth" | sort -V | tail -1
+
+# 列出所有检查点
+ls -lht logs/B26A/model_small_10deg_v1/*/checkpoint/*.pth
+
+# 查看训练进度
+grep "Epoch \[" logs/B26A/model_small_10deg_v1/train.log | tail -20
+```
+
+## 日志结构
+
+训练后，日志按数据集分级组织：
+
 ```
 logs/
-├── my_model/
-├── another_model/
-├── test_model/
-└── ... (所有混在一起)
-```
-
-**新方式**：
-```
-logs/
-├── B26A/                    # 按数据集分级
+├── B26A/                              # B26A 数据集
+│   ├── model_small_10deg_v1/
+│   │   ├── train.log                  # 训练日志
+│   │   ├── B26A_scratch/
+│   │   │   ├── events.out.tfevents.* # TensorBoard 事件
+│   │   │   └── checkpoint/
+│   │   │       ├── ckpt_40.pth       # 检查点
+│   │   │       ├── ckpt_80.pth
+│   │   │       └── ckpt_400.pth
+│   │   └── test_data_eval/           # 测试评估结果（如果运行）
+│   │
+│   ├── model_small_5deg_v1/
+│   │   └── ...
+│   │
+│   └── model_small_5deg_v4-z1/       # Z分辨率实验
+│       ├── model_small_5deg_v4-z5/
+│       └── model_small_5deg_v4-z10/
+│
+├── all_training_data/                 # 全量数据集
 │   ├── model_small_10deg_v1/
 │   └── model_small_5deg_v1/
-├── all_training_data/
-│   ├── model_small_10deg_v1/
-│   └── model_small_5deg_v1/
+│
 └── README.md
 ```
 
-### 何时使用直接 Python 调用？
+## 典型工作流
 
-仍然推荐直接调用 Python 的场景：
-- 需要非常特殊的参数组合
-- 在 Jupyter Notebook 中交互式训练
-- 自动化脚本中需要完全控制
-- 调试和开发新功能
+### 1. 快速验证（B26A 小数据集）
 
-对于日常训练，**强烈推荐使用新脚本**。
+```bash
+# Step 1: 使用小数据集快速验证
+bash start_training.sh B26A v1
+
+# Step 2: 查看训练进度
+tail -f logs/B26A/model_small_10deg_v1/train.log
+
+# Step 3: 训练 50-100 个 epoch 后检查结果
+tensorboard --logdir logs/B26A/ --port 6006
+
+# Step 4: 评估检查点（可选）
+python evaluate_checkpoint.py \
+    --ckpt_path logs/B26A/model_small_10deg_v1/B26A_scratch/checkpoint/ckpt_100.pth \
+    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/bevcalib_training_data \
+    --angle_range_deg 10.0 \
+    --trans_range 0.5
+```
+
+### 2. 完整训练（all_training_data）
+
+```bash
+# Step 1: 使用全量数据集训练最终模型
+bash start_training.sh all v1
+
+# Step 2: 监控训练（需要更长时间）
+tail -f logs/all_training_data/model_small_10deg_v1/train.log
+
+# Step 3: 训练 200-500 个 epoch
+tensorboard --logdir logs/all_training_data/ --port 6007
+
+# Step 4: 备份重要模型
+cp logs/all_training_data/model_small_10deg_v1/all_training_data_scratch/checkpoint/ckpt_400.pth \
+   backups/best_model_v1.pth
+```
+
+### 3. 批量对比实验
+
+使用 `batch_train.sh` 一次性运行多组实验：
+
+```bash
+# Z分辨率消融实验（串行执行3组）
+bash batch_train.sh configs/batch_train_5deg.yaml
+
+# Rotation-only实验
+bash batch_train.sh configs/batch_train_10deg_rotation.yaml
+
+# 学习率消融实验
+bash batch_train.sh configs/batch_train_lr_ablation.yaml
+
+# TensorBoard 查看所有实验
+tensorboard --logdir logs/B26A/ --port 6006
+```
+
+**查看会执行的命令**:
+```bash
+bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
+```
+
+**自定义实验组**:
+```bash
+# 1. 复制配置模板
+cp configs/batch_train_5deg.yaml configs/my_experiments.yaml
+
+# 2. 编辑配置（添加/修改实验）
+vim configs/my_experiments.yaml
+
+# 3. 运行
+bash batch_train.sh configs/my_experiments.yaml
+```
+
+### 4. 超参数消融实验
+
+**使用配置文件批量运行**（推荐）:
+
+```bash
+# 学习率消融（串行执行4组）
+bash batch_train.sh configs/batch_train_lr_ablation.yaml
+
+# Z分辨率消融
+bash batch_train.sh configs/batch_train_5deg.yaml
+
+# Rotation-only消融
+bash batch_train.sh configs/batch_train_10deg_rotation.yaml
+```
+
+**手动单个实验**:
+
+```bash
+# 学习率对比
+bash start_training.sh B26A v1_lr1e4 --lr 0.0001
+bash start_training.sh B26A v1_lr2e4 --lr 0.0002
+bash start_training.sh B26A v1_lr5e4 --lr 0.0005
+
+# 扰动范围对比
+bash train_universal.sh scratch --dataset_root /path/to/data --angle_range_deg 5 --log_suffix 5deg
+bash train_universal.sh scratch --dataset_root /path/to/data --angle_range_deg 10 --log_suffix 10deg
+bash train_universal.sh scratch --dataset_root /path/to/data --angle_range_deg 20 --log_suffix 20deg
+```
+
+## 停止训练
+
+```bash
+# 使用停止脚本
+bash stop_training.sh
+
+# 或手动停止
+pkill -f train_kitti
+
+# 停止特定训练
+pkill -f "train_kitti.py --log_dir ./logs/B26A"
+```
+
+## 常见问题
+
+### Q1: 如何选择扰动级别？
+
+**答**: 根据初始标定误差选择
+- **小扰动 (5°, 0.3m)**: 标定误差 < 5°
+- **中等扰动 (10°, 0.5m)**: 标定误差 5-10°（推荐）
+- **大扰动 (20°, 1.5m)**: 标定误差 > 10°
+
+### Q2: 训练需要多长时间？
+
+**答**: 取决于数据集大小和 GPU
+- B26A (约1544帧): ~1-2 小时 / 100 epoch (单 RTX 3090)
+- all_training_data: 根据帧数而定
+- 推荐训练 200-400 epochs
+
+### Q3: 如何恢复中断的训练？
+
+**答**: 使用 resume 模式
+```bash
+bash train_universal.sh resume \
+  --dataset_root /path/to/data \
+  --dataset_name B26A \
+  --cuda_device 0
+```
+
+### Q4: 如何修改批次大小？
+
+**答**: 修改脚本中的 `--batch_size` 参数
+```bash
+# 编辑 train_universal.sh
+# 将 --batch_size 16 改为其他值（如 8, 32）
+# 或直接传参（需修改脚本支持）
+```
+
+### Q5: 日志目录占用空间太大怎么办？
+
+**答**: 定期清理和归档
+```bash
+# 归档旧日志
+tar -czf logs_archive_$(date +%Y%m%d).tar.gz logs/B26A/
+
+# 删除原始日志（小心！）
+rm -rf logs/B26A/model_old_*/
+
+# 只保留重要检查点
+cd logs/B26A/model_*/*/checkpoint/
+rm ckpt_{20,60,100,140,180}.pth  # 保留40的倍数
+```
+
+### Q6: 如何选择BEV_ZBOUND_STEP？
+
+**答**: 
+- **z=1 (20.0)**: 最细粒度，训练精度最高，但可能过拟合
+- **z=5 (4.0)**: 推荐，精度和泛化的最佳平衡
+- **z=10 (2.0)**: 粗粒度，训练快但精度较低
+
+根据泛化评估结果，**推荐使用 z=5**。
+
+### Q7: 多个实验如何避免端口冲突？
+
+**答**: 为每个实验指定不同的TensorBoard端口
+```bash
+# 终端1
+bash train_universal.sh scratch --dataset_root /data1 --tensorboard_port 6006
+
+# 终端2
+bash train_universal.sh scratch --dataset_root /data2 --tensorboard_port 6007
+
+# 终端3
+bash train_universal.sh scratch --dataset_root /data3 --tensorboard_port 6008
+```
+
+## 最佳实践
+
+### 训练前检查清单
+
+- [ ] Conda 环境已激活 (`bevcalib`)
+- [ ] GPU 可用且显存充足 (`nvidia-smi`)
+- [ ] bev_pool CUDA 扩展已编译
+- [ ] 数据集准备完成，格式正确
+- [ ] 确定训练配置（数据集、扰动级别、版本号）
+
+### 训练中检查清单
+
+- [ ] 训练进程正常运行 (`ps aux | grep train_kitti`)
+- [ ] GPU 利用率正常 (80-95%)
+- [ ] 日志正常写入
+- [ ] Loss 正常下降（TensorBoard）
+- [ ] 无 OOM 或 CUDA 错误
+
+### 训练后检查清单
+
+- [ ] 检查点文件已保存（`*.pth`）
+- [ ] TensorBoard 曲线正常
+- [ ] 评估模型性能（`evaluate_checkpoint.py`）
+- [ ] 备份重要模型
+- [ ] 记录最佳配置
+
+### 推荐设置
+
+**1. 数据集选择**
+- 快速验证: B26A
+- 最终模型: all_training_data
+- 泛化测试: 多数据集交叉验证
+
+**2. 训练参数**
+- Batch size: 8-16 (根据GPU显存调整)
+- Learning rate: 2e-4 (scratch), 7.5e-5 (finetune)
+- Epochs: 200-400 (B26A), 400-500 (all_training_data)
+- 扰动范围: 10°/0.5m（推荐）
+
+**3. 版本管理**
+使用有意义的版本号：
+- `v1`: 基线实验
+- `v2_lr1e4`: 学习率调优
+- `v3_z5`: Z分辨率实验
+- `v4_rotation`: Rotation-only模式
+
+**4. 日志管理**
+- 定期检查训练进度（每50-100 epochs）
+- 保存重要检查点到独立目录
+- 定期清理和归档旧日志
+
+**5. 从小到大**
+1. 先用B26A验证配置正确（1-2小时）
+2. 再用all_training_data训练最终模型（数小时）
+3. 最后进行泛化测试
+
+## 快速命令备忘
+
+```bash
+# ============ 启动训练 ============
+# B26A 数据集（快速验证）
+bash start_training.sh B26A v1
+
+# all_training_data 数据集（完整训练）
+bash start_training.sh all v1
+
+# 批量实验（配置文件驱动）
+bash batch_train.sh configs/batch_train_5deg.yaml          # Z分辨率对比
+bash batch_train.sh configs/batch_train_lr_ablation.yaml   # 学习率消融
+
+# 自定义配置
+bash train_universal.sh scratch \
+  --dataset_root /path/to/data \
+  --cuda_device 0 \
+  --angle_range_deg 10 \
+  --trans_range 0.5
+
+# ============ 监控训练 ============
+# GPU 状态
+nvidia-smi -l 1
+
+# 训练进程
+ps aux | grep train_kitti
+
+# 实时日志
+tail -f logs/B26A/model_small_10deg_v1/train.log
+
+# TensorBoard
+tensorboard --logdir logs/B26A/ --port 6006
+
+# ============ 停止训练 ============
+bash stop_training.sh
+# 或
+pkill -f train_kitti
+
+# ============ 检查点管理 ============
+# 查找最新检查点
+find logs/B26A/model_small_10deg_v1/ -name "*.pth" | sort -V | tail -1
+
+# 评估检查点
+python evaluate_checkpoint.py \
+    --ckpt_path logs/.../ckpt_400.pth \
+    --dataset_root /path/to/data
+
+# ============ 分析工具 ============
+# 分析训练性能
+bash utils/scripts/quick_analyze.sh 5deg --skip-test
+
+# 生成完整报告
+python utils/scripts/analyze_experiments.py --config utils/configs/experiment_config.yaml
+```
+
+## 批量训练配置文件详解
+
+### 配置文件结构（v2.1+ 支持 defaults 继承）
+
+配置文件使用YAML格式，包含三部分：全局配置、默认参数（v2.1+）和实验组配置。
+
+#### 1. 全局配置
+
+```yaml
+global:
+  dry_run: false                 # 仅打印命令不执行
+  batch_log_dir: "logs"          # 批量日志目录
+  wait_between_experiments: 10   # 实验间等待（秒）
+```
+
+#### 2. 默认参数（v2.1+ 新增）
+
+所有实验继承的公共参数，消除重复配置：
+
+```yaml
+defaults:
+  env: {}                        # 默认环境变量
+  
+  params:
+    angle_range_deg: 5          # 所有实验使用5度扰动
+    trans_range: 0.3
+    batch_size: 16              # 所有实验使用batch=16
+    learning_rate: null
+    use_ddp: true               # 所有实验使用DDP
+    foreground: true
+    no_tensorboard: true
+    # ... 其他公共参数
+```
+
+#### 3. 实验配置（只需指定差异化参数）
+
+每个实验只需指定与 `defaults` 不同的参数：
+
+```yaml
+experiments:
+  - name: "z=5 (5deg)"          # 显示名称
+    description: "实验描述"      # 可选
+    dataset: "B26A"              # 必需
+    version: "v4-z5"             # 必需
+    env:
+      BEV_ZBOUND_STEP: 4.0       # 实验特定环境变量
+    # params 自动继承 defaults（无需重复）
+  
+  - name: "z=5 bs=32 (5deg)"
+    dataset: "B26A"
+    version: "v4-z5-bs32"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      batch_size: 32             # 覆盖defaults中的16
+```
+
+**参数继承规则**:
+- 实验首先继承 `defaults` 中的所有 `env` 和 `params`
+- 实验中指定的参数会覆盖 `defaults` 中的同名参数
+- 优先级：`experiment.params` > `defaults.params`
+
+### 参数完整列表
+
+| 参数路径 | 类型 | 默认值 | 对应命令行 | 说明 |
+| --- | --- | --- | --- | --- |
+| `global.dry_run` | bool | false | - | 仅打印命令 |
+| `global.wait_between_experiments` | int | 10 | - | 实验间等待 |
+| `dataset` | str | - | 位置参数1 | 数据集名称 |
+| `version` | str | - | 位置参数2 | 版本标签 |
+| `env.BEV_ZBOUND_STEP` | float | - | 环境变量 | BEV Z步长 |
+| `params.angle_range_deg` | float | null | `--angle` | 旋转扰动 |
+| `params.trans_range` | float | null | `--trans` | 平移扰动 |
+| `params.batch_size` | int | null | `--bs` | Batch size |
+| `params.learning_rate` | float | null | `--lr` | 学习率 |
+| `params.use_ddp` | bool | false | `--ddp` | DDP模式 |
+| `params.ddp_gpus` | int | null | `--ddp N` | DDP GPU数 |
+| `params.use_compile` | bool | false | `--compile` | torch.compile |
+| `params.rotation_only` | bool | false | `--rotation_only` | 仅旋转 |
+| `params.foreground` | bool | false | `--fg` | 前台执行 |
+| `params.no_tensorboard` | bool | false | `--no-tb` | 不启动TB |
+| `params.tensorboard_port` | int | null | `--tb_port` | TB端口 |
+| `params.nnodes` | int | null | `--nnodes` | 机器数 |
+| `params.node_rank` | int | null | `--node_rank` | 机器编号 |
+| `params.master_addr` | str | null | `--master_addr` | Master IP |
+| `params.master_port` | int | null | `--master_port` | Master端口 |
+
+**注意**: `null` 表示使用 `start_training.sh` 的默认值。
+
+### 典型配置场景（使用 defaults 继承）
+
+#### 场景1: Z分辨率消融（最简配置）
+
+```yaml
+defaults:
+  params:
+    angle_range_deg: 5          # 公共参数
+    use_ddp: true
+    foreground: true
+    no_tensorboard: true
+
+experiments:
+  - name: "z=1"
+    dataset: "B26A"
+    version: "v4-z1"
+    env:
+      BEV_ZBOUND_STEP: 20.0     # 只需指定差异
+
+  - name: "z=5"
+    dataset: "B26A"
+    version: "v4-z5"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+
+  - name: "z=10"
+    dataset: "B26A"
+    version: "v4-z10"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+```
+
+**优势**: 3个实验配置从原来的45行缩减到15行。
+
+#### 场景2: 学习率消融
+
+```yaml
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0        # 固定z=5
+  params:
+    angle_range_deg: 5
+    use_ddp: true
+    batch_size: 16
+    foreground: true
+    no_tensorboard: true
+
+experiments:
+  - name: "lr=1e-4"
+    dataset: "B26A"
+    version: "v5-lr1e4"
+    params:
+      learning_rate: 0.0001     # 只覆盖learning_rate
+
+  - name: "lr=2e-4"
+    dataset: "B26A"
+    version: "v5-lr2e4"
+    params:
+      learning_rate: 0.0002
+```
+
+**优势**: 每个实验只需3行，清晰展示实验变量。
+
+#### 场景3: Rotation-Only vs 完整标定
+
+```yaml
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+  params:
+    angle_range_deg: 5
+    trans_range: 0.3
+    use_ddp: true
+    rotation_only: false        # 默认完整标定
+    foreground: true
+    no_tensorboard: true
+
+experiments:
+  - name: "完整标定"
+    dataset: "B26A"
+    version: "v1-full"
+    # 完全使用defaults
+
+  - name: "仅旋转"
+    dataset: "B26A"
+    version: "v1-rotation"
+    params:
+      angle_range_deg: 10       # 覆盖部分参数
+      rotation_only: true
+```
+
+**优势**: "完整标定"实验仅需4行，无需重复公共参数。
+
+#### 场景4: 多数据集对比
+
+```yaml
+experiments:
+  - name: "B26A"
+    dataset: "B26A"
+    version: "v1"
+    params:
+      use_ddp: true
+
+  - name: "全量数据"
+    dataset: "all"
+    version: "v1"
+    params:
+      use_ddp: true
+```
+
+### 使用技巧
+
+#### 1. 快速验证配置
+
+```bash
+# 使用 --dry-run 查看会执行的命令
+bash batch_train.sh --dry-run configs/my_config.yaml
+
+# 检查输出的命令是否符合预期
+```
+
+#### 2. 参数省略
+
+只指定需要修改的参数，其他使用默认值：
+
+```yaml
+experiments:
+  - dataset: "B26A"
+    version: "v1"
+    params:
+      use_ddp: true
+      foreground: true
+      no_tensorboard: true
+      # 其他参数使用默认值
+```
+
+#### 3. 环境变量使用
+
+```yaml
+env:
+  BEV_ZBOUND_STEP: 2.0           # 必须匹配训练时的值
+  CUSTOM_VAR: "value"            # 可以设置任何环境变量
+```
+
+#### 4. 版本命名规范
+
+建议使用清晰的版本标识：
+
+```yaml
+version: "v4-z5"        # v4版本, z=5配置
+version: "v5-lr1e4"     # v5版本, lr=1e-4
+version: "v1-rotation"  # v1版本, rotation-only模式
+```
+
+#### 5. TensorBoard 监控（v2.1+ 智能管理）
+
+`batch_train.sh` 会自动为每个实验启动 TensorBoard：
+
+**特性**:
+- ✅ **精确监控**: 只监控当前实验的具体目录
+- ✅ **自动推导**: 根据 dataset/version/angle 自动推导目录
+- ✅ **清晰聚焦**: 不受其他实验干扰
+- ✅ **日志分离**: TensorBoard 日志存放在实验目录中
+
+**示例**:
+
+```yaml
+defaults:
+  params:
+    angle_range_deg: 5
+
+experiments:
+  - name: "z=1"
+    dataset: "B26A"
+    version: "v4-z1"
+    # TensorBoard 监控: logs/B26A/model_small_5deg_v4-z1/
+  
+  - name: "z=5"
+    dataset: "B26A"
+    version: "v4-z5"
+    # TensorBoard 监控: logs/B26A/model_small_5deg_v4-z5/
+```
+
+**优化前** (❌ 错误):
+- 监控 `logs/B26A/`（整个数据集）
+- 同时显示所有实验曲线
+- 难以聚焦当前训练
+
+**优化后** (✅ 正确):
+- 监控 `logs/B26A/model_small_5deg_v4-z1/`（具体实验）
+- 只显示当前实验曲线
+- 清晰聚焦，实时监控
+
+**禁用 TensorBoard**:
+
+如果不需要实时监控，可在 defaults 中设置：
+
+```yaml
+defaults:
+  params:
+    no_tensorboard: true
+```
+
+### 常见错误
+
+#### 错误1: YAML语法错误
+
+```yaml
+# 错误: 缩进不正确
+experiments:
+- name: "exp1"
+  params:
+    use_ddp: true
+```
+
+```yaml
+# 正确: 使用2空格缩进
+experiments:
+  - name: "exp1"
+    params:
+      use_ddp: true
+```
+
+#### 错误2: 布尔值格式
+
+```yaml
+# 错误: 使用字符串
+use_ddp: "true"
+
+# 正确: 使用布尔值
+use_ddp: true
+```
+
+#### 错误3: 数值类型
+
+```yaml
+# 错误: 字符串数值
+angle_range_deg: "5"
+
+# 正确: 数值
+angle_range_deg: 5
+```
+
+## 相关文档
+
+- **数据准备**: [PREPARE_CUSTOM_DATASET.md](PREPARE_CUSTOM_DATASET.md)
+- **模型评估**: [README.md#evaluation](README.md#evaluation)
+- **性能分析**: [utils/ANALYSIS_GUIDE.md](utils/ANALYSIS_GUIDE.md)
+- **批量训练配置**: [configs/README.md](configs/README.md)
+
+## 故障排除
+
+### CUDA Out of Memory
+
+```bash
+# 减小batch size
+# 编辑 train_universal.sh，将 --batch_size 从 16 改为 8 或 4
+```
+
+### TensorBoard端口被占用
+
+```bash
+# 查看端口占用
+lsof -i :6006
+
+# 使用其他端口
+tensorboard --logdir logs/ --port 6007
+```
+
+### 训练卡住不动
+
+```bash
+# 检查GPU状态
+nvidia-smi
+
+# 检查进程
+ps aux | grep train_kitti
+
+# 查看最新日志
+tail -100 logs/B26A/model_*/train.log
+```
+
+### bev_pool编译失败
+
+```bash
+# 重新编译
+cd kitti-bev-calib/img_branch/bev_pool
+python setup.py clean
+python setup.py build_ext --inplace
+
+# 检查CUDA版本匹配
+nvcc --version
+python -c "import torch; print(torch.version.cuda)"
+```
 
 ---
 
-**更新时间**: 2026-03-01（添加新脚本说明）  
-**原始版本**: v1.0 (2026-01-28)  
-**当前版本**: v1.1
+**创建日期**: 2026-03-09  
+**适用版本**: start_training.sh + train_universal.sh + batch_train.sh  
+**推荐工作流**: start_training.sh → 监控 → 评估 → 分析

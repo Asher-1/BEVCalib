@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument("--target_width", type=int, default=None, help="目标图像宽度 (默认: KITTI=704, 自定义4K=640)")
     parser.add_argument("--target_height", type=int, default=None, help="目标图像高度 (默认: KITTI=256, 自定义4K=360)")
     # 数据利用率校验参数
-    parser.add_argument("--validate_data", type=int, default=1, help="是否在训练前验证数据利用率 (1=启用, 0=禁用)")
+    parser.add_argument("--validate_data", type=int, default=0, help="是否在训练前验证数据利用率 (1=启用, 0=禁用)")
     parser.add_argument("--validate_sample_ratio", type=float, default=0.1, help="数据验证采样比例 (0.0-1.0)")
     parser.add_argument("--min_point_utilization", type=float, default=0.5, help="最低点云利用率阈值 (0.0-1.0)")
     parser.add_argument("--min_valid_ratio", type=float, default=0.9, help="最低有效帧比例阈值 (0.0-1.0)")
@@ -85,6 +85,8 @@ def parse_args():
     parser.add_argument("--enable_vis", type=int, default=1, help="是否启用点云投影可视化 (1=启用, 0=禁用)")
     parser.add_argument("--enable_ckpt_eval", type=int, default=1, help="是否在保存checkpoint时进行评估 (1=启用, 0=禁用)")
     parser.add_argument("--compile", type=int, default=0, help="使用 torch.compile 加速模型 (1=启用, 0=禁用)")
+    parser.add_argument("--rotation_only", type=int, default=0,
+                        help="仅优化旋转 (1=仅旋转, 0=旋转+平移同时优化)")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
@@ -348,6 +350,7 @@ def main():
     deformable_choise = args.deformable > 0
     bev_encoder_choise = args.bev_encoder > 0
     xyz_only_choise = args.xyz_only > 0
+    rotation_only = args.rotation_only > 0
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     torch.backends.cudnn.benchmark = True
@@ -355,18 +358,24 @@ def main():
     img_shape = (target_size[1], target_size[0])
     if is_main:
         tprint(f"网络输入尺寸 (H, W): {img_shape}")
+        tprint(f"优化模式: {'仅旋转 (rotation only)' if rotation_only else '旋转+平移 (translation+rotation)'}")
     
     model = BEVCalib(
         deformable=deformable_choise,
         bev_encoder=bev_encoder_choise,
-        img_shape=img_shape
+        img_shape=img_shape,
+        rotation_only=rotation_only,
     ).to(device)
 
     if args.pretrain_ckpt is not None:
         state_dict = torch.load(args.pretrain_ckpt, map_location=device)
-        model.load_state_dict(state_dict['model_state_dict'], strict=True)
+        missing, unexpected = model.load_state_dict(state_dict['model_state_dict'], strict=False)
         if is_main:
             tprint(f"Load pretrain model from {args.pretrain_ckpt}")
+            if missing:
+                tprint(f"  Missing keys (new layers): {missing}")
+            if unexpected:
+                tprint(f"  Unexpected keys (skipped): {unexpected}")
     
     if args.compile > 0:
         try:
@@ -420,7 +429,23 @@ def main():
     
     best_train = {'epoch': -1, 'loss': float('inf'), 'trans': float('inf'), 'rot': float('inf'), 'errors': None}
     best_val = {'epoch': -1, 'loss': float('inf'), 'trans': float('inf'), 'rot': float('inf'), 'errors': None}
+    last_epoch_train_errors = None
+    last_epoch_val_errors = None
     checkpoint_records = []
+    
+    if is_main:
+        tprint("=" * 80)
+        tprint("Loss Calculation Formula:")
+        tprint("  total_loss = w_rot * rotation_loss(radians) + w_pc * PC_reproj_loss + w_quat * quat_norm_loss")
+        tprint("  Default weights: w_rot=0.5, w_pc=0.5, w_quat=0.5")
+        tprint("")
+        tprint("Log Terminology:")
+        tprint("  • rotation_loss: displayed in degrees (°) for readability, but total_loss uses radians")
+        tprint("  • PC_reproj_loss: point cloud reprojection error")
+        tprint("  • quat_norm_loss: quaternion normalization penalty")
+        tprint("  • Pose Error - Rot: rotation error with Roll/Pitch/Yaw breakdown")
+        tprint("  • Pose Error - Trans: translation error with Forward/Lateral/Height breakdown")
+        tprint("=" * 80)
     
     for epoch in range(num_epochs):
         if train_sampler is not None:
@@ -446,7 +471,7 @@ def main():
 
             t_prep_start = time.time()
             gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
-            init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=train_noise["angle_range_deg"], trans_range=train_noise["trans_range"])
+            init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=train_noise["angle_range_deg"], trans_range=train_noise["trans_range"], rotation_only=rotation_only)
             resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
             if xyz_only_choise:
                 pcs_np = np.array(pcs)[:, :, :3]
@@ -492,9 +517,14 @@ def main():
                         train_loss[train_key] += init_loss[key].item()
 
             if batch_index % 10 == 0 and is_main:
-                tprint(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], Loss: {total_loss.item():.4f}, "
-                       f"Trans: {batch_errors['trans_error']:.4f}m (Fwd:{batch_errors['fwd_error']:.4f} Lat:{batch_errors['lat_error']:.4f} Ht:{batch_errors['ht_error']:.4f}), "
-                       f"Rot: {batch_errors['rot_error']:.2f}°")
+                if rotation_only:
+                    tprint(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], "
+                           f"Loss: {total_loss.item():.4f} (total), Rot: {batch_errors['rot_error']:.2f}°")
+                else:
+                    tprint(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], "
+                           f"Loss: {total_loss.item():.4f} (total), Trans: {batch_errors['trans_error']:.4f}m "
+                           f"(Fwd:{batch_errors['fwd_error']:.4f}m Lat:{batch_errors['lat_error']:.4f}m Ht:{batch_errors['ht_error']:.4f}m), "
+                           f"Rot: {batch_errors['rot_error']:.2f}°")
             
             if args.enable_vis > 0 and batch_index % args.vis_freq == 0 and is_main:
                 t_vis_start = time.time()
@@ -515,16 +545,22 @@ def main():
                         num_samples=args.vis_samples,
                         max_points=args.vis_points,
                         point_radius=args.vis_point_radius,
-                        debug=debug_vis
+                        debug=debug_vis,
+                        rotation_only=rotation_only,
+                        phase="Train",
+                        epoch=epoch + 1,
+                        epoch_train_errors=last_epoch_train_errors,
+                        epoch_val_errors=last_epoch_val_errors,
                     )
                     
                     vis_image_tb = prepare_image_for_tensorboard(vis_image)
                     writer.add_image('Train/Projection', vis_image_tb, global_step)
                     
-                    writer.add_scalar('Train/PoseError/trans_error_m', batch_errors['trans_error'], global_step)
-                    writer.add_scalar('Train/PoseError/fwd_error_m', batch_errors['fwd_error'], global_step)
-                    writer.add_scalar('Train/PoseError/lat_error_m', batch_errors['lat_error'], global_step)
-                    writer.add_scalar('Train/PoseError/ht_error_m', batch_errors['ht_error'], global_step)
+                    if not rotation_only:
+                        writer.add_scalar('Train/PoseError/trans_error_m', batch_errors['trans_error'], global_step)
+                        writer.add_scalar('Train/PoseError/fwd_error_m', batch_errors['fwd_error'], global_step)
+                        writer.add_scalar('Train/PoseError/lat_error_m', batch_errors['lat_error'], global_step)
+                        writer.add_scalar('Train/PoseError/ht_error_m', batch_errors['ht_error'], global_step)
                     writer.add_scalar('Train/PoseError/rot_error_deg', batch_errors['rot_error'], global_step)
                     writer.add_scalar('Train/PoseError/roll_error_deg', batch_errors['roll_error'], global_step)
                     writer.add_scalar('Train/PoseError/pitch_error_deg', batch_errors['pitch_error'], global_step)
@@ -552,29 +588,58 @@ def main():
         if is_main:
             for key in train_loss.keys():
                 train_loss[key] /= len(train_loader)
-                tprint(f"Epoch [{epoch+1}/{num_epochs}], Train Loss {key}: {train_loss[key]:.4f}")
+                if rotation_only and 'translation' in key:
+                    continue
+                # 为各个损失添加单位说明
+                if key == "total_loss":
+                    unit_str = " (weighted sum)"
+                elif key == "rotation_loss":
+                    unit_str = "° (for display; total_loss uses radians)"
+                elif key == "PC_reproj_loss":
+                    unit_str = " (point cloud reprojection)"
+                elif key == "quat_norm_loss":
+                    unit_str = " (quaternion normalization)"
+                elif key == "translation_loss":
+                    unit_str = "m"
+                else:
+                    unit_str = ""
+                
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], Train Loss {key}: {train_loss[key]:.4f}{unit_str}")
                 writer.add_scalar(f"Loss/train/{key}", train_loss[key], epoch)
             
             for key in epoch_pose_errors:
                 epoch_pose_errors[key] /= len(train_loader)
+            last_epoch_train_errors = dict(epoch_pose_errors)
             
-            tprint(f"Epoch [{epoch+1}/{num_epochs}], Train Pose Error - "
-                   f"Trans: {epoch_pose_errors['trans_error']:.4f}m "
-                   f"(Fwd:{epoch_pose_errors['fwd_error']:.4f} Lat:{epoch_pose_errors['lat_error']:.4f} Ht:{epoch_pose_errors['ht_error']:.4f}), "
-                   f"Rot: {epoch_pose_errors['rot_error']:.2f}° "
-                   f"(R:{epoch_pose_errors['roll_error']:.2f} P:{epoch_pose_errors['pitch_error']:.2f} Y:{epoch_pose_errors['yaw_error']:.2f})")
+            if rotation_only:
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], Train Pose Error - "
+                       f"Rot: {epoch_pose_errors['rot_error']:.2f}° "
+                       f"(Roll:{epoch_pose_errors['roll_error']:.2f}° Pitch:{epoch_pose_errors['pitch_error']:.2f}° Yaw:{epoch_pose_errors['yaw_error']:.2f}°)")
+            else:
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], Train Pose Error - "
+                       f"Trans: {epoch_pose_errors['trans_error']:.4f}m "
+                       f"(Fwd:{epoch_pose_errors['fwd_error']:.4f}m Lat:{epoch_pose_errors['lat_error']:.4f}m Ht:{epoch_pose_errors['ht_error']:.4f}m), "
+                       f"Rot: {epoch_pose_errors['rot_error']:.2f}° "
+                       f"(Roll:{epoch_pose_errors['roll_error']:.2f}° Pitch:{epoch_pose_errors['pitch_error']:.2f}° Yaw:{epoch_pose_errors['yaw_error']:.2f}°)")
             
-            writer.add_scalar('Epoch/train/trans_error_m', epoch_pose_errors['trans_error'], epoch)
-            writer.add_scalar('Epoch/train/fwd_error_m', epoch_pose_errors['fwd_error'], epoch)
-            writer.add_scalar('Epoch/train/lat_error_m', epoch_pose_errors['lat_error'], epoch)
-            writer.add_scalar('Epoch/train/ht_error_m', epoch_pose_errors['ht_error'], epoch)
+            if not rotation_only:
+                writer.add_scalar('Epoch/train/trans_error_m', epoch_pose_errors['trans_error'], epoch)
+                writer.add_scalar('Epoch/train/fwd_error_m', epoch_pose_errors['fwd_error'], epoch)
+                writer.add_scalar('Epoch/train/lat_error_m', epoch_pose_errors['lat_error'], epoch)
+                writer.add_scalar('Epoch/train/ht_error_m', epoch_pose_errors['ht_error'], epoch)
             writer.add_scalar('Epoch/train/rot_error_deg', epoch_pose_errors['rot_error'], epoch)
             writer.add_scalar('Epoch/train/roll_error_deg', epoch_pose_errors['roll_error'], epoch)
             writer.add_scalar('Epoch/train/pitch_error_deg', epoch_pose_errors['pitch_error'], epoch)
             writer.add_scalar('Epoch/train/yaw_error_deg', epoch_pose_errors['yaw_error'], epoch)
             
             cur_train_loss = train_loss.get('total_loss', float('inf')) if train_loss else float('inf')
-            if epoch_pose_errors['trans_error'] + epoch_pose_errors['rot_error'] * 0.1 < best_train['trans'] + best_train['rot'] * 0.1:
+            if rotation_only:
+                cur_score = epoch_pose_errors['rot_error']
+                best_score = best_train['rot']
+            else:
+                cur_score = epoch_pose_errors['trans_error'] + epoch_pose_errors['rot_error'] * 0.1
+                best_score = best_train['trans'] + best_train['rot'] * 0.1
+            if cur_score < best_score:
                 best_train.update({
                     'epoch': epoch + 1,
                     'loss': cur_train_loss,
@@ -593,6 +658,11 @@ def main():
                 'train_loss': train_loss,
                 'train_noise': train_noise,
                 'eval_noise': eval_noise,
+                'rotation_only': rotation_only,
+                'epoch_train_errors': last_epoch_train_errors,
+                'epoch_val_errors': last_epoch_val_errors,
+                'best_train': best_train,
+                'best_val': best_val,
                 'args': vars(args) 
             }, ckpt_path)
             tprint(f"Checkpoint saved to {ckpt_path}")
@@ -629,7 +699,8 @@ def main():
                         init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
                             gt_T_to_camera_np, 
                             angle_range_deg=eval_angle_range, 
-                            trans_range=eval_trans_range
+                            trans_range=eval_trans_range,
+                            rotation_only=rotation_only,
                         )
                         
                         resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
@@ -655,7 +726,6 @@ def main():
                         for i in range(len(imgs_np)):
                             sample_idx = sample_count + i
                             
-                            # 生成单样本可视化
                             vis_image = visualize_batch_projection(
                                 images=imgs_np[i:i+1],
                                 points_batch=pcs_np[i:i+1],
@@ -666,7 +736,12 @@ def main():
                                 masks=masks_np[i:i+1],
                                 num_samples=1,
                                 max_points=args.vis_points,
-                                point_radius=args.vis_point_radius
+                                point_radius=args.vis_point_radius,
+                                rotation_only=rotation_only,
+                                phase="Eval",
+                                epoch=epoch + 1,
+                                epoch_train_errors=last_epoch_train_errors,
+                                epoch_val_errors=last_epoch_val_errors,
                             )
                             
                             # 保存可视化图像
@@ -701,11 +776,12 @@ def main():
                                 for row in T_pred_np[i]:
                                     f.write(f"  {row[0]:10.6f} {row[1]:10.6f} {row[2]:10.6f} {row[3]:10.6f}\n")
                                 
-                                f.write("\nTranslation Errors (in LiDAR coordinate system):\n")
-                                f.write(f"  Total:   {errors['trans_error']:.6f} m\n")
-                                f.write(f"  X (Fwd): {errors['fwd_error']:.6f} m\n")
-                                f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
-                                f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
+                                if not rotation_only:
+                                    f.write("\nTranslation Errors (in LiDAR coordinate system):\n")
+                                    f.write(f"  Total:   {errors['trans_error']:.6f} m\n")
+                                    f.write(f"  X (Fwd): {errors['fwd_error']:.6f} m\n")
+                                    f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
+                                    f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
                                 
                                 f.write("\nRotation Errors (axis-angle):\n")
                                 f.write(f"  Total:       {errors['rot_error']:.6f} deg\n")
@@ -727,11 +803,12 @@ def main():
                     avg_errors = {key: np.mean(values) for key, values in all_errors.items()}
                     std_errors = {key: np.std(values) for key, values in all_errors.items()}
                     
-                    f.write("Average Translation Errors (in LiDAR coordinate system):\n")
-                    f.write(f"  Total:   {avg_errors['trans_error']:.6f} ± {std_errors['trans_error']:.6f} m\n")
-                    f.write(f"  X (Fwd): {avg_errors['fwd_error']:.6f} ± {std_errors['fwd_error']:.6f} m\n")
-                    f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
-                    f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
+                    if not rotation_only:
+                        f.write("Average Translation Errors (in LiDAR coordinate system):\n")
+                        f.write(f"  Total:   {avg_errors['trans_error']:.6f} ± {std_errors['trans_error']:.6f} m\n")
+                        f.write(f"  X (Fwd): {avg_errors['fwd_error']:.6f} ± {std_errors['fwd_error']:.6f} m\n")
+                        f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
+                        f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
                     
                     f.write("\nAverage Rotation Errors (axis-angle):\n")
                     f.write(f"  Total:       {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
@@ -741,11 +818,16 @@ def main():
                     f.write("\n" + "="*80 + "\n")
                 
                 avg_eval_errors = {key: np.mean(values) for key, values in all_errors.items()}
-                tprint(f"Checkpoint {epoch+1} Eval Pose Error - "
-                       f"Trans: {avg_eval_errors['trans_error']:.4f}m "
-                       f"(Fwd:{avg_eval_errors['fwd_error']:.4f} Lat:{avg_eval_errors['lat_error']:.4f} Ht:{avg_eval_errors['ht_error']:.4f}), "
-                       f"Rot: {avg_eval_errors['rot_error']:.2f}° "
-                       f"(R:{avg_eval_errors['roll_error']:.2f} P:{avg_eval_errors['pitch_error']:.2f} Y:{avg_eval_errors['yaw_error']:.2f})")
+                if rotation_only:
+                    tprint(f"Checkpoint {epoch+1} Eval Pose Error - "
+                           f"Rot: {avg_eval_errors['rot_error']:.2f}° "
+                           f"(R:{avg_eval_errors['roll_error']:.2f} P:{avg_eval_errors['pitch_error']:.2f} Y:{avg_eval_errors['yaw_error']:.2f})")
+                else:
+                    tprint(f"Checkpoint {epoch+1} Eval Pose Error - "
+                           f"Trans: {avg_eval_errors['trans_error']:.4f}m "
+                           f"(Fwd:{avg_eval_errors['fwd_error']:.4f} Lat:{avg_eval_errors['lat_error']:.4f} Ht:{avg_eval_errors['ht_error']:.4f}), "
+                           f"Rot: {avg_eval_errors['rot_error']:.2f}° "
+                           f"(R:{avg_eval_errors['roll_error']:.2f} P:{avg_eval_errors['pitch_error']:.2f} Y:{avg_eval_errors['yaw_error']:.2f})")
                 tprint(f"Checkpoint evaluation complete: {sample_count} samples saved to {ckpt_eval_dir}")
                 
                 checkpoint_records.append({
@@ -783,7 +865,7 @@ def main():
                         continue
                     imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
                     gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
-                    init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=eval_angle_range, trans_range=eval_trans_range)
+                    init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=eval_angle_range, trans_range=eval_trans_range, rotation_only=rotation_only)
                     resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
                     if xyz_only_choise:
                         pcs_np = np.array(pcs)[:, :, :3]
@@ -833,37 +915,73 @@ def main():
                             masks=masks_np,
                             num_samples=args.vis_samples,
                             max_points=args.vis_points,
-                            point_radius=args.vis_point_radius
+                            point_radius=args.vis_point_radius,
+                            rotation_only=rotation_only,
+                            phase="Val",
+                            epoch=epoch + 1,
+                            epoch_train_errors=last_epoch_train_errors,
+                            epoch_val_errors=last_epoch_val_errors,
                         )
                         
                         vis_image_tb = prepare_image_for_tensorboard(vis_image)
                         writer.add_image('Val/Projection', vis_image_tb, epoch)
 
+            # 构建验证集标签（清晰标注扰动范围）
+            val_label = f"Val[±{eval_angle_range}°, ±{eval_trans_range}m]"
+            
             for key in val_loss.keys():
                 val_loss[key] /= len(val_loader)
-                tprint(f"Epoch [{epoch+1}/{num_epochs}], {eval_angle_range}_{eval_trans_range} Validation Loss {key}: {val_loss[key]:.4f}")
+                if rotation_only and 'translation' in key:
+                    continue
+                # 为各个损失添加单位说明
+                if key == "total_loss":
+                    unit_str = " (weighted sum)"
+                elif key == "rotation_loss":
+                    unit_str = "° (for display; total_loss uses radians)"
+                elif key == "PC_reproj_loss":
+                    unit_str = " (point cloud reprojection)"
+                elif key == "quat_norm_loss":
+                    unit_str = " (quaternion normalization)"
+                elif key == "translation_loss":
+                    unit_str = "m"
+                else:
+                    unit_str = ""
+                
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Loss {key}: {val_loss[key]:.4f}{unit_str}")
                 writer.add_scalar(f"Loss/val/{key}", val_loss[key], epoch)
             
-            # 记录验证集姿态误差
             for key in val_pose_errors:
                 val_pose_errors[key] /= len(val_loader)
+            last_epoch_val_errors = dict(val_pose_errors)
             
-            tprint(f"Epoch [{epoch+1}/{num_epochs}], Val Pose Error - "
-                   f"Trans: {val_pose_errors['trans_error']:.4f}m "
-                   f"(Fwd:{val_pose_errors['fwd_error']:.4f} Lat:{val_pose_errors['lat_error']:.4f} Ht:{val_pose_errors['ht_error']:.4f}), "
-                   f"Rot: {val_pose_errors['rot_error']:.2f}° "
-                   f"(R:{val_pose_errors['roll_error']:.2f} P:{val_pose_errors['pitch_error']:.2f} Y:{val_pose_errors['yaw_error']:.2f})")
+            if rotation_only:
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Pose Error - "
+                       f"Rot: {val_pose_errors['rot_error']:.2f}° "
+                       f"(Roll:{val_pose_errors['roll_error']:.2f}° Pitch:{val_pose_errors['pitch_error']:.2f}° Yaw:{val_pose_errors['yaw_error']:.2f}°)")
+            else:
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Pose Error - "
+                       f"Trans: {val_pose_errors['trans_error']:.4f}m "
+                       f"(Fwd:{val_pose_errors['fwd_error']:.4f}m Lat:{val_pose_errors['lat_error']:.4f}m Ht:{val_pose_errors['ht_error']:.4f}m), "
+                       f"Rot: {val_pose_errors['rot_error']:.2f}° "
+                       f"(Roll:{val_pose_errors['roll_error']:.2f}° Pitch:{val_pose_errors['pitch_error']:.2f}° Yaw:{val_pose_errors['yaw_error']:.2f}°)")
             
-            writer.add_scalar('Epoch/val/trans_error_m', val_pose_errors['trans_error'], epoch)
-            writer.add_scalar('Epoch/val/fwd_error_m', val_pose_errors['fwd_error'], epoch)
-            writer.add_scalar('Epoch/val/lat_error_m', val_pose_errors['lat_error'], epoch)
-            writer.add_scalar('Epoch/val/ht_error_m', val_pose_errors['ht_error'], epoch)
+            if not rotation_only:
+                writer.add_scalar('Epoch/val/trans_error_m', val_pose_errors['trans_error'], epoch)
+                writer.add_scalar('Epoch/val/fwd_error_m', val_pose_errors['fwd_error'], epoch)
+                writer.add_scalar('Epoch/val/lat_error_m', val_pose_errors['lat_error'], epoch)
+                writer.add_scalar('Epoch/val/ht_error_m', val_pose_errors['ht_error'], epoch)
             writer.add_scalar('Epoch/val/rot_error_deg', val_pose_errors['rot_error'], epoch)
             writer.add_scalar('Epoch/val/roll_error_deg', val_pose_errors['roll_error'], epoch)
             writer.add_scalar('Epoch/val/pitch_error_deg', val_pose_errors['pitch_error'], epoch)
             writer.add_scalar('Epoch/val/yaw_error_deg', val_pose_errors['yaw_error'], epoch)
             
-            if val_pose_errors['trans_error'] + val_pose_errors['rot_error'] * 0.1 < best_val['trans'] + best_val['rot'] * 0.1:
+            if rotation_only:
+                cur_val_score = val_pose_errors['rot_error']
+                best_val_score = best_val['rot']
+            else:
+                cur_val_score = val_pose_errors['trans_error'] + val_pose_errors['rot_error'] * 0.1
+                best_val_score = best_val['trans'] + best_val['rot'] * 0.1
+            if cur_val_score < best_val_score:
                 cur_val_loss = val_loss.get('total_loss', float('inf')) if val_loss else float('inf')
                 best_val.update({
                     'epoch': epoch + 1,
@@ -881,13 +999,15 @@ def main():
 
     if is_main:
         def _fmt_err(e):
+            if rotation_only:
+                return (f"Rot: {e['rot_error']:.2f}° (R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
             return (f"{e['trans_error']:.4f}m (Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
                     f"Rot: {e['rot_error']:.2f}° (R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
 
         has_eval = checkpoint_records and any(r['eval'] is not None for r in checkpoint_records)
         best_eval_idx = -1
         if has_eval:
-            eval_scores = [(i, r['eval']['trans_error'] + r['eval']['rot_error'] * 0.1)
+            eval_scores = [(i, r['eval']['rot_error'] if rotation_only else r['eval']['trans_error'] + r['eval']['rot_error'] * 0.1)
                            for i, r in enumerate(checkpoint_records) if r['eval'] is not None]
             if eval_scores:
                 best_eval_idx = min(eval_scores, key=lambda x: x[1])[0]
@@ -901,27 +1021,25 @@ def main():
         if best_train['epoch'] > 0 and best_train['errors']:
             e = best_train['errors']
             md_lines.append(f"Best Train  (Epoch {best_train['epoch']}):")
-            md_lines.append(f"  Pose Error - Trans: {e['trans_error']:.4f}m "
-                            f"(Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
-                            f"Rot: {e['rot_error']:.2f}° "
-                            f"(R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
+            md_lines.append(f"  Pose Error - {_fmt_err(e)}")
             md_lines.append("")
 
         if best_val['epoch'] > 0 and best_val['errors']:
             e = best_val['errors']
             md_lines.append(f"Best Val    (Epoch {best_val['epoch']}):")
-            md_lines.append(f"  Pose Error - Trans: {e['trans_error']:.4f}m "
-                            f"(Fwd:{e['fwd_error']:.4f} Lat:{e['lat_error']:.4f} Ht:{e['ht_error']:.4f}), "
-                            f"Rot: {e['rot_error']:.2f}° "
-                            f"(R:{e['roll_error']:.2f} P:{e['pitch_error']:.2f} Y:{e['yaw_error']:.2f})")
+            md_lines.append(f"  Pose Error - {_fmt_err(e)}")
             md_lines.append("")
 
         if checkpoint_records:
             md_lines.append(f"Checkpoint Performance Table ({len(checkpoint_records)} checkpoints)")
             md_lines.append("")
 
-            hdr = "| Epoch | Trans(m) | Fwd(X) | Lat(Y) | Ht(Z) | Rot(°) | R | P | Y |"
-            sep = "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+            if rotation_only:
+                hdr = "| Epoch | Rot(°) | R | P | Y |"
+                sep = "| ---: | ---: | ---: | ---: | ---: |"
+            else:
+                hdr = "| Epoch | Trans(m) | Fwd(X) | Lat(Y) | Ht(Z) | Rot(°) | R | P | Y |"
+                sep = "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
 
             md_lines.append("--- Train ---")
             md_lines.append("")
@@ -929,30 +1047,45 @@ def main():
             md_lines.append(sep)
             for rec in checkpoint_records:
                 t = rec['train']
-                md_lines.append(f"| {rec['epoch']} | {t['trans_error']:.4f} | {t['fwd_error']:.4f} | {t['lat_error']:.4f} | {t['ht_error']:.4f}"
-                                f" | {t['rot_error']:.2f} | {t['roll_error']:.2f} | {t['pitch_error']:.2f} | {t['yaw_error']:.2f} |")
+                if rotation_only:
+                    md_lines.append(f"| {rec['epoch']} | {t['rot_error']:.2f} | {t['roll_error']:.2f} | {t['pitch_error']:.2f} | {t['yaw_error']:.2f} |")
+                else:
+                    md_lines.append(f"| {rec['epoch']} | {t['trans_error']:.4f} | {t['fwd_error']:.4f} | {t['lat_error']:.4f} | {t['ht_error']:.4f}"
+                                    f" | {t['rot_error']:.2f} | {t['roll_error']:.2f} | {t['pitch_error']:.2f} | {t['yaw_error']:.2f} |")
             md_lines.append("")
 
             if has_eval:
                 md_lines.append("--- Eval (Validation) ---")
                 md_lines.append("")
-                md_lines.append(hdr.rstrip(" |") + " | ΔTrans |")
-                md_lines.append(sep.rstrip(" |") + " | ---: |")
-                for i, rec in enumerate(checkpoint_records):
-                    if rec['eval'] is not None:
-                        e = rec['eval']
-                        t = rec['train']
-                        gap = e['trans_error'] - t['trans_error']
-                        best_mark = " *" if i == best_eval_idx else ""
-                        md_lines.append(f"| {rec['epoch']} | {e['trans_error']:.4f} | {e['fwd_error']:.4f} | {e['lat_error']:.4f} | {e['ht_error']:.4f}"
-                                        f" | {e['rot_error']:.2f} | {e['roll_error']:.2f} | {e['pitch_error']:.2f} | {e['yaw_error']:.2f}"
-                                        f" | {gap:+.4f}{best_mark} |")
-                    else:
-                        md_lines.append(f"| {rec['epoch']} | N/A | | | | N/A | | | | |")
+                if rotation_only:
+                    md_lines.append(hdr)
+                    md_lines.append(sep)
+                    for i, rec in enumerate(checkpoint_records):
+                        if rec['eval'] is not None:
+                            e = rec['eval']
+                            best_mark = " *" if i == best_eval_idx else ""
+                            md_lines.append(f"| {rec['epoch']} | {e['rot_error']:.2f} | {e['roll_error']:.2f} | {e['pitch_error']:.2f} | {e['yaw_error']:.2f}{best_mark} |")
+                        else:
+                            md_lines.append(f"| {rec['epoch']} | N/A | | | |")
+                else:
+                    md_lines.append(hdr.rstrip(" |") + " | ΔTrans |")
+                    md_lines.append(sep.rstrip(" |") + " | ---: |")
+                    for i, rec in enumerate(checkpoint_records):
+                        if rec['eval'] is not None:
+                            e = rec['eval']
+                            t = rec['train']
+                            gap = e['trans_error'] - t['trans_error']
+                            best_mark = " *" if i == best_eval_idx else ""
+                            md_lines.append(f"| {rec['epoch']} | {e['trans_error']:.4f} | {e['fwd_error']:.4f} | {e['lat_error']:.4f} | {e['ht_error']:.4f}"
+                                            f" | {e['rot_error']:.2f} | {e['roll_error']:.2f} | {e['pitch_error']:.2f} | {e['yaw_error']:.2f}"
+                                            f" | {gap:+.4f}{best_mark} |")
+                        else:
+                            md_lines.append(f"| {rec['epoch']} | N/A | | | | N/A | | | | |")
                 md_lines.append("")
                 if best_eval_idx >= 0:
                     md_lines.append(f"* = Best eval checkpoint (Epoch {checkpoint_records[best_eval_idx]['epoch']})")
-                md_lines.append("ΔTrans = Eval Trans - Train Trans (泛化差距, 越小越好)")
+                if not rotation_only:
+                    md_lines.append("ΔTrans = Eval Trans - Train Trans (泛化差距, 越小越好)")
 
         summary_text = "\n".join(md_lines)
         print("\n" + summary_text)

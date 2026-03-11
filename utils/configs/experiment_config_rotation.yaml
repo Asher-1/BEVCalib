@@ -1,0 +1,60 @@
+# BEVCalib 10deg Rotation实验分析配置
+# 用于分析model_small_10deg_v4-z*_rotation系列实验
+
+# 实验基本信息
+experiment:
+  name: "BEVCalib Z-Ablation (10deg Rotation) 实验分析"
+  description: "BEV高度体素分辨率消融实验 - 10度扰动 + 仅旋转模式和全模式对比"
+  dataset: "ALL_TRAINING_DATA (约90000帧)"
+  test_dataset: "test_data (1446帧, 3个sequences)"
+
+# BEVCalib项目路径
+paths:
+  bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+  logs_base: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data"
+  test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+  output_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/analysis_all_rotation"
+
+# 实验组配置
+experiments:
+  - name: "z=1 (10deg)"
+    model_dir: "model_small_10deg_v4-z1_rotation"
+    zbound_step: 20.0
+    checkpoint: "ckpt_400.pth"
+  
+  - name: "z=5 (10deg)"
+    model_dir: "model_small_10deg_v4-z5_rotation"
+    zbound_step: 4.0
+    checkpoint: "ckpt_400.pth"
+  
+  - name: "z=10 (10deg)"
+    model_dir: "model_small_10deg_v4-z10_rotation"
+    zbound_step: 2.0
+    checkpoint: "ckpt_400.pth"
+
+# 评估配置
+evaluation:
+  angle_range_deg: 10.0      # 注意：10度扰动
+  trans_range: 0.5           # 注意：0.5m扰动
+  batch_size: 8
+  rotation_only: true
+  vis_interval: 100
+  use_conda: true
+  conda_env: "bevcalib"
+  run_test_eval: false       # 默认不运行（可能已有结果）
+  parallel: false
+
+# 可视化配置
+visualization:
+  generate_plots: true
+  plot_style: "default"
+  figsize:
+    convergence: [16, 12]
+    generalization: [16, 6]
+    component: [16, 6]
+
+# 报告配置
+report:
+  generate_report: true
+  output_filename: "ROTATION_ANALYSIS_REPORT.md"
+  include_convergence_milestones: [20, 40, 80, 120, 200, 400]

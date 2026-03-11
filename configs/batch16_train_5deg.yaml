@@ -1,0 +1,116 @@
+# BEVCalib 批量训练配置文件 - Batch=16 5度扰动完整消融实验（优化版）
+# 使用 defaults 区域消除重复配置
+
+# 全局配置
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数（所有实验继承）
+# ============================================================================
+defaults:
+  env: {}
+  
+  params:
+    # 扰动参数
+    angle_range_deg: 5          # 5度扰动
+    trans_range: 0.3
+    
+    # 训练参数
+    batch_size: 16              # Batch=16
+    learning_rate: null
+    
+    # DDP配置
+    use_ddp: true
+    ddp_gpus: null
+    
+    # 训练模式
+    use_compile: false
+    rotation_only: false        # 默认完整6DoF
+    
+    # 执行模式
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+    
+    # 多机DDP
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+# ============================================================================
+# 实验组配置
+# ============================================================================
+experiments:
+  # ============ Z分辨率消融（z=1/5/10） ============
+  - name: "z=1 (5deg, bs=16)"
+    description: "Z步长20.0, 5度扰动, batch=16"
+    dataset: "B26A"
+    version: "v4-z1"
+    env:
+      BEV_ZBOUND_STEP: 20.0
+
+  - name: "z=5 (5deg, bs=16)"
+    description: "Z步长4.0, 5度扰动, batch=16"
+    dataset: "B26A"
+    version: "v4-z5"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+
+  - name: "z=10 (5deg, bs=16)"
+    description: "Z步长2.0, 5度扰动, batch=16"
+    dataset: "B26A"
+    version: "v4-z10"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+
+  # ============ Rotation-Only 对比（z=5） ============
+  - name: "z=5 rotation-only (5deg, bs=16)"
+    description: "仅优化旋转，不优化平移"
+    dataset: "B26A"
+    version: "v4-z5-rotation"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      rotation_only: true       # 覆盖defaults中的false
+
+  # ============ 学习率消融（z=5） ============
+  - name: "z=5 lr=1e-3 (5deg, bs=16)"
+    description: "学习率1e-3"
+    dataset: "B26A"
+    version: "v4-z5-lr1e3"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      learning_rate: 1e-3
+
+  - name: "z=5 lr=5e-4 (5deg, bs=16)"
+    description: "学习率5e-4"
+    dataset: "B26A"
+    version: "v4-z5-lr5e4"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      learning_rate: 5e-4
+
+  # ============ Batch Size 对比（z=5） ============
+  - name: "z=5 bs=32 (5deg)"
+    description: "更大Batch Size"
+    dataset: "B26A"
+    version: "v4-z5-bs32"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      batch_size: 32            # 覆盖defaults中的16
+
+  - name: "z=5 bs=8 (5deg)"
+    description: "更小Batch Size"
+    dataset: "B26A"
+    version: "v4-z5-bs8"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      batch_size: 8
