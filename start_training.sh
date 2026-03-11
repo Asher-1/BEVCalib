@@ -22,6 +22,7 @@
 #   --bs N                 batch size (默认: 16)
 #   --lr LR                初始学习率 (默认: 使用模型默认值)
 #   --fg                   前台阻塞执行 (不使用nohup, 输出到终端, Ctrl+C可停止)
+#   --rotation_only        仅优化旋转, 不优化平移 (平移使用设计值)
 #   --no-tb                不自动启动 TensorBoard
 #   --tb_port PORT         TensorBoard端口 (默认: 自动检测空闲端口, 起始6006)
 #
@@ -188,6 +189,7 @@ DDP_TRANS="0.3"
 BATCH_SIZE="16"
 LEARNING_RATE="1e-4"
 FOREGROUND=0
+ROTATION_ONLY=""
 ENABLE_TB=1
 TB_PORT=""
 NNODES=""
@@ -233,6 +235,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fg|--foreground)
             FOREGROUND=1
+            shift
+            ;;
+        --rotation_only)
+            ROTATION_ONLY="--rotation_only"
             shift
             ;;
         --no-tb|--no-tensorboard)
@@ -294,7 +300,7 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo ""
-            echo "可用选项: --ddp [N], --fg, --compile, --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
+            echo "可用选项: --ddp [N], --fg, --compile, --rotation_only, --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
             echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
             echo "          --rdzv_timeout SECONDS"
             exit 1
@@ -579,6 +585,7 @@ _print_row "Angle Range:"   "±${DDP_ANGLE}°"
 _print_row "Trans Range:"   "${DDP_TRANS}m"
 [ -n "$LEARNING_RATE" ] && \
 _print_row "Learning Rate:" "$LEARNING_RATE"
+_print_row "Rotation Only:" "$([ -n "$ROTATION_ONLY" ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
 _print_row "Execution:"     "$([ "$FOREGROUND" -eq 1 ] && echo 'Foreground (Ctrl+C to stop)' || echo 'Background (nohup)')"
 _print_row "TensorBoard:"   "$([ "$ENABLE_TB" -eq 1 ] && echo 'auto-start' || echo 'disabled (--no-tb)')"
 if [ "$USE_DDP" -eq 1 ] && [ "$NNODES" -gt 1 ]; then
@@ -753,6 +760,7 @@ if [ "$USE_DDP" -eq 1 ]; then
         --rdzv_timeout $RDZV_TIMEOUT \
         $MULTI_NODE_ARGS \
         $USE_COMPILE \
+        $ROTATION_ONLY \
         $LR_ARG"
 
     if [ "$FOREGROUND" -eq 1 ]; then
@@ -806,6 +814,7 @@ else
         --batch_size $BATCH_SIZE \
         --log_suffix small_10deg_${VERSION} \
         $USE_COMPILE \
+        $ROTATION_ONLY \
         $LR_ARG"
 
     TRAIN_CMD_1="bash train_universal.sh scratch \
@@ -817,6 +826,7 @@ else
         --batch_size $BATCH_SIZE \
         --log_suffix small_5deg_${VERSION} \
         $USE_COMPILE \
+        $ROTATION_ONLY \
         $LR_ARG"
 
     if [ "$FOREGROUND" -eq 1 ]; then

@@ -27,6 +27,8 @@ def parse_args():
     parser.add_argument("--use_custom_dataset", type=int, default=0, help="使用自定义数据集模式 (1=是, 0=否)")
     parser.add_argument("--target_width", type=int, default=None, help="目标图像宽度")
     parser.add_argument("--target_height", type=int, default=None, help="目标图像高度")
+    parser.add_argument("--rotation_only", type=int, default=0,
+                        help="仅优化旋转 (1=仅旋转, 0=旋转+平移同时优化)")
     return parser.parse_args()
 
 
@@ -122,6 +124,7 @@ def rotation_matrix_to_euler_xyz(R):
 def main():
     args = parse_args()
     xyz_only_choise = args.xyz_only > 0
+    rotation_only = args.rotation_only > 0
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_dir = os.path.join(args.log_dir, timestamp)
@@ -167,11 +170,12 @@ def main():
     model = BEVCalib(
         deformable=False,      
         bev_encoder=True,
-        img_shape=img_shape
+        img_shape=img_shape,
+        rotation_only=rotation_only,
     ).to(device)
 
     ckpt = torch.load(args.ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
 
     total_losses = []
@@ -193,7 +197,7 @@ def main():
         with torch.no_grad():
             for b_idx, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(loader):
                 gt_T_to_camera = np.array(gt_T_to_camera).astype(np.float32)
-                init_T_to_camera, ang_err, trans_err = generate_single_perturbation_from_T(gt_T_to_camera, angle_range_deg=eval_angle, trans_range=eval_trans_range)
+                init_T_to_camera, ang_err, trans_err = generate_single_perturbation_from_T(gt_T_to_camera, angle_range_deg=eval_angle, trans_range=eval_trans_range, rotation_only=rotation_only)
                 resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
                 if xyz_only_choise:
                     pcs = np.array(pcs)[:, :, :3]

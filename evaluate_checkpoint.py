@@ -12,6 +12,7 @@ import numpy as np
 import cv2
 import os
 import sys
+import re
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -26,6 +27,125 @@ from visualization import (
     visualize_batch_projection,
     compute_pose_errors
 )
+
+
+def _parse_train_log_errors(ckpt_path, target_epoch, existing_train, existing_val):
+    """
+    从 train.log 中解析指定 epoch 的 train/val 误差。
+    搜索路径: checkpoint所在目录向上查找 train.log。
+    """
+    if not isinstance(target_epoch, int) or target_epoch <= 0:
+        return existing_train, existing_val
+
+    search_dir = os.path.dirname(os.path.abspath(ckpt_path))
+    log_path = None
+    for _ in range(5):
+        candidate = os.path.join(search_dir, 'train.log')
+        if os.path.isfile(candidate):
+            log_path = candidate
+            break
+        parent = os.path.dirname(search_dir)
+        if parent == search_dir:
+            break
+        search_dir = parent
+
+    if log_path is None:
+        return existing_train, existing_val
+
+    train_errors = existing_train
+    val_errors = existing_val
+
+    epoch_tag = f"Epoch [{target_epoch}/"
+
+    # Patterns:
+    # Train Pose Error - Trans: 0.0123m (Fwd:0.005m Lat:0.004m Ht:0.003m), Rot: 0.15° (Roll:0.05° ...
+    # Train Pose Error - Rot: 0.15° (Roll:0.05° Pitch:0.08° Yaw:0.02°)
+    # Val[±10°, ±0.3m] Pose Error - (same as above)
+    rot_only_pat = re.compile(
+        r'Pose Error - Rot:\s*([\d.]+).*Roll:([\d.]+).*Pitch:([\d.]+).*Yaw:([\d.]+)')
+    full_pat = re.compile(
+        r'Pose Error - Trans:\s*([\d.]+)m\s*\(Fwd:([\d.]+).*?Lat:([\d.]+).*?Ht:([\d.]+).*?'
+        r'Rot:\s*([\d.]+).*?Roll:([\d.]+).*?Pitch:([\d.]+).*?Yaw:([\d.]+)')
+
+    def _build_errors(m, is_full):
+        if is_full:
+            return {
+                'trans_error': float(m.group(1)), 'fwd_error': float(m.group(2)),
+                'lat_error': float(m.group(3)), 'ht_error': float(m.group(4)),
+                'rot_error': float(m.group(5)), 'roll_error': float(m.group(6)),
+                'pitch_error': float(m.group(7)), 'yaw_error': float(m.group(8)),
+            }
+        return {
+            'trans_error': 0.0, 'fwd_error': 0.0, 'lat_error': 0.0, 'ht_error': 0.0,
+            'rot_error': float(m.group(1)), 'roll_error': float(m.group(2)),
+            'pitch_error': float(m.group(3)), 'yaw_error': float(m.group(4)),
+        }
+
+    # Also parse "Checkpoint N Eval Pose Error" lines
+    ckpt_eval_pat = re.compile(
+        r'Checkpoint\s+(\d+)\s+Eval Pose Error\s*-\s*Rot:\s*([\d.]+).*?'
+        r'R:([\d.]+)\s+P:([\d.]+)\s+Y:([\d.]+)')
+
+    # Collect nearest val errors as fallback
+    last_val_errors = None
+    last_val_epoch = -1
+
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                # Match exact epoch
+                if epoch_tag in line:
+                    is_train = 'Train Pose Error' in line
+                    is_val = 'Val' in line and 'Pose Error' in line
+                    if is_train or is_val:
+                        m_full = full_pat.search(line)
+                        m_rot = rot_only_pat.search(line)
+                        if m_full:
+                            errs = _build_errors(m_full, True)
+                        elif m_rot:
+                            errs = _build_errors(m_rot, False)
+                        else:
+                            continue
+
+                        if is_train and train_errors is None:
+                            train_errors = errs
+                            print(f"   (从 train.log 解析 Epoch {target_epoch} Train errors)")
+                        elif is_val and val_errors is None:
+                            val_errors = errs
+                            print(f"   (从 train.log 解析 Epoch {target_epoch} Val errors)")
+
+                # Match checkpoint eval line
+                m_ckpt = ckpt_eval_pat.search(line)
+                if m_ckpt and int(m_ckpt.group(1)) == target_epoch and val_errors is None:
+                    val_errors = {
+                        'trans_error': 0.0, 'fwd_error': 0.0, 'lat_error': 0.0, 'ht_error': 0.0,
+                        'rot_error': float(m_ckpt.group(2)), 'roll_error': float(m_ckpt.group(3)),
+                        'pitch_error': float(m_ckpt.group(4)), 'yaw_error': float(m_ckpt.group(5)),
+                    }
+                    print(f"   (从 train.log 解析 Epoch {target_epoch} Checkpoint Eval errors 作为 Val)")
+
+                # Track the latest val error seen (any epoch) as fallback
+                if 'Val' in line and 'Pose Error' in line:
+                    ep_match = re.search(r'Epoch\s*\[(\d+)/', line)
+                    if ep_match:
+                        ep_num = int(ep_match.group(1))
+                        m_f = full_pat.search(line)
+                        m_r = rot_only_pat.search(line)
+                        if m_f:
+                            last_val_errors = _build_errors(m_f, True)
+                            last_val_epoch = ep_num
+                        elif m_r:
+                            last_val_errors = _build_errors(m_r, False)
+                            last_val_epoch = ep_num
+    except Exception as e:
+        print(f"   [WARN] 解析 train.log 失败: {e}")
+
+    # Fallback: use the latest val errors from any previous epoch
+    if val_errors is None and last_val_errors is not None and last_val_epoch > 0:
+        val_errors = last_val_errors
+        print(f"   (使用最近的 Val 误差: Epoch {last_val_epoch})")
+
+    return train_errors, val_errors
 
 def make_collate_fn(target_size):
     """创建 collate 函数"""
@@ -105,15 +225,55 @@ def evaluate_checkpoint(args):
     epoch = checkpoint.get('epoch', 'unknown')
     print(f"   Epoch: {epoch}")
     
+    # 确定 rotation_only 设置
+    if args.rotation_only == -1:
+        if 'rotation_only' in checkpoint:
+            rotation_only = checkpoint['rotation_only']
+        elif 'optimize_translation' in checkpoint:
+            rotation_only = not checkpoint['optimize_translation']
+        else:
+            rotation_only = False
+        print(f"   rotation_only: {rotation_only} (从checkpoint读取)")
+    else:
+        rotation_only = args.rotation_only > 0
+    print(f"   优化模式: {'仅旋转 (rotation-only)' if rotation_only else '旋转+平移'}")
+    
+    # 读取 checkpoint 中保存的 epoch 级别 train/val 误差 (用于可视化信息栏)
+    ckpt_train_errors = checkpoint.get('epoch_train_errors', None)
+    ckpt_val_errors = checkpoint.get('epoch_val_errors', None)
+    ckpt_best_train = checkpoint.get('best_train', None)
+    ckpt_best_val = checkpoint.get('best_val', None)
+    
+    # 优先使用 epoch_train/val_errors，备选 best_train/val
+    if ckpt_train_errors is None and ckpt_best_train is not None and ckpt_best_train.get('errors'):
+        ckpt_train_errors = ckpt_best_train['errors']
+    if ckpt_val_errors is None and ckpt_best_val is not None and ckpt_best_val.get('errors'):
+        ckpt_val_errors = ckpt_best_val['errors']
+    
+    # 回退: 尝试从同目录下的 train.log 解析最后一个 epoch 的 train/val 误差
+    if ckpt_train_errors is None or ckpt_val_errors is None:
+        ckpt_train_errors, ckpt_val_errors = _parse_train_log_errors(
+            args.ckpt_path, epoch, ckpt_train_errors, ckpt_val_errors)
+    
+    if ckpt_train_errors:
+        print(f"   Train errors: Rot {ckpt_train_errors.get('rot_error', -1):.4f}deg")
+    if ckpt_val_errors:
+        print(f"   Val errors: Rot {ckpt_val_errors.get('rot_error', -1):.4f}deg")
+    
     # 创建模型
     print(f"\n2. 初始化模型（图像尺寸: {args.target_width}x{args.target_height}）...")
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
-        img_shape=(args.target_height, args.target_width)
+        img_shape=(args.target_height, args.target_width),
+        rotation_only=rotation_only,
     ).to(device)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if missing:
+        print(f"   Missing keys: {missing}")
+    if unexpected:
+        print(f"   Unexpected keys (skipped): {unexpected}")
     model.eval()
     print(f"   ✓ 模型加载完成")
     
@@ -182,7 +342,8 @@ def evaluate_checkpoint(args):
             init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
                 gt_T_to_camera_np,
                 angle_range_deg=args.angle_range_deg,
-                trans_range=args.trans_range
+                trans_range=args.trans_range,
+                rotation_only=rotation_only,
             )
             
             resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
@@ -224,6 +385,11 @@ def evaluate_checkpoint(args):
                         num_samples=1,
                         max_points=args.vis_points,
                         point_radius=args.vis_point_radius,
+                        rotation_only=rotation_only,
+                        phase="Eval",
+                        epoch=epoch if isinstance(epoch, int) else -1,
+                        epoch_train_errors=ckpt_train_errors,
+                        epoch_val_errors=ckpt_val_errors,
                     )
                     vis_image_path = os.path.join(eval_dir, f"sample_{sample_idx:04d}_projection.png")
                     cv2.imwrite(vis_image_path, vis_image)
@@ -259,11 +425,12 @@ def evaluate_checkpoint(args):
                     for row in T_pred_np[i]:
                         f.write(f"  {row[0]:10.6f} {row[1]:10.6f} {row[2]:10.6f} {row[3]:10.6f}\n")
                     
-                    f.write("\nTranslation Errors (in LiDAR coordinate system):\n")
-                    f.write(f"  Total:   {errors['trans_error']:.6f} m\n")
-                    f.write(f"  X (Fwd): {errors['fwd_error']:.6f} m\n")
-                    f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
-                    f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
+                    if not rotation_only:
+                        f.write("\nTranslation Errors (in LiDAR coordinate system):\n")
+                        f.write(f"  Total:   {errors['trans_error']:.6f} m\n")
+                        f.write(f"  X (Fwd): {errors['fwd_error']:.6f} m\n")
+                        f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
+                        f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
                     
                     f.write("\nRotation Errors (axis-angle):\n")
                     f.write(f"  Total:       {errors['rot_error']:.6f} deg\n")
@@ -274,7 +441,10 @@ def evaluate_checkpoint(args):
                     f.write("\n" + "="*80 + "\n\n")
                 
                 if save_vis or sample_idx % 50 == 0:
-                    print(f" ✓ (Trans: {errors['trans_error']:.4f}m, Rot: {errors['rot_error']:.2f}°)")
+                    if rotation_only:
+                        print(f" ✓ (Rot: {errors['rot_error']:.2f}°)")
+                    else:
+                        print(f" ✓ (Trans: {errors['trans_error']:.4f}m, Rot: {errors['rot_error']:.2f}°)")
             
             sample_count += len(imgs_np)
     
@@ -312,7 +482,8 @@ def evaluate_checkpoint(args):
 
         trans_keys = ['trans_error', 'fwd_error', 'lat_error', 'ht_error']
         rot_keys = ['rot_error', 'roll_error', 'pitch_error', 'yaw_error']
-        write_metric_block(f, "Translation Errors", trans_keys, "m")
+        if not rotation_only:
+            write_metric_block(f, "Translation Errors", trans_keys, "m")
         write_metric_block(f, "Rotation Errors", rot_keys, "deg")
 
         f.write("="*80 + "\n")
@@ -320,11 +491,12 @@ def evaluate_checkpoint(args):
         f.write("="*80 + "\n\n")
         f.write(f"Total samples evaluated: {sample_count}\n\n")
 
-        f.write("Average Translation Errors (in LiDAR coordinate system):\n")
-        f.write(f"  Total:   {avg_errors['trans_error']:.6f} ± {std_errors['trans_error']:.6f} m\n")
-        f.write(f"  X (Fwd): {avg_errors['fwd_error']:.6f} ± {std_errors['fwd_error']:.6f} m\n")
-        f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
-        f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
+        if not rotation_only:
+            f.write("Average Translation Errors (in LiDAR coordinate system):\n")
+            f.write(f"  Total:   {avg_errors['trans_error']:.6f} ± {std_errors['trans_error']:.6f} m\n")
+            f.write(f"  X (Fwd): {avg_errors['fwd_error']:.6f} ± {std_errors['fwd_error']:.6f} m\n")
+            f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
+            f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
 
         f.write("\nAverage Rotation Errors (axis-angle):\n")
         f.write(f"  Total:       {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
@@ -335,7 +507,7 @@ def evaluate_checkpoint(args):
 
     # ========== 生成评估可视化图表 ==========
     print(f"\n5. 生成评估图表...")
-    _generate_eval_charts(all_errors, eval_dir, sample_count, args)
+    _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_only=rotation_only)
 
     print(f"\n✓ 评估完成！")
     print(f"   - 评估样本数: {sample_count}")
@@ -344,7 +516,7 @@ def evaluate_checkpoint(args):
     print("=" * 80)
 
 
-def _generate_eval_charts(all_errors, eval_dir, sample_count, args):
+def _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_only=False):
     """生成评估误差分布可视化图表"""
     charts_dir = os.path.join(eval_dir, "charts")
     os.makedirs(charts_dir, exist_ok=True)
@@ -368,17 +540,19 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args):
         plt.close(fig)
 
     # --- Chart 1: Per-sample scatter with mean/P95/max lines ---
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
-
-    ax1.scatter(indices, trans, s=4, alpha=0.4, c='steelblue', label='Per-sample Trans')
-    ax1.axhline(np.mean(trans), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(trans):.4f}m')
-    ax1.axhline(np.median(trans), color='orange', ls='-.', lw=1.5, label=f'Median={np.median(trans):.4f}m')
-    ax1.axhline(np.percentile(trans, 95), color='red', ls=':', lw=1.5, label=f'P95={np.percentile(trans, 95):.4f}m')
-    ax1.axhline(np.max(trans), color='darkred', ls='-', lw=1, label=f'Max={np.max(trans):.4f}m')
-    ax1.set_ylabel('Translation Error (m)', fontsize=12)
-    ax1.set_title(f'Per-Sample Translation Error {title_suffix}', fontsize=13, fontweight='bold')
-    ax1.legend(fontsize=9, loc='upper right')
-    ax1.grid(True, alpha=0.3)
+    if rotation_only:
+        fig, ax2 = plt.subplots(1, 1, figsize=(16, 5))
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
+        ax1.scatter(indices, trans, s=4, alpha=0.4, c='steelblue', label='Per-sample Trans')
+        ax1.axhline(np.mean(trans), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(trans):.4f}m')
+        ax1.axhline(np.median(trans), color='orange', ls='-.', lw=1.5, label=f'Median={np.median(trans):.4f}m')
+        ax1.axhline(np.percentile(trans, 95), color='red', ls=':', lw=1.5, label=f'P95={np.percentile(trans, 95):.4f}m')
+        ax1.axhline(np.max(trans), color='darkred', ls='-', lw=1, label=f'Max={np.max(trans):.4f}m')
+        ax1.set_ylabel('Translation Error (m)', fontsize=12)
+        ax1.set_title(f'Per-Sample Translation Error {title_suffix}', fontsize=13, fontweight='bold')
+        ax1.legend(fontsize=9, loc='upper right')
+        ax1.grid(True, alpha=0.3)
 
     ax2.scatter(indices, rot, s=4, alpha=0.4, c='coral', label='Per-sample Rot')
     ax2.axhline(np.mean(rot), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(rot):.2f}°')
@@ -396,21 +570,23 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args):
     print(f"   ✓ error_scatter_all_samples.png")
 
     # --- Chart 2: Sorted error curve (CDF-like) ---
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-    sorted_trans = np.sort(trans)
-    pct = np.linspace(0, 100, len(sorted_trans))
-    ax1.plot(sorted_trans, pct, color='steelblue', lw=2)
-    ax1.axvline(np.mean(trans), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(trans):.4f}m')
-    ax1.axvline(np.percentile(trans, 95), color='red', ls=':', lw=1.5, label=f'P95={np.percentile(trans, 95):.4f}m')
-    ax1.axvline(np.max(trans), color='darkred', ls='-', lw=1, label=f'Max={np.max(trans):.4f}m')
-    ax1.set_xlabel('Translation Error (m)', fontsize=12)
-    ax1.set_ylabel('Cumulative Percentage (%)', fontsize=12)
-    ax1.set_title('Translation Error CDF', fontsize=13, fontweight='bold')
-    ax1.legend(fontsize=9)
-    ax1.grid(True, alpha=0.3)
-
+    pct = np.linspace(0, 100, sample_count)
     sorted_rot = np.sort(rot)
+    if rotation_only:
+        fig, ax2 = plt.subplots(1, 1, figsize=(8, 6))
+    else:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        sorted_trans = np.sort(trans)
+        ax1.plot(sorted_trans, pct, color='steelblue', lw=2)
+        ax1.axvline(np.mean(trans), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(trans):.4f}m')
+        ax1.axvline(np.percentile(trans, 95), color='red', ls=':', lw=1.5, label=f'P95={np.percentile(trans, 95):.4f}m')
+        ax1.axvline(np.max(trans), color='darkred', ls='-', lw=1, label=f'Max={np.max(trans):.4f}m')
+        ax1.set_xlabel('Translation Error (m)', fontsize=12)
+        ax1.set_ylabel('Cumulative Percentage (%)', fontsize=12)
+        ax1.set_title('Translation Error CDF', fontsize=13, fontweight='bold')
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+
     ax2.plot(sorted_rot, pct, color='coral', lw=2)
     ax2.axvline(np.mean(rot), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(rot):.2f}°')
     ax2.axvline(np.percentile(rot, 95), color='red', ls=':', lw=1.5, label=f'P95={np.percentile(rot, 95):.2f}°')
@@ -426,8 +602,6 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args):
     print(f"   ✓ error_cdf.png")
 
     # --- Chart 3: Histogram distribution ---
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-
     def _hist(ax, data, title, unit, color):
         ax.hist(data, bins=50, color=color, alpha=0.7, edgecolor='white', linewidth=0.5)
         ax.axvline(np.mean(data), color='red', ls='--', lw=1.5, label=f'Mean={np.mean(data):.4f}')
@@ -438,14 +612,22 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args):
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.2, axis='y')
 
-    _hist(axes[0,0], trans, 'Total Trans', 'm', '#3498db')
-    _hist(axes[0,1], fwd,   'Fwd (X)',     'm', '#2ecc71')
-    _hist(axes[0,2], lat,   'Lat (Y)',     'm', '#e67e22')
-    _hist(axes[0,3], ht,    'Ht (Z)',      'm', '#9b59b6')
-    _hist(axes[1,0], rot,   'Total Rot',   '°', '#e74c3c')
-    _hist(axes[1,1], roll,  'Roll (X)',    '°', '#1abc9c')
-    _hist(axes[1,2], pitch, 'Pitch (Y)',   '°', '#f39c12')
-    _hist(axes[1,3], yaw,   'Yaw (Z)',    '°', '#8e44ad')
+    if rotation_only:
+        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+        _hist(axes[0], rot,   'Total Rot',   '°', '#e74c3c')
+        _hist(axes[1], roll,  'Roll (X)',    '°', '#1abc9c')
+        _hist(axes[2], pitch, 'Pitch (Y)',   '°', '#f39c12')
+        _hist(axes[3], yaw,   'Yaw (Z)',    '°', '#8e44ad')
+    else:
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        _hist(axes[0,0], trans, 'Total Trans', 'm', '#3498db')
+        _hist(axes[0,1], fwd,   'Fwd (X)',     'm', '#2ecc71')
+        _hist(axes[0,2], lat,   'Lat (Y)',     'm', '#e67e22')
+        _hist(axes[0,3], ht,    'Ht (Z)',      'm', '#9b59b6')
+        _hist(axes[1,0], rot,   'Total Rot',   '°', '#e74c3c')
+        _hist(axes[1,1], roll,  'Roll (X)',    '°', '#1abc9c')
+        _hist(axes[1,2], pitch, 'Pitch (Y)',   '°', '#f39c12')
+        _hist(axes[1,3], yaw,   'Yaw (Z)',    '°', '#8e44ad')
 
     fig.suptitle(f'Error Distribution Histograms {title_suffix}', fontsize=14, fontweight='bold')
     plt.tight_layout()
@@ -453,20 +635,22 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args):
     print(f"   ✓ error_histograms.png")
 
     # --- Chart 4: Box plots ---
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-
-    bp1 = ax1.boxplot([trans, fwd, lat, ht], labels=['Total', 'Fwd(X)', 'Lat(Y)', 'Ht(Z)'],
-                       patch_artist=True, showmeans=True, meanline=True,
-                       meanprops=dict(color='red', ls='--', lw=1.5),
-                       medianprops=dict(color='orange', lw=2),
-                       flierprops=dict(marker='.', markersize=2, alpha=0.4))
-    colors1 = ['#3498db', '#2ecc71', '#e67e22', '#9b59b6']
-    for patch, color in zip(bp1['boxes'], colors1):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.6)
-    ax1.set_ylabel('Error (m)', fontsize=12)
-    ax1.set_title('Translation Error Distribution', fontsize=13, fontweight='bold')
-    ax1.grid(True, alpha=0.3, axis='y')
+    if rotation_only:
+        fig, ax2 = plt.subplots(1, 1, figsize=(8, 6))
+    else:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        bp1 = ax1.boxplot([trans, fwd, lat, ht], labels=['Total', 'Fwd(X)', 'Lat(Y)', 'Ht(Z)'],
+                           patch_artist=True, showmeans=True, meanline=True,
+                           meanprops=dict(color='red', ls='--', lw=1.5),
+                           medianprops=dict(color='orange', lw=2),
+                           flierprops=dict(marker='.', markersize=2, alpha=0.4))
+        colors1 = ['#3498db', '#2ecc71', '#e67e22', '#9b59b6']
+        for patch, color in zip(bp1['boxes'], colors1):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        ax1.set_ylabel('Error (m)', fontsize=12)
+        ax1.set_title('Translation Error Distribution', fontsize=13, fontweight='bold')
+        ax1.grid(True, alpha=0.3, axis='y')
 
     bp2 = ax2.boxplot([rot, roll, pitch, yaw], labels=['Total', 'Roll(X)', 'Pitch(Y)', 'Yaw(Z)'],
                        patch_artist=True, showmeans=True, meanline=True,
@@ -487,36 +671,39 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args):
     print(f"   ✓ error_boxplots.png")
 
     # --- Chart 5: Trans vs Rot scatter (correlation) ---
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sc = ax.scatter(trans, rot, s=8, alpha=0.4, c=indices, cmap='viridis')
-    ax.axhline(np.mean(rot), color='coral', ls='--', lw=1, alpha=0.6, label=f'Rot Mean={np.mean(rot):.2f}°')
-    ax.axvline(np.mean(trans), color='steelblue', ls='--', lw=1, alpha=0.6, label=f'Trans Mean={np.mean(trans):.4f}m')
-    ax.set_xlabel('Translation Error (m)', fontsize=13)
-    ax.set_ylabel('Rotation Error (°)', fontsize=13)
-    ax.set_title(f'Translation vs Rotation Error {title_suffix}', fontsize=14, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    cbar = plt.colorbar(sc, ax=ax)
-    cbar.set_label('Sample Index', fontsize=11)
-    _save(fig, 'error_trans_vs_rot.png')
-    print(f"   ✓ error_trans_vs_rot.png")
+    if not rotation_only:
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sc = ax.scatter(trans, rot, s=8, alpha=0.4, c=indices, cmap='viridis')
+        ax.axhline(np.mean(rot), color='coral', ls='--', lw=1, alpha=0.6, label=f'Rot Mean={np.mean(rot):.2f}°')
+        ax.axvline(np.mean(trans), color='steelblue', ls='--', lw=1, alpha=0.6, label=f'Trans Mean={np.mean(trans):.4f}m')
+        ax.set_xlabel('Translation Error (m)', fontsize=13)
+        ax.set_ylabel('Rotation Error (°)', fontsize=13)
+        ax.set_title(f'Translation vs Rotation Error {title_suffix}', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+        cbar = plt.colorbar(sc, ax=ax)
+        cbar.set_label('Sample Index', fontsize=11)
+        _save(fig, 'error_trans_vs_rot.png')
+        print(f"   ✓ error_trans_vs_rot.png")
 
     # --- Chart 6: Per-sample component stacked area ---
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10))
-
-    sorted_idx = np.argsort(trans)[::-1]
-    ax1.fill_between(range(len(sorted_idx)), ht[sorted_idx], alpha=0.6, color='#9b59b6', label='Ht(Z)')
-    ax1.fill_between(range(len(sorted_idx)), lat[sorted_idx], alpha=0.6, color='#e67e22', label='Lat(Y)')
-    ax1.fill_between(range(len(sorted_idx)), fwd[sorted_idx], alpha=0.6, color='#2ecc71', label='Fwd(X)')
-    ax1.plot(range(len(sorted_idx)), trans[sorted_idx], color='#2c3e50', lw=1.2, label='Total Trans')
-    ax1.axhline(np.mean(trans), color='red', ls='--', lw=1, label=f'Mean={np.mean(trans):.4f}m')
-    ax1.set_ylabel('Error (m)', fontsize=12)
-    ax1.set_title(f'Translation Components (sorted by total error, descending) {title_suffix}', fontsize=12, fontweight='bold')
-    ax1.legend(fontsize=9, loc='upper right')
-    ax1.grid(True, alpha=0.2)
-    ax1.set_xlim(0, len(sorted_idx)-1)
-
     sorted_idx_r = np.argsort(rot)[::-1]
+    if rotation_only:
+        fig, ax2 = plt.subplots(1, 1, figsize=(16, 5))
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10))
+        sorted_idx = np.argsort(trans)[::-1]
+        ax1.fill_between(range(len(sorted_idx)), ht[sorted_idx], alpha=0.6, color='#9b59b6', label='Ht(Z)')
+        ax1.fill_between(range(len(sorted_idx)), lat[sorted_idx], alpha=0.6, color='#e67e22', label='Lat(Y)')
+        ax1.fill_between(range(len(sorted_idx)), fwd[sorted_idx], alpha=0.6, color='#2ecc71', label='Fwd(X)')
+        ax1.plot(range(len(sorted_idx)), trans[sorted_idx], color='#2c3e50', lw=1.2, label='Total Trans')
+        ax1.axhline(np.mean(trans), color='red', ls='--', lw=1, label=f'Mean={np.mean(trans):.4f}m')
+        ax1.set_ylabel('Error (m)', fontsize=12)
+        ax1.set_title(f'Translation Components (sorted by total error, descending) {title_suffix}', fontsize=12, fontweight='bold')
+        ax1.legend(fontsize=9, loc='upper right')
+        ax1.grid(True, alpha=0.2)
+        ax1.set_xlim(0, len(sorted_idx)-1)
+
     ax2.fill_between(range(len(sorted_idx_r)), pitch[sorted_idx_r], alpha=0.6, color='#f39c12', label='Pitch(Y)')
     ax2.fill_between(range(len(sorted_idx_r)), yaw[sorted_idx_r], alpha=0.6, color='#8e44ad', label='Yaw(Z)')
     ax2.fill_between(range(len(sorted_idx_r)), roll[sorted_idx_r], alpha=0.6, color='#1abc9c', label='Roll(X)')
@@ -561,6 +748,9 @@ def main():
                             "全量评估时建议设为50-100以减少IO）")
     parser.add_argument("--use_inverse_transform", type=int, default=0, 
                        help="是否对变换矩阵取逆后再使用 (1=是, 0=否) - 用于修复投影高度偏移")
+    parser.add_argument("--rotation_only", type=int, default=0,
+                       help="仅优化旋转 (1=仅旋转, 0=旋转+平移同时优化). "
+                            "设为-1时自动从checkpoint中读取")
     
     args = parser.parse_args()
     evaluate_checkpoint(args)

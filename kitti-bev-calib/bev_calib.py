@@ -70,8 +70,10 @@ class BEVCalib(nn.Module):
                  deformable = True,
                  bev_encoder = False,
                  img_shape = None,  # (H, W) - 输入图像尺寸，动态传入
+                 rotation_only = False,
                 ):
         super(BEVCalib, self).__init__()
+        self.rotation_only = rotation_only
         self.img_branch = Cam2BEV(img_shape=img_shape)
         self.pc_branch = Lidar2BEV()
         self.bev_encoder_use = bev_encoder
@@ -106,9 +108,10 @@ class BEVCalib(nn.Module):
                                        ),
             num_layers = num_layers * 4
         )
-        self.translation_pred = nn.Linear(self.embed_dim, 3)
+        if not self.rotation_only:
+            self.translation_pred = nn.Linear(self.embed_dim, 3)
         self.rotation_pred = nn.Linear(self.embed_dim, 4)
-        self.loss_fn = realworld_loss()
+        self.loss_fn = realworld_loss(rotation_only=rotation_only)
     
     def make_deformable_transformer(self, num_layers):
         layers = []
@@ -209,7 +212,10 @@ class BEVCalib(nn.Module):
             x = self.transformer(masked_x, src_key_padding_mask=padding_mask) # B, H * W, C
             x = x.mean(dim = 1)  # B, C
 
-        translation = self.translation_pred(x)
+        if not self.rotation_only:
+            translation = self.translation_pred(x)
+        else:
+            translation = torch.zeros(B, 3, device=x.device)
         rotation = self.rotation_pred(x)
 
         pred_T = self.get_T_matrix(translation=translation, rotation=rotation)
@@ -223,12 +229,11 @@ class BEVCalib(nn.Module):
 
         if out_init_loss:
             with torch.no_grad():
-                # We want to find the loss between the init_T and gt_T, so pred_T should be identity
                 B, _, _ = pc.shape
                 translation = torch.zeros(B, 3).to(pc.device)
                 rotation = torch.zeros(B, 4).to(pc.device)
                 rotation[:, 0] = 1
-                init_loss, T_gt_expected = self.loss_fn(pred_translation = translation, pred_rotation = rotation,
+                init_loss, _ = self.loss_fn(pred_translation = translation, pred_rotation = rotation,
                             pcs = pc, gt_T_to_camera = gt_T_to_camera, init_T_to_camera = init_T_to_camera, mask = masks)
         else:
             init_loss = None

@@ -26,6 +26,7 @@
 #   --master_addr ADDR       - Master node IP address
 #   --master_port PORT       - Master node port (default: 29500)
 #   --compile                - Enable torch.compile
+#   --rotation_only          - Only optimize rotation (skip translation optimization, use design values)
 #
 # Examples:
 #   # Single GPU training
@@ -93,6 +94,7 @@ BATCH_SIZE="16"
 LEARNING_RATE=""
 DDP_NGPUS=""
 USE_COMPILE=0
+ROTATION_ONLY=0
 NNODES="1"
 NODE_RANK="0"
 MASTER_ADDR=""
@@ -206,9 +208,13 @@ while [[ $# -gt 0 ]]; do
             USE_COMPILE=1
             shift
             ;;
+        --rotation_only)
+            ROTATION_ONLY=1
+            shift
+            ;;
         *)
             echo "❌ Unknown option: $1"
-            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --learning_rate, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile"
+            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --learning_rate, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile, --rotation_only"
             exit 1
             ;;
     esac
@@ -326,6 +332,7 @@ _print_row "GPU:"           "${GPU_NAME} (${GPU_MEM}MB) x${AVAIL_GPUS}"
 _print_row "PyTorch:"       "$PYTORCH_VER"
 _print_row "CUDA:"          "$CUDA_VER"
 _print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
+_print_row "Rotation Only:" "$([ "$ROTATION_ONLY" -eq 1 ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
 if [ "$NNODES" -gt 1 ]; then
 _print_sep
 _print_row "Node Rank:"     "$NODE_RANK"
@@ -398,6 +405,11 @@ if [ "$USE_COMPILE" -eq 1 ]; then
     COMPILE_FLAG="--compile 1"
 fi
 
+ROTATION_ONLY_FLAG=""
+if [ "$ROTATION_ONLY" -eq 1 ]; then
+    ROTATION_ONLY_FLAG="--rotation_only 1"
+fi
+
 if [ -n "$DDP_NGPUS" ]; then
     if [ "$NNODES" -gt 1 ]; then
         # 检测NCCL使用的网络接口
@@ -458,7 +470,8 @@ case $MODE in
             --lr $LR_SCRATCH \
             --step_size 60 \
             --use_custom_dataset 1 \
-            $COMPILE_FLAG
+            $COMPILE_FLAG \
+            $ROTATION_ONLY_FLAG
         ;;
     
     finetune)
@@ -495,7 +508,8 @@ case $MODE in
             --bev_encoder 1 \
             --xyz_only 1 \
             --use_custom_dataset 1 \
-            $COMPILE_FLAG
+            $COMPILE_FLAG \
+            $ROTATION_ONLY_FLAG
         ;;
     
     resume)
@@ -532,7 +546,8 @@ case $MODE in
             --lr $LR_RESUME \
             --step_size 20 \
             --use_custom_dataset 1 \
-            $COMPILE_FLAG
+            $COMPILE_FLAG \
+            $ROTATION_ONLY_FLAG
         ;;
     
     *)

@@ -1,0 +1,125 @@
+# BEVCalib 批量训练配置文件 - 多机DDP训练示例（优化版）
+# 使用 defaults 区域消除重复配置
+
+# 全局配置
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数（所有实验继承）
+# ============================================================================
+# 多机训练公共配置：所有实验都使用2台机器，每台8个GPU
+defaults:
+  env: {}
+  
+  params:
+    # 扰动参数
+    angle_range_deg: 10         # 10度扰动
+    trans_range: 0.3
+    
+    # 训练参数
+    batch_size: 16              # 多机训练可以用更大的batch
+    learning_rate: 1e-4         # 大batch适当增大学习率
+    
+    # DDP配置（多机必须配置）
+    use_ddp: true
+    ddp_gpus: 8                 # 每台机器8个GPU
+    
+    # 多机DDP配置（所有实验共享）
+    nnodes: 3                   # 3台机器
+    node_rank: null             # 自动检测（SLURM）或手动指定
+    master_addr: null           # 自动检测（SLURM）或手动指定
+    master_port: null           # 自动检测端口
+    
+    # 训练模式
+    use_compile: false
+    rotation_only: true
+    
+    # 执行模式
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组配置（只需指定dataset/version/env差异）
+# ============================================================================
+experiments:
+  # ============ 实验1: z=5 (10deg rotation) ============
+  - name: "z=5 (10deg rotation)"
+    description: "z=5 (10deg rotation)"
+    dataset: "all"              # 多机训练适合大数据集
+    version: "v4_z5_rotation"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      angle_range_deg: 10
+
+  # ============ 实验2: z=1 (10deg rotation) ============
+  - name: "z=1 (10deg, 2nodes×8gpus)"
+    description: "实验2: z=1 (10deg rotation)"
+    dataset: "all"
+    version: "v4_z1_rotation"
+    env:
+      BEV_ZBOUND_STEP: 20.0
+    params:
+      angle_range_deg: 10
+
+  # ============ 实验3: z=10 (5deg rotation) ============
+  - name: "z=10 (5deg rotation)"
+    description: "z=10 (5deg rotation)"
+    dataset: "all"
+    version: "v4_z10_rotation"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      angle_range_deg: 5
+
+  # ============ 实验4: z=5 (50deg rotation) ============
+  - name: "z=5 (5deg rotation)"
+    description: "z=5 (5deg rotation)"
+    dataset: "all"
+    version: "v4_z5_rotation"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      angle_range_deg: 5
+
+  # ============ 实验5: z=1 (5deg rotation) ============
+  - name: "z=1 (5deg rotation)"
+    description: "z=1 (5deg rotation)"
+    dataset: "all"
+    version: "v4_z1_rotation"
+    env:
+      BEV_ZBOUND_STEP: 20.0
+    params:
+      angle_range_deg: 5
+
+# ============================================================================
+# 使用说明
+# ============================================================================
+#
+# 1. SLURM集群（推荐）:
+#    sbatch --nodes=2 configs/run_batch_train.slurm
+#    nnodes/node_rank/master_addr 自动从环境变量检测
+#
+# 2. 手动多机训练:
+#    a) 确定master节点IP（例如: 192.168.1.100）
+#    b) 在Master节点（192.168.1.100）上:
+#       修改配置: master_addr: "192.168.1.100"
+#                node_rank: 0
+#       bash batch_train.sh configs/batch16_train_multinode_v2.yaml
+#
+#    c) 在Worker节点（192.168.1.101）上:
+#       修改配置: master_addr: "192.168.1.100"
+#                node_rank: 1
+#       bash batch_train.sh configs/batch16_train_multinode_v2.yaml
+#
+# 3. 使用自动生成脚本:
+#    bash configs/generate_multinode_configs.sh \
+#      configs/batch16_train_multinode_v2.yaml 2 192.168.1.100
+#
+#    然后在对应节点运行生成的配置文件
+#
+# ============================================================================
