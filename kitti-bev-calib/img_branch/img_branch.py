@@ -240,38 +240,40 @@ class Cam2BEV(nn.Module):
     def bev_pool(self, img_depth_feature, geometry):
         img_pc = img_depth_feature
         geom_feats = geometry
-        B, N, D, H, W, C = img_pc.shape
-        Nprime = B * N * D * H * W
+        B_traced, N, D, H, W, C = img_pc.shape
+        B = int(B_traced)
+        Nprime = B * int(N) * int(D) * int(H) * int(W)
         img_pc = img_pc.reshape(Nprime, C)
 
         # Align the geometry to the voxel grid
         geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
-        batch_ix = torch.arange(B, device=img_pc.device, dtype=torch.long).repeat_interleave(Nprime // B).unsqueeze(1)
+        # expand+reshape is trace-friendly (repeat_interleave triggers CPU index in JIT)
+        batch_ix = torch.arange(B, device=img_pc.device, dtype=torch.long).view(B, 1).expand(B, Nprime // B).reshape(-1, 1)
         geom_feats = torch.cat([geom_feats, batch_ix], 1)
+
+        nx0_int, nx1_int, nx2_int = int(self.nx[0]), int(self.nx[1]), int(self.nx[2])
 
         # filter out points that are outside box
         kept = (
             (geom_feats[:, 0] >= 0)
-            & (geom_feats[:, 0] < self.nx[0])
+            & (geom_feats[:, 0] < nx0_int)
             & (geom_feats[:, 1] >= 0)
-            & (geom_feats[:, 1] < self.nx[1])
+            & (geom_feats[:, 1] < nx1_int)
             & (geom_feats[:, 2] >= 0)
-            & (geom_feats[:, 2] < self.nx[2])
+            & (geom_feats[:, 2] < nx2_int)
         )
         img_pc = img_pc[kept]
         geom_feats = geom_feats[kept]
 
         with torch.no_grad():
-            nx0, nx1 = self.nx[0].item(), self.nx[1].item()
-            cam_bev_mask = torch.zeros(B, nx0, nx1, dtype=torch.bool, device=geom_feats.device)
+            cam_bev_mask = torch.zeros(B, nx0_int, nx1_int, dtype=torch.float32, device=geom_feats.device)
             if geom_feats.shape[0] > 0:
-                cam_bev_mask[geom_feats[:, 3].long(), geom_feats[:, 0].long(), geom_feats[:, 1].long()] = True
-
+                cam_bev_mask[geom_feats[:, 3].long(), geom_feats[:, 0].long(), geom_feats[:, 1].long()] = 1.0
         try:
-            cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1])
+            cam_bev = bev_pool(img_pc, geom_feats, B, nx2_int, nx0_int, nx1_int)
         except:
-            cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device=img_pc.device, dtype=img_pc.dtype)
+            cam_bev = torch.zeros(B, C, nx2_int, nx0_int, nx1_int, device=img_pc.device, dtype=img_pc.dtype)
 
         cam_bev = torch.cat(cam_bev.unbind(dim=2), 1)
 

@@ -25,7 +25,7 @@ import yaml
 from pathlib import Path
 
 # 添加utils路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'utils'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'utils'))
 
 from analysis import TrainingAnalyzer, TestEvaluator, ReportGenerator, Visualizer
 
@@ -120,7 +120,7 @@ def evaluate_test_data(config: dict, training_results: dict) -> dict:
         checkpoint = exp_config.get('checkpoint', 'ckpt_400.pth')
         zbound_step = exp_config['zbound_step']
         
-        ckpt_path = os.path.join(logs_base, model_dir, "B26A_scratch/checkpoint", checkpoint)
+        ckpt_path = os.path.join(logs_base, model_dir, "all_training_data_scratch/checkpoint", checkpoint)
         output_dir = os.path.join(logs_base, model_dir, "test_data_eval")
         
         print(f"评估实验: {name}")

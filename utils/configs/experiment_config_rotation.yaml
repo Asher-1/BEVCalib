@@ -18,17 +18,17 @@ paths:
 # 实验组配置
 experiments:
   - name: "z=1 (10deg)"
-    model_dir: "model_small_10deg_v4-z1_rotation"
+    model_dir: "model_small_10deg_v4_z1_rotation"
     zbound_step: 20.0
     checkpoint: "ckpt_400.pth"
   
   - name: "z=5 (10deg)"
-    model_dir: "model_small_10deg_v4-z5_rotation"
+    model_dir: "model_small_10deg_v4_z5_rotation"
     zbound_step: 4.0
     checkpoint: "ckpt_400.pth"
   
   - name: "z=10 (10deg)"
-    model_dir: "model_small_10deg_v4-z10_rotation"
+    model_dir: "model_small_10deg_v4_z10_rotation"
     zbound_step: 2.0
     checkpoint: "ckpt_400.pth"
 
@@ -41,7 +41,7 @@ evaluation:
   vis_interval: 100
   use_conda: true
   conda_env: "bevcalib"
-  run_test_eval: false       # 默认不运行（可能已有结果）
+  run_test_eval: true       # 默认不运行（可能已有结果）
   parallel: false
 
 # 可视化配置

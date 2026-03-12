@@ -66,36 +66,6 @@ experiments:
     params:
       angle_range_deg: 10
 
-  # ============ 实验3: z=10 (5deg rotation) ============
-  - name: "z=10 (5deg rotation)"
-    description: "z=10 (5deg rotation)"
-    dataset: "all"
-    version: "v4_z10_rotation"
-    env:
-      BEV_ZBOUND_STEP: 2.0
-    params:
-      angle_range_deg: 5
-
-  # ============ 实验4: z=5 (50deg rotation) ============
-  - name: "z=5 (5deg rotation)"
-    description: "z=5 (5deg rotation)"
-    dataset: "all"
-    version: "v4_z5_rotation"
-    env:
-      BEV_ZBOUND_STEP: 4.0
-    params:
-      angle_range_deg: 5
-
-  # ============ 实验5: z=1 (5deg rotation) ============
-  - name: "z=1 (5deg rotation)"
-    description: "z=1 (5deg rotation)"
-    dataset: "all"
-    version: "v4_z1_rotation"
-    env:
-      BEV_ZBOUND_STEP: 20.0
-    params:
-      angle_range_deg: 5
-
 # ============================================================================
 # 使用说明
 # ============================================================================

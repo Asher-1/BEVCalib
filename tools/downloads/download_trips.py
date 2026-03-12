@@ -41,7 +41,7 @@ class TripDownloader:
         self.selective_download = selective_download
         
         # 配置日志
-        log_file = self.output_dir.parent / f'download_trips_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+        log_file = self.output_dir / f'download_trips_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',

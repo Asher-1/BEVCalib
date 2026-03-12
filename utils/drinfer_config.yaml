@@ -1,0 +1,46 @@
+# =============================================================================
+# BEVCalib DrInfer Conversion & Inference Configuration
+# =============================================================================
+
+# -- Model checkpoint ----------------------------------------------------------
+ckpt_path: "logs/all_training_data/model_small_10deg_v4_z10_rotation/all_training_data_scratch/checkpoint/ckpt_400.pth"
+
+# -- Dataset -------------------------------------------------------------------
+dataset_root: "/mnt/drtraining/user/dahailu/data/bevcalib/all_training_data"
+validate_sample_ratio: 0.2
+
+# -- Model architecture --------------------------------------------------------
+deformable: false
+bev_encoder: true
+rotation_only: true
+
+# -- Input dimensions ----------------------------------------------------------
+img_height: 360
+img_width: 640
+max_num_points: 200000
+pc_bev_channels: 128
+bev_height: 100
+bev_width: 100
+
+# -- BEV settings --------------------------------------------------------------
+bev_zbound_step: "2.0"   # z10: step=2.0 (10 Z-voxels)
+
+# -- Evaluation parameters -----------------------------------------------------
+angle_range_deg: 10.0
+trans_range: 0.3
+batch_size: 1             # DrInfer engine uses fixed batch_size=1
+num_workers: 4
+max_batches: 5            # 0 = evaluate all batches
+
+# -- Export (torch2drinfer.py) -------------------------------------------------
+export_strategy: "full"   # "full", "split", or "onnx"
+export_dir: "logs/all_training_data/model_small_10deg_v4_z10_rotation/drinfer"
+model_name: "bevcalib_fusion_head"
+model_version: "v2"
+
+# -- Inference (drinfer_infer.py) ----------------------------------------------
+inference_backend: "drinfer"   # "pytorch" or "drinfer"
+device: "cuda"
+
+# -- Report output -------------------------------------------------------------
+report_output: "logs/all_training_data/model_small_10deg_v4_z10_rotation/drinfer/eval_report.json"
