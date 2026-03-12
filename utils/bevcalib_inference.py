@@ -1,0 +1,341 @@
+"""
+BEVCalib inference wrapper -- clean forward path without loss computation.
+Used for model export (drinfer/ONNX) and standalone inference benchmarking.
+
+IMPORTANT: set BEV_ZBOUND_STEP env var *before* importing this module so that
+bev_settings.py picks up the correct Z resolution.
+"""
+import os
+import sys
+import torch
+import torch.nn as nn
+import numpy as np
+
+_KITTI_DIR = os.path.join(os.path.dirname(__file__), '..', 'kitti-bev-calib')
+if _KITTI_DIR not in sys.path:
+    sys.path.insert(0, _KITTI_DIR)
+
+
+class BEVCalibInference(nn.Module):
+    """
+    Inference-only wrapper for BEVCalib.
+    Strips loss computation and returns the predicted LiDAR->Camera transform.
+    """
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self.rotation_only = model.rotation_only
+
+    @torch.no_grad()
+    def forward(self, img, pc, init_T_to_camera, post_cam2ego_T, cam_intrinsic):
+        """
+        Inference-only forward pass.
+
+        Args:
+            img:               (B, 3, H, W)   RGB image
+            pc:                (B, N, 3)       point cloud (XYZ)
+            init_T_to_camera:  (B, 4, 4)       initial LiDAR->Camera transform
+            post_cam2ego_T:    (B, 4, 4)       post-augmentation (identity at inference)
+            cam_intrinsic:     (B, 3, 3)       camera intrinsic matrix
+
+        Returns:
+            pred_T:  (B, 4, 4)  predicted LiDAR->Camera transform
+        """
+        m = self.model
+        B = img.shape[0]
+
+        img_ = img.unsqueeze(1)
+        init_ = init_T_to_camera.unsqueeze(1)
+        post_ = post_cam2ego_T.unsqueeze(1)
+        K_ = cam_intrinsic.unsqueeze(1)
+        cam2ego_T = torch.linalg.inv(init_)
+
+        cam_bev_feats, cam_bev_mask = m.img_branch(
+            cam2ego_T=cam2ego_T, cam_intrins=K_,
+            post_cam2ego_T=post_, imgs=img_,
+        )
+
+        pc_perm = pc.permute(0, 2, 1).contiguous()
+        pc_bev_feats = m.pc_branch(pc_perm)
+
+        x = m.conv_fuser(cam_bev_feats, pc_bev_feats)
+        if m.bev_encoder_use:
+            x = m.bev_encoder(x)
+        x = x + m.pose_embed
+
+        if m.deformable:
+            x = m.deformable_transformer(x)
+            _B, C, H, W = x.shape
+            x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
+            bev_mask = cam_bev_mask.reshape(_B, H * W).unsqueeze(-1)
+            x = x * bev_mask
+            x = x.mean(dim=1)
+        else:
+            _B, C, H, W = x.shape
+            x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
+            bev_mask_f = cam_bev_mask.reshape(_B, H * W).float()
+            x = x * bev_mask_f.unsqueeze(-1)
+            padding_mask = 1.0 - bev_mask_f
+            x = m.transformer(x, src_key_padding_mask=padding_mask)
+            x = x.mean(dim=1)
+
+        if not self.rotation_only:
+            translation = m.translation_pred(x)
+        else:
+            translation = torch.zeros(B, 3, device=x.device)
+        rotation = m.rotation_pred(x)
+
+        from losses.quat_tools import batch_quat2mat, batch_tvector2mat
+        T_pred = batch_tvector2mat(translation)
+        R_pred = batch_quat2mat(rotation)
+        T_pred = torch.bmm(T_pred, R_pred)
+
+        with torch.cuda.amp.autocast(enabled=False):
+            T_gt_expected = torch.matmul(
+                torch.linalg.inv(T_pred.float()), init_T_to_camera.float()
+            )
+
+        if self.rotation_only:
+            T_gt_expected = T_gt_expected.clone()
+            T_gt_expected[:, :3, 3] = init_T_to_camera[:, :3, 3]
+
+        return T_gt_expected
+
+
+def prepare_for_drinfer_export(wrapper, img_shape=(360, 640)):
+    """
+    Patch the model graph to remove all operations that DrInfer's
+    model_parserv3 cannot trace:
+      1. Swin's dynamic maybe_pad  -> hardcoded constant padding
+      2. nn.TransformerEncoderLayer -> DrInfer-compatible decomposed forward
+      3. SwinPatchEmbeddings.maybe_pad -> identity (no padding for our input)
+      4. SwinPatchMerging.maybe_pad -> hardcoded constant padding
+    Must be called *before* model_parserv3.
+    """
+    import types
+    from transformers.models.swin.modeling_swin import (
+        SwinLayer, SwinPatchMerging, SwinPatchEmbeddings,
+        SwinModel, SwinEncoder,
+    )
+
+    model = wrapper.model
+    img_h, img_w = img_shape
+
+    # --- 1. Patch Swin padding by walking encoder stages structurally ----------
+    swin_backbone = None
+    for module in model.modules():
+        if isinstance(module, SwinModel):
+            swin_backbone = module
+            break
+
+    if swin_backbone is None:
+        print("[patch] WARNING: no SwinModel found, skipping Swin patches")
+    else:
+        config = swin_backbone.config
+        patch_size = config.patch_size
+        window_size = config.window_size
+
+        fH, fW = img_h // patch_size, img_w // patch_size
+        patched_layers = 0
+        patched_merges = 0
+        patched_embeds = 0
+
+        for module in swin_backbone.modules():
+            if isinstance(module, SwinPatchEmbeddings):
+                def _noop_maybe_pad(self, pixel_values, height, width):
+                    return pixel_values
+                module.maybe_pad = types.MethodType(_noop_maybe_pad, module)
+                patched_embeds += 1
+
+        encoder = swin_backbone.encoder
+        cur_h, cur_w = fH, fW
+
+        for stage_idx, stage in enumerate(encoder.layers):
+            pad_right = (window_size - cur_w % window_size) % window_size
+            pad_bottom = (window_size - cur_h % window_size) % window_size
+            const_pad = (0, 0, 0, pad_right, 0, pad_bottom)
+            needs_layer_pad = pad_right > 0 or pad_bottom > 0
+
+            for layer in stage.blocks:
+                if isinstance(layer, SwinLayer):
+                    def _make_const_maybe_pad(pv, do_pad):
+                        def _const_maybe_pad(self, hidden_states, height, width):
+                            if do_pad:
+                                hidden_states = nn.functional.pad(
+                                    hidden_states, pv)
+                            return hidden_states, pv
+                        return _const_maybe_pad
+
+                    layer.maybe_pad = types.MethodType(
+                        _make_const_maybe_pad(const_pad, needs_layer_pad),
+                        layer,
+                    )
+                    patched_layers += 1
+
+            if stage.downsample is not None and isinstance(
+                    stage.downsample, SwinPatchMerging):
+                merge_pad_h = cur_h % 2
+                merge_pad_w = cur_w % 2
+                merge_const = (0, 0, 0, merge_pad_w, 0, merge_pad_h)
+                needs_merge_pad = merge_pad_h > 0 or merge_pad_w > 0
+
+                def _make_const_merge_pad(pv, do_pad):
+                    def _const_merge_pad(self, input_feature, height, width):
+                        if do_pad:
+                            input_feature = nn.functional.pad(
+                                input_feature, pv)
+                        return input_feature
+                    return _const_merge_pad
+
+                stage.downsample.maybe_pad = types.MethodType(
+                    _make_const_merge_pad(merge_const, needs_merge_pad),
+                    stage.downsample,
+                )
+                patched_merges += 1
+                cur_h = (cur_h + merge_pad_h) // 2
+                cur_w = (cur_w + merge_pad_w) // 2
+
+            print(f"  Stage {stage_idx}: {cur_h}x{cur_w}, "
+                  f"layer_pad={const_pad}, needs_pad={needs_layer_pad}")
+
+        print(f"[patch] Swin: {patched_layers} SwinLayers, "
+              f"{patched_merges} PatchMerging, "
+              f"{patched_embeds} PatchEmbeddings patched")
+
+    # --- 2. Patch TransformerEncoderLayer forward to skip fused path -----------
+    if hasattr(model, 'transformer') and not model.deformable:
+        from frontend_python.pytorch_parser.engine_graph_exporter import is_in_dr_trace
+        import frontend_python.pytorch_parser.parse_utils.multi_head_attention as DR_MHA
+
+        encoder = model.transformer
+        patched_te = 0
+        for i, layer in enumerate(encoder.layers):
+            if not isinstance(layer, nn.TransformerEncoderLayer):
+                continue
+
+            d_model = layer.self_attn.embed_dim
+            nhead = layer.self_attn.num_heads
+            dim_ff = layer.linear1.out_features
+            norm_first = layer.norm_first
+            act_id = layer.activation_relu_or_gelu
+
+            dr_mha = DR_MHA.MultiheadAttention(
+                d_model, nhead, dropout=0.0, bias=True, batch_first=True,
+            )
+            dr_mha.in_proj_weight = layer.self_attn.in_proj_weight
+            dr_mha.in_proj_bias = layer.self_attn.in_proj_bias
+            dr_mha.out_proj.weight = layer.self_attn.out_proj.weight
+            dr_mha.out_proj.bias = layer.self_attn.out_proj.bias
+
+            layer.self_attn = dr_mha
+
+            def _make_patched_forward(lyr, _is_in_dr_trace):
+                """
+                Build a forward function that always takes the decomposed path
+                (self-attention block + feedforward block) instead of the fused
+                _transformer_encoder_layer_fwd op.
+                """
+                def _patched_forward(src, src_mask=None, src_key_padding_mask=None,
+                                     is_causal=False):
+                    import torch.nn.functional as _F
+                    src_key_padding_mask = _F._canonical_mask(
+                        mask=src_key_padding_mask,
+                        mask_name="src_key_padding_mask",
+                        other_type=_F._none_or_dtype(src_mask),
+                        other_name="src_mask",
+                        target_type=src.dtype,
+                    )
+                    src_mask = _F._canonical_mask(
+                        mask=src_mask, mask_name="src_mask",
+                        other_type=None, other_name="",
+                        target_type=src.dtype, check_other=False,
+                    )
+                    x = src
+                    if lyr.norm_first:
+                        x = x + lyr._sa_block(lyr.norm1(x), src_mask,
+                                               src_key_padding_mask,
+                                               is_causal=is_causal)
+                        x = x + lyr._ff_block(lyr.norm2(x))
+                    else:
+                        x = lyr.norm1(x + lyr._sa_block(x, src_mask,
+                                                         src_key_padding_mask,
+                                                         is_causal=is_causal))
+                        x = lyr.norm2(x + lyr._ff_block(x))
+                    return x
+                return _patched_forward
+
+            layer.forward = _make_patched_forward(layer, is_in_dr_trace)
+            patched_te += 1
+
+        print(f"[patch] TransformerEncoder: {patched_te} layers patched "
+              f"(fused path bypassed, DrInfer MHA installed)")
+
+    # --- 3. Register missing DrInfer symbolics for spconv ops -------------------
+    try:
+        from frontend_python.pytorch_parser.registry import OperatorRegister
+        from frontend_python.pytorch_parser.dr_symbolic.jit_utils import create_dr_op
+
+        @OperatorRegister.register_version("aten", 1)
+        def zero(g, self):
+            return create_dr_op(g, "dr::ZerosLike", self)
+
+        @OperatorRegister.register_version("aten", 1)
+        def alias(g, self):
+            return self
+
+        print("[patch] Registered aten::zero, aten::alias symbolics")
+    except Exception as e:
+        print(f"[patch] WARNING: could not register aten::zero symbolic: {e}")
+
+    # --- 4. Switch bev_pool to scatter_add (DrInfer-exportable) ----------------
+    # try:
+    #     from img_branch.bev_pool.bev_pool import set_use_scatter_add
+    #     set_use_scatter_add(True)
+    #     print("[patch] bev_pool switched to scatter_add mode (DrInfer-compatible)")
+    # except ImportError:
+    #     print("[patch] WARNING: could not import set_use_scatter_add")
+
+    print("[patch] Model prepared for DrInfer export")
+    return wrapper
+
+
+def load_bevcalib_inference(
+    ckpt_path: str,
+    device: str = "cuda",
+    img_shape=(360, 640),
+    rotation_only=True,
+    deformable=False,
+    bev_encoder=True,
+):
+    """
+    Load a BEVCalib checkpoint and return an inference wrapper.
+
+    Args:
+        ckpt_path:     path to .pth checkpoint
+        device:        'cuda' or 'cpu'
+        img_shape:     (H, W) image dimensions
+        rotation_only: whether the model was trained in rotation-only mode
+        deformable:    whether the model uses deformable attention
+        bev_encoder:   whether the model uses BEV encoder
+
+    Returns:
+        wrapper: BEVCalibInference on the specified device
+        epoch:   training epoch of the checkpoint
+    """
+    from bev_calib import BEVCalib
+    model = BEVCalib(
+        deformable=deformable,
+        bev_encoder=bev_encoder,
+        img_shape=(img_shape[0], img_shape[1]),
+        rotation_only=rotation_only,
+    )
+
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state = ckpt.get("model_state_dict", ckpt)
+    model.load_state_dict(state)
+    epoch = ckpt.get("epoch", -1)
+
+    model.to(device).eval()
+    wrapper = BEVCalibInference(model).to(device).eval()
+    return wrapper, epoch

@@ -412,38 +412,54 @@ def create_overlay_comparison(
     return overlay
 
 
-def _build_green_yellow_red_lut() -> np.ndarray:
-    """Build a 256-entry BGR LUT: green(0) → yellow(128) → red(255)."""
-    lut = np.zeros((256, 3), dtype=np.uint8)
-    for i in range(256):
-        t = i / 255.0
-        if t < 0.5:
-            s = t / 0.5
-            lut[i] = [0, 255, int(255 * s)]           # green → yellow (BGR)
-        else:
-            s = (t - 0.5) / 0.5
-            lut[i] = [0, int(255 * (1 - s)), 255]     # yellow → red (BGR)
-    return lut
+_DISP_THRESHOLDS = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
+_DISP_COLORS_BGR = [
+    (0, 220, 0),       # <0.5px  bright green
+    (180, 220, 0),     # <1px    green-cyan
+    (220, 180, 0),     # <2px    cyan
+    (220, 100, 0),     # <3px    blue
+    (0, 220, 220),     # <5px    yellow
+    (180, 0, 180),     # <10px   purple
+    (0, 0, 220),       # >=10px  red
+]
+_DISP_LABELS = ["<0.5px", "<1px", "<2px", "<3px", "<5px", "<10px", ">=10px"]
 
 
-_GYR_LUT = _build_green_yellow_red_lut()
+def _classify_displacement(magnitudes: np.ndarray) -> np.ndarray:
+    """Map displacement magnitudes to color indices (0..4)."""
+    classes = np.full(len(magnitudes), 4, dtype=np.int32)
+    for i, thresh in enumerate(_DISP_THRESHOLDS):
+        classes[magnitudes < thresh] = i
+    # Only keep the lowest matching class per point
+    out = np.full(len(magnitudes), len(_DISP_THRESHOLDS), dtype=np.int32)
+    for i in range(len(_DISP_THRESHOLDS) - 1, -1, -1):
+        out[magnitudes < _DISP_THRESHOLDS[i]] = i
+    return out
+
+
+def _get_disp_colors(magnitudes: np.ndarray) -> np.ndarray:
+    """Return (N,3) BGR colors based on displacement thresholds."""
+    classes = _classify_displacement(magnitudes)
+    colors = np.array(_DISP_COLORS_BGR, dtype=np.uint8)
+    return colors[classes]
 
 
 def _draw_colorbar(img: np.ndarray, x: int, y: int, bar_h: int, bar_w: int,
                    max_val: float, label: str = "px") -> None:
-    """Draw a compact vertical colorbar legend (green→yellow→red)."""
-    indices = np.linspace(255, 0, bar_h).astype(np.uint8)
-    bar_color = _GYR_LUT[indices]
-    bar_color = np.repeat(bar_color[:, np.newaxis, :], bar_w, axis=1)
-
-    img[y:y+bar_h, x:x+bar_w] = bar_color
-
-    cv2.rectangle(img, (x, y), (x + bar_w, y + bar_h), (200, 200, 200), 1)
-
+    """Draw a stepped colorbar legend matching displacement thresholds."""
+    n = len(_DISP_COLORS_BGR)
+    seg_h = bar_h // n
     font = cv2.FONT_HERSHEY_SIMPLEX
     fs, ft = 0.3, 1
-    cv2.putText(img, f"{max_val:.0f}{label}", (x + bar_w + 2, y + 10), font, fs, (255, 255, 255), ft)
-    cv2.putText(img, f"0{label}", (x + bar_w + 2, y + bar_h), font, fs, (255, 255, 255), ft)
+
+    for i in range(n):
+        sy = y + (n - 1 - i) * seg_h
+        color = tuple(int(c) for c in _DISP_COLORS_BGR[i])
+        cv2.rectangle(img, (x, sy), (x + bar_w, sy + seg_h), color, -1)
+        cv2.putText(img, _DISP_LABELS[i], (x + bar_w + 2, sy + seg_h - 2),
+                    font, fs, (255, 255, 255), ft)
+
+    cv2.rectangle(img, (x, y), (x + bar_w, y + bar_h), (200, 200, 200), 1)
 
 
 def create_error_analysis_panel(
@@ -521,15 +537,13 @@ def create_error_analysis_panel(
     displacements = pred_matched - gt_matched
     magnitudes = np.linalg.norm(displacements, axis=1)
     p95_disp = np.percentile(magnitudes, 95) if len(magnitudes) > 10 else magnitudes.max()
-    max_disp = max(p95_disp, 2.0)
+    max_disp = max(p95_disp, 10.0)
 
     # ---- Layer 1: dim background ----
     panel = (image.astype(np.float32) * 0.4).astype(np.uint8)
 
-    # ---- Layer 2: points colored by displacement magnitude (plasma colormap) ----
-    norm_mag = np.clip(magnitudes / max_disp, 0.0, 1.0)
-    color_indices = (norm_mag * 255).astype(np.uint8)
-    pt_colors = _GYR_LUT[color_indices]
+    # ---- Layer 2: points colored by displacement threshold classes ----
+    pt_colors = _get_disp_colors(magnitudes)
 
     u = np.clip(gt_matched[:, 0].astype(int), 0, w - 1)
     v = np.clip(gt_matched[:, 1].astype(int), 0, h - 1)
@@ -587,13 +601,15 @@ def create_error_analysis_panel(
 
     # ---- Quality rating ----
     if mean_mag_all < 1.0:
-        quality_label, quality_color = "Excellent (<1px)", (0, 255, 0)
+        quality_label, quality_color = "Excellent (<1px)", (0, 220, 0)
+    elif mean_mag_all < 3.0:
+        quality_label, quality_color = "Good (<3px)", (220, 100, 0)
     elif mean_mag_all < 5.0:
-        quality_label, quality_color = "Good (<5px)", (255, 255, 0)
-    elif mean_mag_all < 15.0:
-        quality_label, quality_color = "Fair (<15px)", (0, 180, 255)
+        quality_label, quality_color = "Fair (<5px)", (0, 220, 220)
+    elif mean_mag_all < 10.0:
+        quality_label, quality_color = "Poor (<10px)", (180, 0, 180)
     else:
-        quality_label, quality_color = "Poor (>15px)", (0, 0, 255)
+        quality_label, quality_color = "Bad (>=10px)", (0, 0, 220)
 
     # ---- Compact text overlay ----
     font = cv2.FONT_HERSHEY_SIMPLEX

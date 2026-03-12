@@ -34,18 +34,10 @@ class QuickCumsum(torch.autograd.Function):
         return val, None, None
 
 
-class QuickCumsumCuda(torch.autograd.Function):
+class BEVPoolCuda(torch.autograd.Function):
     @staticmethod
     @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
-    def forward(ctx, x, geom_feats, ranks, B, D, H, W):
-        kept = torch.ones(x.shape[0], device=x.device, dtype=torch.bool)
-        kept[1:] = ranks[1:] != ranks[:-1]
-        interval_starts = torch.where(kept)[0].int()
-        interval_lengths = torch.zeros_like(interval_starts)
-        interval_lengths[:-1] = interval_starts[1:] - interval_starts[:-1]
-        interval_lengths[-1] = x.shape[0] - interval_starts[-1]
-        geom_feats = geom_feats.int()
-
+    def forward(ctx, x, geom_feats, B, D, H, W, interval_starts, interval_lengths):
         out = bev_pool_ext.bev_pool_forward(
             x,
             geom_feats,
@@ -79,7 +71,7 @@ class QuickCumsumCuda(torch.autograd.Function):
             W,
         )
 
-        return x_grad, None, None, None, None, None, None
+        return x_grad, None, None, None, None, None, None, None
 
 
 def bev_pool(feats, coords, B, D, H, W):
@@ -93,7 +85,16 @@ def bev_pool(feats, coords, B, D, H, W):
     )
     indices = ranks.argsort()
     feats, coords, ranks = feats[indices], coords[indices], ranks[indices]
+    coords = coords.int()
 
-    x = QuickCumsumCuda.apply(feats, coords, ranks, B, D, H, W)
+    kept = torch.cat([
+        torch.ones(1, device=feats.device, dtype=torch.bool),
+        ranks[1:] != ranks[:-1]
+    ])
+    interval_starts = torch.where(kept)[0].int()
+    ends = torch.cat([interval_starts[1:], torch.tensor([feats.shape[0]], device=interval_starts.device, dtype=interval_starts.dtype)])
+    interval_lengths = ends - interval_starts
+
+    x = BEVPoolCuda.apply(feats, coords, B, D, H, W, interval_starts, interval_lengths)
     x = x.permute(0, 4, 1, 2, 3).contiguous()
     return x
