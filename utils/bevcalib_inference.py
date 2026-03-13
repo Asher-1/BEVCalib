@@ -72,6 +72,19 @@ class BEVCalibInference(nn.Module):
             x = x * bev_mask
             x = x.mean(dim=1)
         else:
+            # B, C, H, W = x.shape
+            # x = x.permute(0, 2, 3, 1).reshape(B, H * W, C) # B, H * W, C
+            # bev_mask = cam_bev_mask.reshape(B, H * W).bool()
+            # max_valid_cnt = int(bev_mask.sum(dim=1).max().item()) # int, max number of valid points in a batch
+            # masked_x = torch.zeros(B, max_valid_cnt, C).to(x.device)
+            # padding_mask = torch.zeros(B, max_valid_cnt).to(x.device)
+            # for i in range(B):
+            #     cnt = int(bev_mask[i].sum().item())
+            #     masked_x[i, :cnt, :] = x[i, bev_mask[i]]
+            #     padding_mask[i, cnt:] = 1
+            # x = m.transformer(masked_x, src_key_padding_mask=padding_mask) # B, H * W, C
+            # x = x.mean(dim = 1)  # B, C
+            
             _B, C, H, W = x.shape
             x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
             bev_mask_f = cam_bev_mask.reshape(_B, H * W).float()

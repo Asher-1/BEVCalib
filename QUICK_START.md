@@ -81,6 +81,27 @@ python evaluate_checkpoint.py \
 
 ### 任务5: 生成性能报告
 
+new strategy
+```bash
+# 使用 B26A YAML 配置
+python run_generalization_eval.py --config configs/eval_generalization_b26a.yaml
+# 使用 ALL YAML 配置
+python run_generalization_eval.py --config configs/eval_generalization_all.yaml
+# 命令行覆盖
+python run_generalization_eval.py --config configs/eval_generalization_all.yaml --angle_range 10.0 --output_dir logs/custom_eval
+```
+
+
+### 任务6: pytorch模型转drinfer模型
+
+```bash
+# 使用 B26A YAML 配置
+python utils/torch2drinfer.py --config configs/drinfer_config_b26a.yaml
+# 使用 ALL YAML 配置
+python utils/torch2drinfer.py --config configs/drinfer_config_all.yaml
+```
+
+
 ```bash
 # 快速分析（使用已有测试结果）
 bash utils/scripts/quick_analyze.sh 5deg --skip-test

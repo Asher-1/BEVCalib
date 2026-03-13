@@ -19,6 +19,10 @@ defaults:
     angle_range_deg: 10         # 10度扰动
     trans_range: 0.3
     
+    # 轴向损失
+    enable_axis_loss: true
+    axis_loss_weight: 0.5
+    
     # 训练参数
     batch_size: 16              # 多机训练可以用更大的batch
     learning_rate: 1e-4         # 大batch适当增大学习率
@@ -46,31 +50,31 @@ defaults:
 # 实验组配置（只需指定dataset/version/env差异）
 # ============================================================================
 experiments:
-  # ============ 实验3: z=10 (5deg rotation) ============
+  # ============ 实验1: z=10 (5deg rotation) ============
   - name: "z=10 (5deg rotation)"
     description: "z=10 (5deg rotation)"
     dataset: "all"
-    version: "v4_z10_rotation"
+    version: "v5_z10_rotation"
     env:
       BEV_ZBOUND_STEP: 2.0
     params:
       angle_range_deg: 5
 
-  # ============ 实验4: z=5 (50deg rotation) ============
+  # ============ 实验2: z=5 (50deg rotation) ============
   - name: "z=5 (5deg rotation)"
     description: "z=5 (5deg rotation)"
     dataset: "all"
-    version: "v4_z5_rotation"
+    version: "v5_z5_rotation"
     env:
       BEV_ZBOUND_STEP: 4.0
     params:
       angle_range_deg: 5
 
-  # ============ 实验5: z=1 (5deg rotation) ============
+  # ============ 实验3: z=1 (5deg rotation) ============
   - name: "z=1 (5deg rotation)"
     description: "z=1 (5deg rotation)"
     dataset: "all"
-    version: "v4_z1_rotation"
+    version: "v5_z1_rotation"
     env:
       BEV_ZBOUND_STEP: 20.0
     params:

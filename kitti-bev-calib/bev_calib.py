@@ -71,6 +71,8 @@ class BEVCalib(nn.Module):
                  bev_encoder = False,
                  img_shape = None,  # (H, W) - 输入图像尺寸，动态传入
                  rotation_only = False,
+                 enable_axis_loss = False,
+                 weight_axis_rotation = 0.3,
                 ):
         super(BEVCalib, self).__init__()
         self.rotation_only = rotation_only
@@ -111,7 +113,11 @@ class BEVCalib(nn.Module):
         if not self.rotation_only:
             self.translation_pred = nn.Linear(self.embed_dim, 3)
         self.rotation_pred = nn.Linear(self.embed_dim, 4)
-        self.loss_fn = realworld_loss(rotation_only=rotation_only)
+        self.loss_fn = realworld_loss(
+            rotation_only=rotation_only,
+            enable_axis_loss=enable_axis_loss,
+            weight_axis_rotation=weight_axis_rotation,
+        )
     
     def make_deformable_transformer(self, num_layers):
         layers = []

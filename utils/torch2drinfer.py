@@ -81,6 +81,7 @@ def export_full_drinfer(wrapper, cfg, export_dir):
         fixed_shape_configs=fixed_shapes,
         empty_cache=True,
         verify_export_graph=True,
+        export_pmodel=False,
     )
 
     gt_np = gt.cpu().detach().numpy()

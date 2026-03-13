@@ -53,8 +53,34 @@ def evaluate_sensor_extrinsic(T_pred, T_gt):
     # 计算旋转差异: dR = R_pred * R_gt^(-1)
     dR = R_pred @ R_gt.T
     
-    # 转换为四元数
-    rot_diff = Rotation.from_matrix(dR)
+    # 处理退化矩阵 (NaN/Inf): 返回最大误差而非崩溃
+    if not np.all(np.isfinite(dR)):
+        axis_angle_error = np.array([180.0, 180.0, 180.0])
+        angle_error = np.linalg.norm(axis_angle_error)
+        t_pred = T_pred[:3, 3]
+        t_gt = T_gt[:3, 3]
+        axis_pos_error = np.where(np.isfinite(t_pred - t_gt), (t_pred - t_gt) * 100.0, np.array([9999.0, 9999.0, 9999.0]))
+        pos_error = np.linalg.norm(axis_pos_error)
+        return angle_error, axis_angle_error, pos_error, axis_pos_error
+    
+    # 确保 dR 是有效旋转矩阵 (SVD 正交化)
+    try:
+        U, _, Vt = np.linalg.svd(dR)
+        dR_clean = U @ Vt
+        if np.linalg.det(dR_clean) < 0:
+            U[:, -1] *= -1
+            dR_clean = U @ Vt
+        rot_diff = Rotation.from_matrix(dR_clean)
+    except np.linalg.LinAlgError:
+        print("SVD分解失败")
+        exit()
+        # axis_angle_error = np.array([180.0, 180.0, 180.0])
+        # angle_error = np.linalg.norm(axis_angle_error)
+        # t_pred = T_pred[:3, 3]
+        # t_gt = T_gt[:3, 3]
+        # axis_pos_error = np.where(np.isfinite(t_pred - t_gt), (t_pred - t_gt) * 100.0, np.array([9999.0, 9999.0, 9999.0]))
+        # pos_error = np.linalg.norm(axis_pos_error)
+        # return angle_error, axis_angle_error, pos_error, axis_pos_error
     
     # 转换为轴角表示
     axis_angle_rad = rot_diff.as_rotvec()  # 弧度制，轴角向量

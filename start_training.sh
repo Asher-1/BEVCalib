@@ -23,6 +23,8 @@
 #   --lr LR                初始学习率 (默认: 使用模型默认值)
 #   --fg                   前台阻塞执行 (不使用nohup, 输出到终端, Ctrl+C可停止)
 #   --rotation_only        仅优化旋转, 不优化平移 (平移使用设计值)
+#   --enable_axis_loss     启用分轴旋转损失 (Roll/Pitch/Yaw 独立监督)
+#   --weight_axis_rotation W  分轴旋转损失权重 (默认: 0.3)
 #   --no-tb                不自动启动 TensorBoard
 #   --tb_port PORT         TensorBoard端口 (默认: 自动检测空闲端口, 起始6006)
 #
@@ -190,6 +192,8 @@ BATCH_SIZE="16"
 LEARNING_RATE="1e-4"
 FOREGROUND=0
 ROTATION_ONLY=""
+ENABLE_AXIS_LOSS=""
+WEIGHT_AXIS_ROTATION=""
 ENABLE_TB=1
 TB_PORT=""
 NNODES=""
@@ -240,6 +244,14 @@ while [[ $# -gt 0 ]]; do
         --rotation_only)
             ROTATION_ONLY="--rotation_only"
             shift
+            ;;
+        --enable_axis_loss)
+            ENABLE_AXIS_LOSS="--enable_axis_loss"
+            shift
+            ;;
+        --weight_axis_rotation)
+            WEIGHT_AXIS_ROTATION="$2"
+            shift 2
             ;;
         --no-tb|--no-tensorboard)
             ENABLE_TB=0
@@ -300,7 +312,8 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo ""
-            echo "可用选项: --ddp [N], --fg, --compile, --rotation_only, --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
+            echo "可用选项: --ddp [N], --fg, --compile, --rotation_only, --enable_axis_loss, --weight_axis_rotation W,"
+            echo "          --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
             echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
             echo "          --rdzv_timeout SECONDS"
             exit 1
@@ -479,10 +492,11 @@ else
     fi
 fi
 
-# Rendezvous 超时默认值: 多机30分钟, 单机10分钟
+# Rendezvous 超时默认值: 按节点数缩放，单机10分钟
 if [ -z "$RDZV_TIMEOUT" ]; then
     if [ "$NNODES" -gt 1 ]; then
-        RDZV_TIMEOUT=1800
+        # 基础30分钟 + 每增加4个节点多10分钟，16节点=60分钟
+        RDZV_TIMEOUT=$(( 1800 + (NNODES / 4) * 600 ))
     else
         RDZV_TIMEOUT=600
     fi
@@ -586,6 +600,7 @@ _print_row "Trans Range:"   "${DDP_TRANS}m"
 [ -n "$LEARNING_RATE" ] && \
 _print_row "Learning Rate:" "$LEARNING_RATE"
 _print_row "Rotation Only:" "$([ -n "$ROTATION_ONLY" ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
+_print_row "Axis Loss:"    "$([ -n "$ENABLE_AXIS_LOSS" ] && echo "enabled (weight=${WEIGHT_AXIS_ROTATION:-0.3})" || echo 'disabled')"
 _print_row "Execution:"     "$([ "$FOREGROUND" -eq 1 ] && echo 'Foreground (Ctrl+C to stop)' || echo 'Background (nohup)')"
 _print_row "TensorBoard:"   "$([ "$ENABLE_TB" -eq 1 ] && echo 'auto-start' || echo 'disabled (--no-tb)')"
 if [ "$USE_DDP" -eq 1 ] && [ "$NNODES" -gt 1 ]; then
@@ -749,6 +764,10 @@ if [ "$USE_DDP" -eq 1 ]; then
     LR_ARG=""
     [ -n "$LEARNING_RATE" ] && LR_ARG="--learning_rate $LEARNING_RATE"
 
+    AXIS_LOSS_ARGS=""
+    [ -n "$ENABLE_AXIS_LOSS" ] && AXIS_LOSS_ARGS="--enable_axis_loss"
+    [ -n "$WEIGHT_AXIS_ROTATION" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --weight_axis_rotation $WEIGHT_AXIS_ROTATION"
+
     TRAIN_CMD="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
@@ -761,6 +780,7 @@ if [ "$USE_DDP" -eq 1 ]; then
         $MULTI_NODE_ARGS \
         $USE_COMPILE \
         $ROTATION_ONLY \
+        $AXIS_LOSS_ARGS \
         $LR_ARG"
 
     if [ "$FOREGROUND" -eq 1 ]; then
@@ -805,6 +825,10 @@ else
     LR_ARG=""
     [ -n "$LEARNING_RATE" ] && LR_ARG="--learning_rate $LEARNING_RATE"
 
+    AXIS_LOSS_ARGS=""
+    [ -n "$ENABLE_AXIS_LOSS" ] && AXIS_LOSS_ARGS="--enable_axis_loss"
+    [ -n "$WEIGHT_AXIS_ROTATION" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --weight_axis_rotation $WEIGHT_AXIS_ROTATION"
+
     TRAIN_CMD_0="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
@@ -815,6 +839,7 @@ else
         --log_suffix small_10deg_${VERSION} \
         $USE_COMPILE \
         $ROTATION_ONLY \
+        $AXIS_LOSS_ARGS \
         $LR_ARG"
 
     TRAIN_CMD_1="bash train_universal.sh scratch \
@@ -827,6 +852,7 @@ else
         --log_suffix small_5deg_${VERSION} \
         $USE_COMPILE \
         $ROTATION_ONLY \
+        $AXIS_LOSS_ARGS \
         $LR_ARG"
 
     if [ "$FOREGROUND" -eq 1 ]; then

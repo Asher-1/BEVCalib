@@ -63,6 +63,58 @@ class rotation_loss(nn.Module):
         loss = quaternion_distance(pred_rot, gt_rot, device = pred_rot.device)
         return loss.mean()
 
+class axis_rotation_loss(nn.Module):
+    """Per-axis (Roll/Pitch/Yaw) rotation loss via Euler angle decomposition.
+    Provides explicit supervision on each rotation axis independently,
+    preventing the network from compensating errors across axes."""
+
+    def __init__(self):
+        super(axis_rotation_loss, self).__init__()
+
+    @staticmethod
+    def _rotation_matrix_to_euler(R):
+        """Extract Roll (X), Pitch (Y), Yaw (Z) from rotation matrix.
+        Uses ZYX convention: R = Rz @ Ry @ Rx.
+        Args:
+            R: (B, 3, 3)
+        Returns:
+            euler: (B, 3) — [roll, pitch, yaw] in radians
+        """
+        sy = torch.sqrt(R[:, 0, 0] ** 2 + R[:, 1, 0] ** 2)
+        singular = sy < 1e-6
+
+        roll  = torch.where(singular, torch.atan2(-R[:, 1, 2], R[:, 1, 1]),
+                            torch.atan2(R[:, 2, 1], R[:, 2, 2]))
+        pitch = torch.where(singular, torch.atan2(-R[:, 2, 0], sy),
+                            torch.atan2(-R[:, 2, 0], sy))
+        yaw   = torch.where(singular, torch.zeros_like(sy),
+                            torch.atan2(R[:, 1, 0], R[:, 0, 0]))
+        return torch.stack([roll, pitch, yaw], dim=1)
+
+    def forward(self, pred_rotation, gt_rotation):
+        """
+        Args:
+            pred_rotation: (B, 3, 3)
+            gt_rotation:   (B, 3, 3)
+        Returns:
+            loss: scalar (mean absolute Euler-angle error in radians)
+            per_axis: dict with 'roll', 'pitch', 'yaw' losses (radians)
+        """
+        pred_euler = self._rotation_matrix_to_euler(pred_rotation)
+        gt_euler   = self._rotation_matrix_to_euler(gt_rotation)
+
+        diff = torch.abs(pred_euler - gt_euler)
+        diff = torch.min(diff, 2 * torch.pi - diff)
+
+        per_axis = {
+            'roll':  diff[:, 0].mean(),
+            'pitch': diff[:, 1].mean(),
+            'yaw':   diff[:, 2].mean(),
+        }
+        loss = diff.mean()
+        return loss, per_axis
+
+
 class PC_reproj_loss(nn.Module):
     def __init__(self):
         super(PC_reproj_loss, self).__init__()
@@ -103,9 +155,11 @@ class PC_reproj_loss(nn.Module):
             
 class realworld_loss(nn.Module):
     def __init__(self, weight_translation = 1.0, weight_quat_norm = 0.5, weight_rotation = 0.5, weight_PCreproj = 0.5, 
-                 weight_bev_reproj = 0.5, weight_feat_align = 1.0, l1 = False, rotation_only = False):
+                 weight_bev_reproj = 0.5, weight_feat_align = 1.0, l1 = False, rotation_only = False,
+                 enable_axis_loss = False, weight_axis_rotation = 0.3):
         super(realworld_loss, self).__init__()
         self.rotation_only = rotation_only
+        self.enable_axis_loss = enable_axis_loss
         if rotation_only:
             self.weight_translation = 0.0
             self.weight_rotation = weight_rotation * 2.0
@@ -116,6 +170,7 @@ class realworld_loss(nn.Module):
             self.weight_rotation = weight_rotation
             self.weight_PCreproj = weight_PCreproj
             self.weight_quat_norm = weight_quat_norm
+        self.weight_axis_rotation = weight_axis_rotation if enable_axis_loss else 0.0
         self.weight_bev_reproj = weight_bev_reproj
         self.weight_feat_align = weight_feat_align
         if not rotation_only:
@@ -124,6 +179,8 @@ class realworld_loss(nn.Module):
         self.rotation_loss = rotation_loss()
         self.quat_norm_loss = quat_norm_loss()
         self.PC_reproj_loss = PC_reproj_loss()
+        if enable_axis_loss:
+            self.axis_rotation_loss = axis_rotation_loss()
     
     def forward(self, pred_translation, pred_rotation, pcs, gt_T_to_camera, init_T_to_camera, mask = None):
         """
@@ -163,17 +220,30 @@ class realworld_loss(nn.Module):
 
         if not self.rotation_only:
             translation_loss = self.translation_loss(pred_translation, gt_translation)
+            PC_reproj_loss = self.PC_reproj_loss(
+                pcs, gt_T_to_camera, pred_translation, pred_rotation, mask)
         else:
             translation_loss = torch.tensor(0.0, device=pcs.device)
+            # PC_reproj_loss: in rotation_only mode, use GT translation for both
+            # pred and gt to eliminate translation coupling from the reprojection error.
+            PC_reproj_loss = self.PC_reproj_loss(
+                pcs, gt_T_to_camera, gt_translation, pred_rotation, mask)
 
         with torch.cuda.amp.autocast(enabled=False):
             rotation_loss = self.rotation_loss(pred_rotation.float(), gt_rotation.float())
 
-        PC_reproj_loss = self.PC_reproj_loss(pcs, gt_T_to_camera, pred_translation, pred_rotation, mask)
         loss = self.weight_translation * translation_loss \
                 + self.weight_rotation * rotation_loss \
                 + self.weight_PCreproj * PC_reproj_loss \
                 + self.weight_quat_norm * quat_norm_loss
+
+        axis_loss_val = torch.tensor(0.0, device=pcs.device)
+        axis_details = {}
+        if self.enable_axis_loss:
+            with torch.cuda.amp.autocast(enabled=False):
+                axis_loss_val, axis_details = self.axis_rotation_loss(
+                    pred_rotation.float(), gt_rotation.float())
+            loss = loss + self.weight_axis_rotation * axis_loss_val
 
         if not self.rotation_only:
             with torch.no_grad():
@@ -188,4 +258,8 @@ class realworld_loss(nn.Module):
             "quat_norm_loss" : quat_norm_loss, 
             "PC_reproj_loss" : PC_reproj_loss,
         }
+        if self.enable_axis_loss:
+            ret["axis_rotation_loss"] = axis_loss_val / torch.pi * 180.0
+            for k, v in axis_details.items():
+                ret[f"axis_{k}_loss"] = v / torch.pi * 180.0
         return ret, T_gt_expected

@@ -28,17 +28,24 @@ class Lidar2BEV(nn.Module):
 
     @torch.no_grad()
     def voxelize(self, pc):
+        vox, coors, num_points = None, None, None
         B, _, _ = pc.shape
-        vox_list, coors_list, num_points_list = [], [], []
         for i in range(B):
-            vox_, coors_, num_points_ = self.ptvoxel(pc[i])
-            if self.voxelize_reduce:
-                vox_ = vox_.sum(dim=1)
+            vox_, coors_, num_points_ = self.ptvoxel(pc[i]) # zyx order
             batch_id = torch.full([vox_.shape[0], 1], i, dtype=torch.int32, device=vox_.device)
-            coors_list.append(torch.cat([batch_id, coors_], dim=1))
-            vox_list.append(vox_)
-            num_points_list.append(num_points_)
-        return torch.cat(vox_list, 0), torch.cat(coors_list, 0), torch.cat(num_points_list, 0)
+            if self.voxelize_reduce:
+                vox_ = torch.sum(vox_, dim=1, keepdim=False)
+            coors_ = torch.cat([batch_id, coors_], dim=1)
+            if vox is None:
+                vox = vox_
+                coors = coors_
+                num_points = num_points_
+            else:
+                vox = torch.cat([vox, vox_], 0) # zyx order
+                coors = torch.cat([coors, coors_], 0)
+                num_points = torch.cat([num_points, num_points_], 0)
+        
+        return vox, coors, num_points
 
     def forward(self, pc):
         """
