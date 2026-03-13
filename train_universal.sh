@@ -27,6 +27,8 @@
 #   --master_port PORT       - Master node port (default: 29500)
 #   --compile                - Enable torch.compile
 #   --rotation_only          - Only optimize rotation (skip translation optimization, use design values)
+#   --enable_axis_loss       - Enable per-axis rotation loss (Roll/Pitch/Yaw independent supervision)
+#   --weight_axis_rotation W - Weight for per-axis rotation loss (default: 0.3)
 #
 # Examples:
 #   # Single GPU training
@@ -95,6 +97,8 @@ LEARNING_RATE=""
 DDP_NGPUS=""
 USE_COMPILE=0
 ROTATION_ONLY=0
+ENABLE_AXIS_LOSS=0
+WEIGHT_AXIS_ROTATION=""
 NNODES="1"
 NODE_RANK="0"
 MASTER_ADDR=""
@@ -212,9 +216,21 @@ while [[ $# -gt 0 ]]; do
             ROTATION_ONLY=1
             shift
             ;;
+        --enable_axis_loss)
+            ENABLE_AXIS_LOSS=1
+            shift
+            ;;
+        --weight_axis_rotation)
+            if [ $# -lt 2 ]; then
+                echo "❌ Error: --weight_axis_rotation requires a value"
+                exit 1
+            fi
+            WEIGHT_AXIS_ROTATION="$2"
+            shift 2
+            ;;
         *)
             echo "❌ Unknown option: $1"
-            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --learning_rate, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile, --rotation_only"
+            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --learning_rate, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile, --rotation_only, --enable_axis_loss, --weight_axis_rotation"
             exit 1
             ;;
     esac
@@ -333,6 +349,7 @@ _print_row "PyTorch:"       "$PYTORCH_VER"
 _print_row "CUDA:"          "$CUDA_VER"
 _print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
 _print_row "Rotation Only:" "$([ "$ROTATION_ONLY" -eq 1 ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
+_print_row "Axis Loss:"    "$([ "$ENABLE_AXIS_LOSS" -eq 1 ] && echo "enabled (weight=${WEIGHT_AXIS_ROTATION:-0.3})" || echo 'disabled')"
 if [ "$NNODES" -gt 1 ]; then
 _print_sep
 _print_row "Node Rank:"     "$NODE_RANK"
@@ -410,6 +427,15 @@ if [ "$ROTATION_ONLY" -eq 1 ]; then
     ROTATION_ONLY_FLAG="--rotation_only 1"
 fi
 
+AXIS_LOSS_FLAG=""
+if [ "$ENABLE_AXIS_LOSS" -eq 1 ]; then
+    AXIS_LOSS_FLAG="--enable_axis_loss 1"
+fi
+WEIGHT_AXIS_FLAG=""
+if [ -n "$WEIGHT_AXIS_ROTATION" ]; then
+    WEIGHT_AXIS_FLAG="--weight_axis_rotation $WEIGHT_AXIS_ROTATION"
+fi
+
 if [ -n "$DDP_NGPUS" ]; then
     if [ "$NNODES" -gt 1 ]; then
         # 检测NCCL使用的网络接口
@@ -432,14 +458,25 @@ if [ -n "$DDP_NGPUS" ]; then
         export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
         export NCCL_DEBUG=INFO
         export NCCL_DEBUG_SUBSYS=INIT,NET
+        export NCCL_BLOCKING_WAIT=1
+        export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+        export DDP_TIMEOUT_MINUTES=${DDP_TIMEOUT_MINUTES:-$(( RDZV_TIMEOUT / 60 + 10 ))}
+
+        RDZV_ID="${RDZV_ID:-bevcalib_${MASTER_PORT}}"
+        if [ "$NODE_RANK" -eq 0 ]; then
+            IS_HOST=1
+        else
+            IS_HOST=0
+        fi
 
         LAUNCHER="torchrun \
             --nproc_per_node=$DDP_NGPUS \
             --nnodes=$NNODES \
             --node_rank=$NODE_RANK \
-            --master_addr=$MASTER_ADDR \
-            --master_port=$MASTER_PORT \
-            --rdzv_conf timeout=$RDZV_TIMEOUT"
+            --rdzv_backend=c10d \
+            --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+            --rdzv_id=$RDZV_ID \
+            --rdzv_conf timeout=${RDZV_TIMEOUT},is_host=${IS_HOST}"
         echo "Multi-node DDP: ${NNODES} nodes x ${DDP_NGPUS} GPUs/node, node_rank=$NODE_RANK"
         echo "Master: ${MASTER_ADDR}:${MASTER_PORT}, rdzv_timeout=${RDZV_TIMEOUT}s"
         echo "NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME"
@@ -471,7 +508,9 @@ case $MODE in
             --step_size 60 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG \
-            $ROTATION_ONLY_FLAG
+            $ROTATION_ONLY_FLAG \
+            $AXIS_LOSS_FLAG \
+            $WEIGHT_AXIS_FLAG
         ;;
     
     finetune)
@@ -509,7 +548,9 @@ case $MODE in
             --xyz_only 1 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG \
-            $ROTATION_ONLY_FLAG
+            $ROTATION_ONLY_FLAG \
+            $AXIS_LOSS_FLAG \
+            $WEIGHT_AXIS_FLAG
         ;;
     
     resume)
@@ -547,7 +588,9 @@ case $MODE in
             --step_size 20 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG \
-            $ROTATION_ONLY_FLAG
+            $ROTATION_ONLY_FLAG \
+            $AXIS_LOSS_FLAG \
+            $WEIGHT_AXIS_FLAG
         ;;
     
     *)

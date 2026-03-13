@@ -248,8 +248,15 @@ class Cam2BEV(nn.Module):
         # Align the geometry to the voxel grid
         geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
+        batch_ix = torch.cat(
+            [
+                torch.full([Nprime // B, 1], ix, device=img_pc.device, dtype=torch.long)
+                for ix in range(B)
+            ]
+        )
         # expand+reshape is trace-friendly (repeat_interleave triggers CPU index in JIT)
-        batch_ix = torch.arange(B, device=img_pc.device, dtype=torch.long).view(B, 1).expand(B, Nprime // B).reshape(-1, 1)
+        # batch_ix = torch.arange(B, device=img_pc.device, dtype=torch.long).view(B, 1).
+        # expand(B, Nprime // B).reshape(-1, 1)
         geom_feats = torch.cat([geom_feats, batch_ix], 1)
 
         nx0_int, nx1_int, nx2_int = int(self.nx[0]), int(self.nx[1]), int(self.nx[2])
@@ -266,19 +273,59 @@ class Cam2BEV(nn.Module):
         img_pc = img_pc[kept]
         geom_feats = geom_feats[kept]
 
-        with torch.no_grad():
-            cam_bev_mask = torch.zeros(B, nx0_int, nx1_int, dtype=torch.float32, device=geom_feats.device)
-            if geom_feats.shape[0] > 0:
-                cam_bev_mask[geom_feats[:, 3].long(), geom_feats[:, 0].long(), geom_feats[:, 1].long()] = 1.0
         try:
-            cam_bev = bev_pool(img_pc, geom_feats, B, nx2_int, nx0_int, nx1_int)
+            # (B, out_channels, nx[2], nx[0], nx[1])
+            cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) 
         except:
             cam_bev = torch.zeros(B, C, nx2_int, nx0_int, nx1_int, device=img_pc.device, dtype=img_pc.dtype)
 
         cam_bev = torch.cat(cam_bev.unbind(dim=2), 1)
 
-        return cam_bev, cam_bev_mask
+        return cam_bev
 
+    def ref_bev_pool(self, img_depth_feature, geometry):
+        with torch.no_grad():
+            img_pc = img_depth_feature
+            geom_feats = geometry
+            B_traced, N, D, H, W, C = img_pc.shape
+            B = int(B_traced)
+            Nprime = B * int(N) * int(D) * int(H) * int(W)
+            img_pc = img_pc.reshape(Nprime, C)
+
+            # Align the geometry to the voxel grid
+            geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
+            geom_feats = geom_feats.view(Nprime, 3)
+            batch_ix = torch.cat(
+                [
+                    torch.full([Nprime // B, 1], ix, device=img_pc.device, dtype=torch.long)
+                    for ix in range(B)
+                ]
+            )
+            geom_feats = torch.cat([geom_feats, batch_ix], 1)
+
+            # filter out points that are outside box
+            kept = (
+                (geom_feats[:, 0] >= 0)
+                & (geom_feats[:, 0] < self.nx[0])
+                & (geom_feats[:, 1] >= 0)
+                & (geom_feats[:, 1] < self.nx[1])
+                & (geom_feats[:, 2] >= 0)
+                & (geom_feats[:, 2] < self.nx[2])
+            )
+            img_pc = img_pc[kept]
+            geom_feats = geom_feats[kept]
+            try:
+                # (B, out_channels, nx[2], nx[0], nx[1])
+                cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) 
+            except:
+                cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device = img_pc.device, dtype = img_pc.dtype)
+
+            binary_bev = torch.max(cam_bev, dim=2)[0]
+            
+            binary_bev = (binary_bev != 0).float()
+
+        return binary_bev
+    
     def forward(self, 
                 cam2ego_T,
                 cam_intrins,
@@ -303,13 +350,27 @@ class Cam2BEV(nn.Module):
         imgs = (imgs - self.mean) / self.std
         img_feats = self.CamEncode(imgs) 
         geometry, img_depth_feature = self.lss(cam2ego_rot=cam2ego_rot, cam2ego_trans=cam2ego_trans, cam_intrins=cam_intrins, post_cam2ego_rot=post_cam2ego_rot, post_cam2ego_trans=post_cam2ego_trans, img_feats=img_feats)
-        bev_feats, cam_bev_mask = self.bev_pool(geometry=geometry, img_depth_feature=img_depth_feature)
+        bev_feats = self.bev_pool(geometry=geometry, img_depth_feature=img_depth_feature)
+        with torch.no_grad():
+            geom_detach = geometry.detach()
+            ones_feat = torch.ones_like(img_depth_feature).to(img_depth_feature.device).detach()
+            ref_feats = self.ref_bev_pool(geometry=geom_detach, img_depth_feature=ones_feat)
         B, C, H, W = bev_feats.shape
+        cam_bev_mask = ref_feats != 0
+        ref_mask = cam_bev_mask[:, 0:1, :, :]
+        try:
+            assert torch.all(cam_bev_mask == ref_mask)
+        except:
+            print(f"ERROR: cam_bev_mask != ref_mask")
+            torch.save(cam2ego_T, "cam2ego_T.pt")
+            torch.save(cam_intrins, "cam_intrins.pt")
+            torch.save(post_cam2ego_T, "post_cam2ego_T.pt")
+            torch.save(imgs, "imgs.pt")
 
         bev_feats = bev_feats.permute(0, 2, 3, 1).reshape(B*H*W, C)
         bev_feats = self.proj_head(bev_feats)
         bev_feats = bev_feats.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-        return bev_feats, cam_bev_mask
+        return bev_feats, cam_bev_mask[:, 0, :, :]
     
 def generate_random_rt_matrix(batch_size=1, r_range=(-torch.pi, torch.pi), t_range=(-1, 1)):
     rx = torch.rand(batch_size, 1) * (r_range[1] - r_range[0]) + r_range[0]

@@ -87,6 +87,10 @@ def parse_args():
     parser.add_argument("--compile", type=int, default=0, help="使用 torch.compile 加速模型 (1=启用, 0=禁用)")
     parser.add_argument("--rotation_only", type=int, default=0,
                         help="仅优化旋转 (1=仅旋转, 0=旋转+平移同时优化)")
+    parser.add_argument("--enable_axis_loss", type=int, default=0,
+                        help="启用分轴旋转损失 (1=启用, 0=禁用)")
+    parser.add_argument("--weight_axis_rotation", type=float, default=0.3,
+                        help="分轴旋转损失权重 (默认: 0.3)")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
@@ -360,11 +364,14 @@ def main():
         tprint(f"网络输入尺寸 (H, W): {img_shape}")
         tprint(f"优化模式: {'仅旋转 (rotation only)' if rotation_only else '旋转+平移 (translation+rotation)'}")
     
+    enable_axis_loss = args.enable_axis_loss > 0
     model = BEVCalib(
         deformable=deformable_choise,
         bev_encoder=bev_encoder_choise,
         img_shape=img_shape,
         rotation_only=rotation_only,
+        enable_axis_loss=enable_axis_loss,
+        weight_axis_rotation=args.weight_axis_rotation,
     ).to(device)
 
     if args.pretrain_ckpt is not None:
@@ -436,8 +443,11 @@ def main():
     if is_main:
         tprint("=" * 80)
         tprint("Loss Calculation Formula:")
-        tprint("  total_loss = w_rot * rotation_loss(radians) + w_pc * PC_reproj_loss + w_quat * quat_norm_loss")
-        tprint("  Default weights: w_rot=0.5, w_pc=0.5, w_quat=0.5")
+        formula = "  total_loss = w_rot * rotation_loss(radians) + w_pc * PC_reproj_loss + w_quat * quat_norm_loss"
+        if enable_axis_loss:
+            formula += f" + {args.weight_axis_rotation} * axis_rotation_loss"
+        tprint(formula)
+        tprint("  Default weights rotation_only: w_rot=1.0, w_pc=1.0, w_quat=0.5")
         tprint("")
         tprint("Log Terminology:")
         tprint("  • rotation_loss: displayed in degrees (°) for readability, but total_loss uses radians")

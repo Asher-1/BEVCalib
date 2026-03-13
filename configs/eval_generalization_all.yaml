@@ -1,0 +1,89 @@
+# 泛化性能评估配置文件
+# 用法: python run_generalization_eval.py --config configs/eval_generalization.yaml
+
+# 全局路径配置
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"  # 相对于 bevcalib_root
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/multi_eval_generalization_5deg"  # 相对于 bevcalib_root
+eval_script: "evaluate_checkpoint.py"  # 相对于 bevcalib_root
+
+# 评估参数
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+# 模型列表
+models:
+  - label: "10deg-v2-z5"
+    dir_name: "model_small_10deg_v2_z5"
+    ckpt: "ckpt_240.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 0
+    angle_deg: 10
+    z_voxels: 5
+    version: "v2"
+    mode_desc: "rotation+translation"
+
+  - label: "10deg-v3-z10"
+    dir_name: "model_small_10deg_v3_z10"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 0
+    angle_deg: 10
+    z_voxels: 10
+    version: "v3"
+    mode_desc: "rotation+translation"
+
+  - label: "10deg-v4-z1-rot"
+    dir_name: "model_small_10deg_v4_z1_rotation"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "20.0"
+    rotation_only: 1
+    angle_deg: 10
+    z_voxels: 1
+    version: "v4"
+    mode_desc: "rotation_only"
+
+  - label: "10deg-v4-z5-rot"
+    dir_name: "model_small_10deg_v4_z5_rotation"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 10
+    z_voxels: 5
+    version: "v4"
+    mode_desc: "rotation_only"
+
+  - label: "10deg-v4-z10-rot"
+    dir_name: "model_small_10deg_v4_z10_rotation"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    angle_deg: 10
+    z_voxels: 10
+    version: "v4"
+    mode_desc: "rotation_only"
+
+  - label: "5deg-v4-z1-rot"
+    dir_name: "model_small_5deg_v4_z1_rotation"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "20.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 1
+    version: "v4"
+    mode_desc: "rotation_only"
+
+  - label: "5deg-v4-z5-rot"
+    dir_name: "model_small_5deg_v4_z5_rotation"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4"
+    mode_desc: "rotation_only"

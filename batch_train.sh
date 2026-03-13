@@ -362,6 +362,14 @@ if params.get('use_compile', False):
 if params.get('rotation_only', False):
     args.append("--rotation_only")
 
+# enable_axis_loss
+if params.get('enable_axis_loss', False):
+    args.append("--enable_axis_loss")
+
+# weight_axis_rotation
+if params.get('weight_axis_rotation') is not None:
+    args.append(f"--weight_axis_rotation {params['weight_axis_rotation']}")
+
 # foreground
 if params.get('foreground', False):
     args.append("--fg")

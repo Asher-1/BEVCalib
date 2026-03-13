@@ -208,6 +208,9 @@ bash start_training.sh all v1
 # Train with DDP (distributed data parallel)
 bash start_training.sh B26A v1 --ddp
 
+# full bash command
+export BEV_ZBOUND_STEP=2.0 && bash start_training.sh all v4_z10_rotation --bs 16 --lr 1e-4 --ddp --nnodes 2 --fg --angle 10 --trans 0.3 --rotation_only --enable_axis_loss --weight_axis_rotation 0.3
+
 # Train with custom learning rate
 bash start_training.sh B26A v2 --lr 0.0001
 ```
