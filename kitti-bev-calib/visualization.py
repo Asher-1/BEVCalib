@@ -45,16 +45,14 @@ def rotation_matrix_to_euler_angles(R: np.ndarray) -> np.ndarray:
 
 def compute_pose_errors(pred_T: np.ndarray, gt_T: np.ndarray) -> Dict[str, float]:
     """
-    计算预测变换矩阵与真值之间的误差 (使用标准 evaluate_sensor_extrinsic 方法)
+    计算预测变换矩阵与真值之间的误差 (所有误差均在LiDAR坐标系下)
     
-    ⚠️ 坐标系说明:
+    坐标系说明:
     - T矩阵: LiDAR→Camera 变换 (4x4)
-    - T[:3, 3]: Camera在LiDAR坐标系中的位置
-    - T[:3, :3]: LiDAR→Camera 的旋转矩阵
+    - evaluate_sensor_extrinsic 内部将旋转误差从Camera系转到LiDAR系
+    - 平移误差天然在LiDAR系 (t是Camera在LiDAR系中的位置)
     
-    evaluate_sensor_extrinsic 直接计算误差，无需额外坐标系转换:
-    - axis_pos_error = (t_pred - t_gt) * 100  # 已经在LiDAR坐标系
-    - axis_angle_error: 轴角误差向量 (度)
+    LiDAR坐标系: X=前进(Fwd), Y=左(Lat), Z=上(Ht)
     
     Args:
         pred_T: (4, 4) 预测的变换矩阵 (LiDAR → Camera)
@@ -63,31 +61,22 @@ def compute_pose_errors(pred_T: np.ndarray, gt_T: np.ndarray) -> Dict[str, float
     Returns:
         dict: 包含各项误差指标 (LiDAR坐标系)
             - trans_error: 平移总误差 (m)
-            - fwd_error, lat_error, ht_error: LiDAR X/Y/Z 方向平移误差 (m)
+            - fwd_error, lat_error, ht_error: LiDAR X(前进)/Y(左)/Z(上) 平移误差 (m)
             - rot_error: 旋转总误差 (deg)
-            - roll_error, pitch_error, yaw_error: 轴角误差分量 (deg)
-    
-    ✅ 与 C++ Eigen 实现完全一致
-    ✅ 与 evaluate_extrinsics.py 标准方法一致
+            - roll_error, pitch_error, yaw_error: LiDAR X(前进)/Y(左)/Z(上) 旋转误差 (deg)
     """
-    # 使用标准方法计算误差
     angle_error, axis_angle_error, pos_error, axis_pos_error = \
         evaluate_sensor_extrinsic(pred_T, gt_T)
     
-    # 返回结果，保持与原接口兼容
-    # 注意: axis_pos_error 已经在 LiDAR 坐标系中，单位为 cm
     return {
-        # 平移误差 (转换为米)
-        'trans_error': pos_error / 100.0,  # cm → m
-        'fwd_error': abs(axis_pos_error[0]) / 100.0,   # LiDAR X (前向) cm→m
-        'lat_error': abs(axis_pos_error[1]) / 100.0,   # LiDAR Y (横向) cm→m
-        'ht_error': abs(axis_pos_error[2]) / 100.0,    # LiDAR Z (高度) cm→m
-        
-        # 旋转误差 (度)
-        'rot_error': angle_error,  # 总旋转误差
-        'roll_error': abs(axis_angle_error[0]),   # 轴角误差 X 分量
-        'pitch_error': abs(axis_angle_error[1]),  # 轴角误差 Y 分量
-        'yaw_error': abs(axis_angle_error[2]),    # 轴角误差 Z 分量
+        'trans_error': pos_error / 100.0,                     # cm → m
+        'fwd_error': abs(axis_pos_error[0]) / 100.0,         # LiDAR X (前进) cm→m
+        'lat_error': abs(axis_pos_error[1]) / 100.0,         # LiDAR Y (左)   cm→m
+        'ht_error': abs(axis_pos_error[2]) / 100.0,          # LiDAR Z (上)   cm→m
+        'rot_error': angle_error,                              # 总旋转误差 (deg)
+        'roll_error': abs(axis_angle_error[0]),               # 绕LiDAR X(前进) (deg)
+        'pitch_error': abs(axis_angle_error[1]),              # 绕LiDAR Y(左)   (deg)
+        'yaw_error': abs(axis_angle_error[2]),                # 绕LiDAR Z(上)   (deg)
     }
 
 

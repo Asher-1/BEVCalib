@@ -185,8 +185,9 @@ def parse_eval_stats(extrinsics_path):
     result['samples'] = int(m.group(1)) if m else 0
 
     name_maps = {
-        'rot': {'Total': 'rot_error', 'Roll (X)': 'roll_error',
-                'Pitch (Y)': 'pitch_error', 'Yaw (Z)': 'yaw_error'},
+        'rot': {'Total': 'rot_error', 'Roll (X)': 'roll_error', 'Roll (LiDAR-X)': 'roll_error',
+                'Pitch (Y)': 'pitch_error', 'Pitch (LiDAR-Y)': 'pitch_error',
+                'Yaw (Z)': 'yaw_error', 'Yaw (LiDAR-Z)': 'yaw_error'},
         'trans': {'Total': 'trans_error', 'X (Fwd)': 'fwd_error',
                   'Y (Lat)': 'lat_error', 'Z (Ht)': 'ht_error'},
     }
@@ -210,8 +211,7 @@ def parse_eval_stats(extrinsics_path):
         for display_name, key in active.items():
             if s.startswith(display_name):
                 parts = s.split()
-                offset = 2 if display_name in ('Roll (X)', 'Pitch (Y)', 'Yaw (Z)',
-                                                 'X (Fwd)', 'Y (Lat)', 'Z (Ht)') else 1
+                offset = len(display_name.split()) if display_name != 'Total' else 1
                 try:
                     vals = [float(x) for x in parts[offset:offset+8]]
                     result[f'{key}_mean'] = vals[0]
@@ -430,10 +430,10 @@ def generate_charts(all_stats):
     pitches = [s.get('pitch_error_mean', 0) for s in all_stats]
     yaws = [s.get('yaw_error_mean', 0) for s in all_stats]
     fig, ax = plt.subplots(figsize=(max(14, n * 2), 7))
-    ax.bar(x, rolls, 0.55, label='Roll (X)', color='#1abc9c')
-    ax.bar(x, pitches, 0.55, bottom=rolls, label='Pitch (Y)', color='#f39c12')
+    ax.bar(x, rolls, 0.55, label='Roll (LiDAR-X)', color='#1abc9c')
+    ax.bar(x, pitches, 0.55, bottom=rolls, label='Pitch (LiDAR-Y)', color='#f39c12')
     bottoms = [r + p for r, p in zip(rolls, pitches)]
-    ax.bar(x, yaws, 0.55, bottom=bottoms, label='Yaw (Z)', color='#8e44ad')
+    ax.bar(x, yaws, 0.55, bottom=bottoms, label='Yaw (LiDAR-Z)', color='#8e44ad')
     for i, v in enumerate(means):
         ax.text(i, v + 0.15, f'{v:.2f}', ha='center', fontsize=9, fontweight='bold')
     ax.set_xticks(x)
@@ -658,7 +658,7 @@ def generate_report(all_stats):
     lines.append("三、旋转分量分析 (Roll / Pitch / Yaw Mean, deg)")
     lines.append("=" * 80)
     lines.append("")
-    lines.append("| 模型 | Roll(X) | Pitch(Y) | Yaw(Z) | Total |")
+    lines.append("| 模型 | Roll(LiDAR-X) | Pitch(LiDAR-Y) | Yaw(LiDAR-Z) | Total |")
     lines.append("| --- | ---: | ---: | ---: | ---: |")
     for s in sorted_stats:
         lines.append(

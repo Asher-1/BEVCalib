@@ -434,11 +434,11 @@ def evaluate_checkpoint(args):
                         f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
                         f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
                     
-                    f.write("\nRotation Errors (axis-angle):\n")
-                    f.write(f"  Total:       {errors['rot_error']:.6f} deg\n")
-                    f.write(f"  Roll (X):    {errors['roll_error']:.6f} deg\n")
-                    f.write(f"  Pitch (Y):   {errors['pitch_error']:.6f} deg\n")
-                    f.write(f"  Yaw (Z):     {errors['yaw_error']:.6f} deg\n")
+                    f.write("\nRotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
+                    f.write(f"  Total:            {errors['rot_error']:.6f} deg\n")
+                    f.write(f"  Roll  (LiDAR X):  {errors['roll_error']:.6f} deg\n")
+                    f.write(f"  Pitch (LiDAR Y):  {errors['pitch_error']:.6f} deg\n")
+                    f.write(f"  Yaw   (LiDAR Z):  {errors['yaw_error']:.6f} deg\n")
                     
                     f.write("\n" + "="*80 + "\n\n")
                 
@@ -473,7 +473,7 @@ def evaluate_checkpoint(args):
             f.write(f"  {'-'*len(header)}\n")
             name_map = {
                 'trans_error': 'Total', 'fwd_error': 'X (Fwd)', 'lat_error': 'Y (Lat)', 'ht_error': 'Z (Ht)',
-                'rot_error': 'Total', 'roll_error': 'Roll (X)', 'pitch_error': 'Pitch (Y)', 'yaw_error': 'Yaw (Z)',
+                'rot_error': 'Total', 'roll_error': 'Roll (LiDAR-X)', 'pitch_error': 'Pitch (LiDAR-Y)', 'yaw_error': 'Yaw (LiDAR-Z)',
             }
             for k in keys:
                 name = name_map.get(k, k)
@@ -500,11 +500,11 @@ def evaluate_checkpoint(args):
             f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
             f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
 
-        f.write("\nAverage Rotation Errors (axis-angle):\n")
-        f.write(f"  Total:       {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
-        f.write(f"  Roll (X):    {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
-        f.write(f"  Pitch (Y):   {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
-        f.write(f"  Yaw (Z):     {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
+        f.write("\nAverage Rotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
+        f.write(f"  Total:            {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
+        f.write(f"  Roll  (LiDAR X):  {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
+        f.write(f"  Pitch (LiDAR Y):  {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
+        f.write(f"  Yaw   (LiDAR Z):  {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
         f.write("\n" + "="*80 + "\n")
 
     # ========== 生成评估可视化图表 ==========
@@ -616,20 +616,20 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_onl
 
     if rotation_only:
         fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-        _hist(axes[0], rot,   'Total Rot',   '°', '#e74c3c')
-        _hist(axes[1], roll,  'Roll (X)',    '°', '#1abc9c')
-        _hist(axes[2], pitch, 'Pitch (Y)',   '°', '#f39c12')
-        _hist(axes[3], yaw,   'Yaw (Z)',    '°', '#8e44ad')
+        _hist(axes[0], rot,   'Total Rot',         '°', '#e74c3c')
+        _hist(axes[1], roll,  'Roll (LiDAR-X)',   '°', '#1abc9c')
+        _hist(axes[2], pitch, 'Pitch (LiDAR-Y)',  '°', '#f39c12')
+        _hist(axes[3], yaw,   'Yaw (LiDAR-Z)',   '°', '#8e44ad')
     else:
         fig, axes = plt.subplots(2, 4, figsize=(20, 10))
         _hist(axes[0,0], trans, 'Total Trans', 'm', '#3498db')
         _hist(axes[0,1], fwd,   'Fwd (X)',     'm', '#2ecc71')
         _hist(axes[0,2], lat,   'Lat (Y)',     'm', '#e67e22')
         _hist(axes[0,3], ht,    'Ht (Z)',      'm', '#9b59b6')
-        _hist(axes[1,0], rot,   'Total Rot',   '°', '#e74c3c')
-        _hist(axes[1,1], roll,  'Roll (X)',    '°', '#1abc9c')
-        _hist(axes[1,2], pitch, 'Pitch (Y)',   '°', '#f39c12')
-        _hist(axes[1,3], yaw,   'Yaw (Z)',    '°', '#8e44ad')
+        _hist(axes[1,0], rot,   'Total Rot',         '°', '#e74c3c')
+        _hist(axes[1,1], roll,  'Roll (LiDAR-X)',   '°', '#1abc9c')
+        _hist(axes[1,2], pitch, 'Pitch (LiDAR-Y)',  '°', '#f39c12')
+        _hist(axes[1,3], yaw,   'Yaw (LiDAR-Z)',   '°', '#8e44ad')
 
     fig.suptitle(f'Error Distribution Histograms {title_suffix}', fontsize=14, fontweight='bold')
     plt.tight_layout()
@@ -654,7 +654,7 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_onl
         ax1.set_title('Translation Error Distribution', fontsize=13, fontweight='bold')
         ax1.grid(True, alpha=0.3, axis='y')
 
-    bp2 = ax2.boxplot([rot, roll, pitch, yaw], labels=['Total', 'Roll(X)', 'Pitch(Y)', 'Yaw(Z)'],
+    bp2 = ax2.boxplot([rot, roll, pitch, yaw], labels=['Total', 'Roll(LiDAR-X)', 'Pitch(LiDAR-Y)', 'Yaw(LiDAR-Z)'],
                        patch_artist=True, showmeans=True, meanline=True,
                        meanprops=dict(color='red', ls='--', lw=1.5),
                        medianprops=dict(color='orange', lw=2),
@@ -706,9 +706,9 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_onl
         ax1.grid(True, alpha=0.2)
         ax1.set_xlim(0, len(sorted_idx)-1)
 
-    ax2.fill_between(range(len(sorted_idx_r)), pitch[sorted_idx_r], alpha=0.6, color='#f39c12', label='Pitch(Y)')
-    ax2.fill_between(range(len(sorted_idx_r)), yaw[sorted_idx_r], alpha=0.6, color='#8e44ad', label='Yaw(Z)')
-    ax2.fill_between(range(len(sorted_idx_r)), roll[sorted_idx_r], alpha=0.6, color='#1abc9c', label='Roll(X)')
+    ax2.fill_between(range(len(sorted_idx_r)), pitch[sorted_idx_r], alpha=0.6, color='#f39c12', label='Pitch(LiDAR-Y)')
+    ax2.fill_between(range(len(sorted_idx_r)), yaw[sorted_idx_r], alpha=0.6, color='#8e44ad', label='Yaw(LiDAR-Z)')
+    ax2.fill_between(range(len(sorted_idx_r)), roll[sorted_idx_r], alpha=0.6, color='#1abc9c', label='Roll(LiDAR-X)')
     ax2.plot(range(len(sorted_idx_r)), rot[sorted_idx_r], color='#2c3e50', lw=1.2, label='Total Rot')
     ax2.axhline(np.mean(rot), color='red', ls='--', lw=1, label=f'Mean={np.mean(rot):.2f}°')
     ax2.set_xlabel('Samples (sorted by total error)', fontsize=12)
@@ -933,8 +933,8 @@ def compare_checkpoints(args):
             f.write(f"\n[{lbl}] Rotation Errors (deg):\n")
             f.write(f"  {header}\n")
             f.write(f"  {'-' * len(header)}\n")
-            name_map = {'rot_error': 'Total', 'roll_error': 'Roll(X)',
-                        'pitch_error': 'Pitch(Y)', 'yaw_error': 'Yaw(Z)'}
+            name_map = {'rot_error': 'Total', 'roll_error': 'Roll(LiDAR-X)',
+                        'pitch_error': 'Pitch(LiDAR-Y)', 'yaw_error': 'Yaw(LiDAR-Z)'}
             for k in ['rot_error', 'roll_error', 'pitch_error', 'yaw_error']:
                 s = _stats(np.array(errs[k]))
                 f.write(f"  {name_map[k]:<14} {s[0]:>8.4f} {s[1]:>8.4f} {s[2]:>8.4f} "
@@ -983,7 +983,7 @@ def _generate_comparison_charts(errors_a, errors_b, label_a, label_b,
             axes,
             [rot_a, roll_a, pitch_a, yaw_a],
             [rot_b, roll_b, pitch_b, yaw_b],
-            ['Total Rotation', 'Roll (X)', 'Pitch (Y)', 'Yaw (Z)']):
+            ['Total Rotation', 'Roll (LiDAR-X)', 'Pitch (LiDAR-Y)', 'Yaw (LiDAR-Z)']):
         ax.plot(np.sort(da), pct, color=COLOR_A, lw=2, label=f'{label_a} (Mean={np.mean(da):.2f})')
         ax.plot(np.sort(db), pct, color=COLOR_B, lw=2, label=f'{label_b} (Mean={np.mean(db):.2f})')
         ax.set_xlabel('Error (deg)', fontsize=11)
@@ -1026,7 +1026,7 @@ def _generate_comparison_charts(errors_a, errors_b, label_a, label_b,
             axes,
             [rot_a, roll_a, pitch_a, yaw_a],
             [rot_b, roll_b, pitch_b, yaw_b],
-            ['Total Rot', 'Roll (X)', 'Pitch (Y)', 'Yaw (Z)']):
+            ['Total Rot', 'Roll (LiDAR-X)', 'Pitch (LiDAR-Y)', 'Yaw (LiDAR-Z)']):
         bp = ax.boxplot([da, db], tick_labels=[label_a, label_b], patch_artist=True,
                         showmeans=True, meanline=True,
                         meanprops=dict(color='red', ls='--', lw=1.5),
@@ -1176,8 +1176,9 @@ def _parse_eval_stats(extrinsics_path):
     result['samples'] = int(m.group(1)) if m else 0
 
     rot_names = {
-        'Total': 'rot_error', 'Roll (X)': 'roll_error',
-        'Pitch (Y)': 'pitch_error', 'Yaw (Z)': 'yaw_error',
+        'Total': 'rot_error', 'Roll (X)': 'roll_error', 'Roll (LiDAR-X)': 'roll_error',
+        'Pitch (Y)': 'pitch_error', 'Pitch (LiDAR-Y)': 'pitch_error',
+        'Yaw (Z)': 'yaw_error', 'Yaw (LiDAR-Z)': 'yaw_error',
     }
     trans_names = {
         'Total': 'trans_error', 'X (Fwd)': 'fwd_error',
@@ -1212,17 +1213,23 @@ def _parse_eval_stats(extrinsics_path):
         for display_name, key in active_map.items():
             if stripped.startswith(display_name):
                 parts = stripped.split()
-                if len(parts) >= 9:
+                nums = []
+                for p in parts:
                     try:
-                        result[f'{key}_mean'] = float(parts[1])
-                        result[f'{key}_std'] = float(parts[2])
-                        result[f'{key}_min'] = float(parts[3])
-                        result[f'{key}_median'] = float(parts[4])
-                        result[f'{key}_p90'] = float(parts[5])
-                        result[f'{key}_p95'] = float(parts[6])
-                        result[f'{key}_p99'] = float(parts[7])
-                        result[f'{key}_max'] = float(parts[8])
-                    except (ValueError, IndexError):
+                        nums.append(float(p))
+                    except ValueError:
+                        continue
+                if len(nums) >= 8:
+                    try:
+                        result[f'{key}_mean'] = nums[0]
+                        result[f'{key}_std'] = nums[1]
+                        result[f'{key}_min'] = nums[2]
+                        result[f'{key}_median'] = nums[3]
+                        result[f'{key}_p90'] = nums[4]
+                        result[f'{key}_p95'] = nums[5]
+                        result[f'{key}_p99'] = nums[6]
+                        result[f'{key}_max'] = nums[7]
+                    except IndexError:
                         pass
     return result if 'rot_error_mean' in result else None
 
@@ -1290,10 +1297,10 @@ def _generate_multi_charts(all_stats, output_dir):
     pitches = [s.get('pitch_error_mean', 0) for s in all_stats]
     yaws = [s.get('yaw_error_mean', 0) for s in all_stats]
     fig, ax = plt.subplots(figsize=(max(12, n * 1.5), 6))
-    ax.bar(x, rolls, 0.6, label='Roll (X)', color='#1abc9c')
-    ax.bar(x, pitches, 0.6, bottom=rolls, label='Pitch (Y)', color='#f39c12')
+    ax.bar(x, rolls, 0.6, label='Roll (LiDAR-X)', color='#1abc9c')
+    ax.bar(x, pitches, 0.6, bottom=rolls, label='Pitch (LiDAR-Y)', color='#f39c12')
     bottoms = [r + p for r, p in zip(rolls, pitches)]
-    ax.bar(x, yaws, 0.6, bottom=bottoms, label='Yaw (Z)', color='#8e44ad')
+    ax.bar(x, yaws, 0.6, bottom=bottoms, label='Yaw (LiDAR-Z)', color='#8e44ad')
     for i, v in enumerate(means):
         ax.text(i, v + 0.1, f'{v:.2f}', ha='center', fontsize=8, fontweight='bold')
     ax.set_xticks(x)
@@ -1366,7 +1373,7 @@ def _generate_feishu_report(all_stats, output_dir, args):
     lines.append("\n![Rotation Error Bar Chart](charts/rotation_error_bar.png)\n")
 
     lines.append("\n三、旋转分量分析 (Roll / Pitch / Yaw Mean, deg)\n")
-    lines.append("| 模型 | Roll(X) | Pitch(Y) | Yaw(Z) | Total |")
+    lines.append("| 模型 | Roll(LiDAR-X) | Pitch(LiDAR-Y) | Yaw(LiDAR-Z) | Total |")
     lines.append("| --- | ---: | ---: | ---: | ---: |")
     for s in sorted(all_stats, key=lambda x: x.get('rot_error_mean', 999)):
         lines.append(

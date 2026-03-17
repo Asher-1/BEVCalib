@@ -505,7 +505,7 @@ case $MODE in
             --xyz_only 1 \
             --scheduler 1 \
             --lr $LR_SCRATCH \
-            --step_size 60 \
+            --step_size 80 \
             --use_custom_dataset 1 \
             $COMPILE_FLAG \
             $ROTATION_ONLY_FLAG \
