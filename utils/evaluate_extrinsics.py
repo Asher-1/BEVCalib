@@ -16,44 +16,31 @@ from pathlib import Path
 
 def evaluate_sensor_extrinsic(T_pred, T_gt):
     """
-    评估传感器外参误差
+    评估传感器外参误差 (所有误差均在LiDAR坐标系下)
     
     参数标准命名约定:
-    - T_pred: 预测的外参变换矩阵 (4x4)
-    - T_gt: Ground Truth外参变换矩阵 (4x4)
+    - T_pred: 预测的外参变换矩阵 (4x4), LiDAR → Camera
+    - T_gt: Ground Truth外参变换矩阵 (4x4), LiDAR → Camera
     
-    返回:
+    返回 (均在LiDAR坐标系下, X=前进, Y=左, Z=上):
     - angle_error: 旋转角度误差 (度)
-    - axis_angle_error: 轴角误差向量 (度) [3x1]
+    - axis_angle_error: 轴角误差向量 (度) [3x1], LiDAR系 [X前进, Y左, Z上]
     - pos_error: 平移位置误差 (cm)
-    - axis_pos_error: 轴位置误差向量 (cm) [3x1]
+    - axis_pos_error: 轴位置误差向量 (cm) [3x1], LiDAR系 [X前进, Y左, Z上]
     
-    实现细节:
-    对应C++代码:
-    ```cpp
-    Eigen::Quaterniond dq = Eigen::Quaterniond(
-        iso_sensing_xxx.linear() * iso_sensing_xxx_gt.linear().inverse());
-    
-    Eigen::AngleAxisd angle_axis = Eigen::AngleAxisd(dq);
-    axis_angle_error = angle_axis.angle() * angle_axis.axis();
-    axis_angle_error *= (180.0 / M_PI);  // degree
-    angle_error = axis_angle_error.norm();
-    
-    Vector3d t = iso_sensing_xxx.translation();
-    Vector3d t_gt = iso_sensing_xxx_gt.translation();
-    
-    axis_pos_error = (t - t_gt) * 100;  // cm
-    pos_error = axis_pos_error.norm();
-    ```
+    坐标系转换说明:
+    T = [R | t] 是 LiDAR→Camera 变换, 其中:
+    - R: LiDAR→Camera 旋转矩阵
+    - t: Camera在LiDAR坐标系中的位置 (已在LiDAR系, 无需转换)
+    - dR = R_pred @ R_gt.T 得到的旋转差异在Camera系
+    - 需要用 R_gt.T 将旋转误差从Camera系转回LiDAR系
     """
-    # 提取旋转矩阵
     R_pred = T_pred[:3, :3]
     R_gt = T_gt[:3, :3]
     
-    # 计算旋转差异: dR = R_pred * R_gt^(-1)
+    # dR = R_pred * R_gt^(-1), 旋转差异在Camera系
     dR = R_pred @ R_gt.T
     
-    # 处理退化矩阵 (NaN/Inf): 返回最大误差而非崩溃
     if not np.all(np.isfinite(dR)):
         axis_angle_error = np.array([180.0, 180.0, 180.0])
         angle_error = np.linalg.norm(axis_angle_error)
@@ -74,52 +61,42 @@ def evaluate_sensor_extrinsic(T_pred, T_gt):
     except np.linalg.LinAlgError:
         print("SVD分解失败")
         exit()
-        # axis_angle_error = np.array([180.0, 180.0, 180.0])
-        # angle_error = np.linalg.norm(axis_angle_error)
-        # t_pred = T_pred[:3, 3]
-        # t_gt = T_gt[:3, 3]
-        # axis_pos_error = np.where(np.isfinite(t_pred - t_gt), (t_pred - t_gt) * 100.0, np.array([9999.0, 9999.0, 9999.0]))
-        # pos_error = np.linalg.norm(axis_pos_error)
-        # return angle_error, axis_angle_error, pos_error, axis_pos_error
     
-    # 转换为轴角表示
-    axis_angle_rad = rot_diff.as_rotvec()  # 弧度制，轴角向量
+    # 轴角向量在Camera系 (弧度)
+    axis_angle_cam_rad = rot_diff.as_rotvec()
     
-    # 转换为度
-    axis_angle_error = np.degrees(axis_angle_rad)  # [rx, ry, rz] in degrees
+    # 从Camera系转到LiDAR系: v_lidar = R_gt^T @ v_cam
+    axis_angle_lidar_rad = R_gt.T @ axis_angle_cam_rad
     
-    # 计算总旋转角度误差（范数）
-    angle_error = np.linalg.norm(axis_angle_error)  # degrees
+    axis_angle_error = np.degrees(axis_angle_lidar_rad)  # LiDAR系 [X前进, Y左, Z上]
+    angle_error = np.linalg.norm(axis_angle_error)
     
-    # 提取平移向量
+    # 平移: t 是Camera在LiDAR系中的位置, 差值已在LiDAR系
     t_pred = T_pred[:3, 3]
     t_gt = T_gt[:3, 3]
-    
-    # 计算平移差异（转换为厘米）
-    axis_pos_error = (t_pred - t_gt) * 100.0  # [x, y, z] in cm
-    
-    # 计算总平移误差（范数）
-    pos_error = np.linalg.norm(axis_pos_error)  # cm
+    axis_pos_error = (t_pred - t_gt) * 100.0  # LiDAR系 [X前进, Y左, Z上] cm
+    pos_error = np.linalg.norm(axis_pos_error)
     
     return angle_error, axis_angle_error, pos_error, axis_pos_error
 
 
 def decompose_rotation_error(axis_angle_error):
     """
-    将轴角误差分解为Roll, Pitch, Yaw
-    注意: 这是近似分解，严格来说轴角不能直接分解为欧拉角
-    但对于小角度误差，这个近似是合理的
+    将轴角误差分解为Roll, Pitch, Yaw (LiDAR坐标系)
+    对于小角度误差，轴角向量的各分量近似等于欧拉角
     
     参数:
-    - axis_angle_error: 轴角误差向量 [rx, ry, rz] in degrees
+    - axis_angle_error: 轴角误差向量 [rx, ry, rz] in degrees (LiDAR系)
+      LiDAR系: X=前进, Y=左, Z=上
     
-    返回:
-    - roll, pitch, yaw: 近似的欧拉角误差 (度)
+    返回 (LiDAR系):
+    - roll: 绕X轴(前进方向)旋转误差 (度)
+    - pitch: 绕Y轴(左方向)旋转误差 (度)
+    - yaw: 绕Z轴(上方向)旋转误差 (度)
     """
-    # 对于小角度，轴角向量的各分量近似等于欧拉角
-    roll = axis_angle_error[0]   # 绕X轴
-    pitch = axis_angle_error[1]  # 绕Y轴
-    yaw = axis_angle_error[2]    # 绕Z轴
+    roll = axis_angle_error[0]   # 绕LiDAR X轴(前进)
+    pitch = axis_angle_error[1]  # 绕LiDAR Y轴(左)
+    yaw = axis_angle_error[2]    # 绕LiDAR Z轴(上)
     
     return roll, pitch, yaw
 
@@ -162,37 +139,35 @@ def load_transformation_from_calib(calib_file, key='Tr:', invert=False):
 
 def print_evaluation_results(angle_error, axis_angle_error, pos_error, axis_pos_error,
                             title="外参误差评估结果"):
-    """打印格式化的评估结果"""
+    """打印格式化的评估结果 (LiDAR坐标系: X=前进, Y=左, Z=上)"""
     print(f"\n{'='*70}")
-    print(f"{title}")
+    print(f"{title}  [LiDAR坐标系: X=前进, Y=左, Z=上]")
     print(f"{'='*70}")
     
     print(f"\n📐 旋转误差:")
     print(f"  总角度误差: {angle_error:.6f}° (degrees)")
-    print(f"  轴角误差向量: [{axis_angle_error[0]:+.6f}, "
+    print(f"  轴角误差向量 (LiDAR系): [{axis_angle_error[0]:+.6f}, "
           f"{axis_angle_error[1]:+.6f}, {axis_angle_error[2]:+.6f}]° (degrees)")
     
-    # 分解为Roll, Pitch, Yaw（近似）
     roll, pitch, yaw = decompose_rotation_error(axis_angle_error)
-    print(f"  分解 (近似):")
-    print(f"    Roll  (绕X轴): {roll:+.6f}°")
-    print(f"    Pitch (绕Y轴): {pitch:+.6f}°")
-    print(f"    Yaw   (绕Z轴): {yaw:+.6f}°")
+    print(f"  分解 (LiDAR系):")
+    print(f"    Roll  (绕X轴/前进): {roll:+.6f}°")
+    print(f"    Pitch (绕Y轴/左):   {pitch:+.6f}°")
+    print(f"    Yaw   (绕Z轴/上):   {yaw:+.6f}°")
     
     print(f"\n📍 平移误差:")
     print(f"  总位置误差: {pos_error:.6f} cm")
-    print(f"  轴位置误差向量: [{axis_pos_error[0]:+.6f}, "
+    print(f"  轴位置误差向量 (LiDAR系): [{axis_pos_error[0]:+.6f}, "
           f"{axis_pos_error[1]:+.6f}, {axis_pos_error[2]:+.6f}] cm")
-    print(f"  分解:")
-    print(f"    X轴 (横向): {axis_pos_error[0]:+.6f} cm")
-    print(f"    Y轴 (纵向): {axis_pos_error[1]:+.6f} cm")
-    print(f"    Z轴 (垂直): {axis_pos_error[2]:+.6f} cm")
+    print(f"  分解 (LiDAR系):")
+    print(f"    X轴 (前进): {axis_pos_error[0]:+.6f} cm")
+    print(f"    Y轴 (左):   {axis_pos_error[1]:+.6f} cm")
+    print(f"    Z轴 (上):   {axis_pos_error[2]:+.6f} cm")
     
-    # 转换为米显示
     print(f"\n  (以米为单位: {pos_error/100:.6f} m)")
-    print(f"    X: {axis_pos_error[0]/100:+.6f} m")
-    print(f"    Y: {axis_pos_error[1]/100:+.6f} m")
-    print(f"    Z: {axis_pos_error[2]/100:+.6f} m")
+    print(f"    X (前进): {axis_pos_error[0]/100:+.6f} m")
+    print(f"    Y (左):   {axis_pos_error[1]/100:+.6f} m")
+    print(f"    Z (上):   {axis_pos_error[2]/100:+.6f} m")
 
 
 def compare_two_transforms(T1, T2, name1="变换1", name2="变换2"):

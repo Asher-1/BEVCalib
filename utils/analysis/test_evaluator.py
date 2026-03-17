@@ -154,9 +154,9 @@ class TestEvaluator:
         
         # 提取分量误差
         components = [
-            ('roll', r'Roll \(X\):\s+([\d.]+)\s+±\s+([\d.]+)'),
-            ('pitch', r'Pitch \(Y\):\s+([\d.]+)\s+±\s+([\d.]+)'),
-            ('yaw', r'Yaw \(Z\):\s+([\d.]+)\s+±\s+([\d.]+)')
+            ('roll', r'Roll\s+\((?:X|LiDAR[- ]?X)\):\s+([\d.]+)\s+±\s+([\d.]+)'),
+            ('pitch', r'Pitch\s+\((?:Y|LiDAR[- ]?Y)\):\s+([\d.]+)\s+±\s+([\d.]+)'),
+            ('yaw', r'Yaw\s+\((?:Z|LiDAR[- ]?Z)\):\s+([\d.]+)\s+±\s+([\d.]+)')
         ]
         
         for comp_name, pattern in components:

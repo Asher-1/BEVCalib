@@ -793,11 +793,11 @@ def main():
                                     f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
                                     f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
                                 
-                                f.write("\nRotation Errors (axis-angle):\n")
-                                f.write(f"  Total:       {errors['rot_error']:.6f} deg\n")
-                                f.write(f"  Roll (X):    {errors['roll_error']:.6f} deg\n")
-                                f.write(f"  Pitch (Y):   {errors['pitch_error']:.6f} deg\n")
-                                f.write(f"  Yaw (Z):     {errors['yaw_error']:.6f} deg\n")
+                                f.write("\nRotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
+                                f.write(f"  Total:            {errors['rot_error']:.6f} deg\n")
+                                f.write(f"  Roll  (LiDAR X):  {errors['roll_error']:.6f} deg\n")
+                                f.write(f"  Pitch (LiDAR Y):  {errors['pitch_error']:.6f} deg\n")
+                                f.write(f"  Yaw   (LiDAR Z):  {errors['yaw_error']:.6f} deg\n")
                                 
                                 f.write("\n" + "="*80 + "\n\n")
                         
@@ -820,11 +820,11 @@ def main():
                         f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
                         f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
                     
-                    f.write("\nAverage Rotation Errors (axis-angle):\n")
-                    f.write(f"  Total:       {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
-                    f.write(f"  Roll (X):    {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
-                    f.write(f"  Pitch (Y):   {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
-                    f.write(f"  Yaw (Z):     {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
+                    f.write("\nAverage Rotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
+                    f.write(f"  Total:            {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
+                    f.write(f"  Roll  (LiDAR X):  {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
+                    f.write(f"  Pitch (LiDAR Y):  {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
+                    f.write(f"  Yaw   (LiDAR Z):  {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
                     f.write("\n" + "="*80 + "\n")
                 
                 avg_eval_errors = {key: np.mean(values) for key, values in all_errors.items()}
@@ -1045,10 +1045,10 @@ def main():
             md_lines.append("")
 
             if rotation_only:
-                hdr = "| Epoch | Rot(°) | R | P | Y |"
+                hdr = "| Epoch | Rot(°) | Roll(LiDAR-X) | Pitch(LiDAR-Y) | Yaw(LiDAR-Z) |"
                 sep = "| ---: | ---: | ---: | ---: | ---: |"
             else:
-                hdr = "| Epoch | Trans(m) | Fwd(X) | Lat(Y) | Ht(Z) | Rot(°) | R | P | Y |"
+                hdr = "| Epoch | Trans(m) | Fwd(LiDAR-X) | Lat(LiDAR-Y) | Ht(LiDAR-Z) | Rot(°) | Roll(LiDAR-X) | Pitch(LiDAR-Y) | Yaw(LiDAR-Z) |"
                 sep = "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
 
             md_lines.append("--- Train ---")

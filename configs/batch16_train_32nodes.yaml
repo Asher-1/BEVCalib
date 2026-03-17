@@ -34,7 +34,7 @@ defaults:
     ddp_gpus: 8                 # 每台机器8个GPU
     
     # 多机DDP配置（所有实验共享）
-    nnodes: 16                  # 16台机器
+    nnodes: 32                  # 32台机器
     node_rank: null             # 自动检测（SLURM）或手动指定
     master_addr: null           # 自动检测（SLURM）或手动指定
     master_port: null           # 自动检测端口
@@ -60,7 +60,17 @@ experiments:
     params:
       enable_axis_loss: False
 
-  # ============ 实验2: enable_axis_loss=True (5deg rotation) ============
+  # ============ 实验2: enable_axis_loss=False (5deg rotation) ============
+  - name: "enable_axis_loss=False (z=2)"
+    description: "(5deg rotation z=2)"
+    dataset: "all"
+    version: "v5_z2_rotation_no_axis_loss"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: False
+
+  # ============ 实验3: enable_axis_loss=True (5deg rotation) ============
   - name: "enable_axis_loss=True (5deg rotation)"
     description: "(5deg rotation)"
     dataset: "all"
@@ -69,14 +79,14 @@ experiments:
       enable_axis_loss: True
       weight_axis_rotation: 0.3
 
-  # ============ 实验3: enable_axis_loss=True (5deg rotation) ============
+  # ============ 实验4: enable_axis_loss=True (5deg rotation) ============
   - name: "enable_axis_loss=True (5deg rotation)"
     description: "(5deg rotation)"
     dataset: "all"
-    version: "v5_z5_rotation_axis_loss0.1"
+    version: "v5_z5_rotation_axis_loss1.0"
     params:
       enable_axis_loss: True
-      weight_axis_rotation: 0.1
+      weight_axis_rotation: 1.0
 
 # ============================================================================
 # 使用说明
