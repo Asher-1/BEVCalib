@@ -7,6 +7,22 @@ from losses.quat_tools import quaternion_from_matrix
 from deformable_attention import DeformableAttention
 from BEVEncoder.BEVEncoder import BEVEncoder
 
+
+class DropPath(nn.Module):
+    """Stochastic Depth per sample (when applied in residual blocks)."""
+    def __init__(self, drop_prob=0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor = torch.floor(random_tensor + keep_prob)
+        return x / keep_prob * random_tensor
+
 class ConvFuser(nn.Sequential):
     def __init__(self, img_in_channel, pc_in_channel, out_channel):
         self.img_in_channel = img_in_channel
@@ -31,6 +47,7 @@ class deformable_transformer_layer(nn.Module):
                  offset_scale = 4, 
                  offset_groups = None,
                  offset_kernel_size = 6,
+                 drop_path_rate = 0.,
                  ):
         super(deformable_transformer_layer, self).__init__()
         self.norm1 = nn.BatchNorm2d(dim)
@@ -51,6 +68,7 @@ class deformable_transformer_layer(nn.Module):
             nn.Conv2d(4 * dim, dim, 1),
             nn.Dropout(dropout)
         )
+        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
 
     def forward(self, x):
         """
@@ -59,8 +77,8 @@ class deformable_transformer_layer(nn.Module):
         Returns:
             x: (B, C, H, W)
         """
-        x = x + self.deformable_attention(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.drop_path(self.deformable_attention(self.norm1(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
 class BEVCalib(nn.Module):
@@ -69,10 +87,12 @@ class BEVCalib(nn.Module):
                  num_layers = 2,
                  deformable = True,
                  bev_encoder = False,
-                 img_shape = None,  # (H, W) - 输入图像尺寸，动态传入
+                 img_shape = None,
                  rotation_only = False,
                  enable_axis_loss = False,
                  weight_axis_rotation = 0.3,
+                 drop_path_rate = 0.1,
+                 head_dropout = 0.1,
                 ):
         super(BEVCalib, self).__init__()
         self.rotation_only = rotation_only
@@ -98,7 +118,7 @@ class BEVCalib(nn.Module):
         )
         self.deformable = deformable
         if self.deformable:
-            self.deformable_transformer = self.make_deformable_transformer(num_layers)
+            self.deformable_transformer = self.make_deformable_transformer(num_layers, drop_path_rate)
         else:
             self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model = self.embed_dim, 
@@ -110,6 +130,7 @@ class BEVCalib(nn.Module):
                                        ),
             num_layers = num_layers * 4
         )
+        self.head_drop = nn.Dropout(head_dropout)
         if not self.rotation_only:
             self.translation_pred = nn.Linear(self.embed_dim, 3)
         self.rotation_pred = nn.Linear(self.embed_dim, 4)
@@ -119,9 +140,10 @@ class BEVCalib(nn.Module):
             weight_axis_rotation=weight_axis_rotation,
         )
     
-    def make_deformable_transformer(self, num_layers):
+    def make_deformable_transformer(self, num_layers, drop_path_rate=0.1):
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
         layers = []
-        for _ in range(num_layers):
+        for i in range(num_layers):
             layers.append(deformable_transformer_layer(
                 dim=self.embed_dim,
                 dim_head=self.num_heads,
@@ -129,6 +151,7 @@ class BEVCalib(nn.Module):
                 downsample_factor=15,
                 offset_kernel_size=15,
                 offset_scale=10,
+                drop_path_rate=dpr[i],
             ))
         return nn.Sequential(*layers)
 
@@ -219,6 +242,7 @@ class BEVCalib(nn.Module):
             x = self.transformer(masked_x, src_key_padding_mask=padding_mask) # B, H * W, C
             x = x.mean(dim = 1)  # B, C
 
+        x = self.head_drop(x)
         if not self.rotation_only:
             translation = self.translation_pred(x)
         else:

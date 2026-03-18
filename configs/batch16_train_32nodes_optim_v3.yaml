@@ -1,0 +1,175 @@
+# BEVCalib 批量训练配置文件 - 多机DDP训练示例（优化版）
+# 使用 defaults 区域消除重复配置
+
+# 全局配置
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数（所有实验继承）
+# 基于 B26A V10 最优配置 (v7-opt-axis05: 0.429°, 0.7x泛化衰退)
+# ============================================================================
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 10.0
+
+  params:
+    # 扰动参数
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # 训练参数
+    batch_size: 8
+    learning_rate: 1e-4
+
+    # DDP配置
+    use_ddp: true
+    ddp_gpus: null
+
+    nnodes: 32                  # 32台机器
+    node_rank: null             # 自动检测（SLURM）或手动指定
+    master_addr: null           # 自动检测（SLURM）或手动指定
+    master_port: null           # 自动检测端口
+
+    # 训练模式
+    use_compile: false
+    rotation_only: true
+
+    # 轴向损失
+    enable_axis_loss: true
+    weight_axis_rotation: 0.3
+
+    # 泛化优化参数（全部启用）
+    lr_schedule: cosine_warm_restarts
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+    cosine_T0: 50
+    cosine_Tmult: 2
+
+    # 正则化
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # 扰动策略 (per-axis是最大贡献者)
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    # 数据增强 (B26A上无收益，大数据集可适度开启)
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    # 早停
+    early_stopping_patience: 30
+
+    # 执行模式
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组配置（只需指定dataset/version/env差异）
+# ============================================================================
+experiments:
+  # ============ 实验1: 全量优化基线 ============
+  - name: "full_optim_axis03 (z=2)"
+    description: "全部优化手段: cosine_LR + axis_loss + trunc_normal + per_axis + augment + early_stop"
+    dataset: "all"
+    version: "v6_z2_rotation_opt_full_axis03"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: true
+      weight_axis_rotation: 0.3
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # ============ 实验2: 配置 z=2 ============
+  - name: "full_optim_axis05 (z=2)"
+    description: "z=2: 验证axis_loss=0.5对泛化的影响"
+    dataset: "all"
+    version: "v6_z2_rotation_opt_full_axis05"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: true
+      weight_axis_rotation: 0.5
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # ============ 实验3: 全量优化基线 ============
+  - name: "full_optim_axis03_light_aug (z=2)"
+    description: "全部优化手段: cosine_LR + axis_loss + trunc_normal + per_axis + augment + early_stop"
+    dataset: "all"
+    version: "v6_z2_rotation_opt_full_axis03_light_aug"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: true
+      weight_axis_rotation: 0.3
+      augment_pc_jitter: 0.005
+      augment_pc_dropout: 0.03
+      augment_color_jitter: 0.1
+
+  # ============ 实验4: 配置 z=2 ============
+  - name: "opt_axis05 (z=2)"
+    description: "z=2: 验证axis_loss=0.5对泛化的影响"
+    dataset: "all"
+    version: "v6_z2_rotation_opt_axis0.5"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: true
+      weight_axis_rotation: 0.5
+
+  # ============ 实验5: Step LR + axis_loss=0.5 ============
+  - name: "opt_step (z=2)"
+    description: "z=2: 验证Step LR + axis_loss=0.5对泛化的影响"
+    dataset: "all"
+    version: "v6_z2_rotation_opt_step_axis0.5"
+    params:
+      lr_schedule: step
+      enable_axis_loss: true
+      weight_axis_rotation: 0.5
+
+  # ============ 实验6: Step LR + axis_loss=0.3 ============
+  - name: "opt_step_axis03 (z=2)"
+    description: "z=2: 验证Step LR + axis_loss=0.3对泛化的影响"
+    dataset: "all"
+    version: "v6_z2_rotation_opt_step_axis0.3"
+    params:
+      lr_schedule: step
+      enable_axis_loss: true
+      weight_axis_rotation: 0.3
+
+# ============================================================================
+# 使用说明
+# ============================================================================
+#
+# 1. SLURM集群（推荐）:
+#    sbatch --nodes=2 configs/run_batch_train.slurm
+#    nnodes/node_rank/master_addr 自动从环境变量检测
+#
+# 2. 手动多机训练:
+#    a) 确定master节点IP（例如: 192.168.1.100）
+#    b) 在Master节点（192.168.1.100）上:
+#       修改配置: master_addr: "192.168.1.100"
+#                node_rank: 0
+#       bash batch_train.sh configs/batch16_train_multinode_v2.yaml
+#
+#    c) 在Worker节点（192.168.1.101）上:
+#       修改配置: master_addr: "192.168.1.100"
+#                node_rank: 1
+#       bash batch_train.sh configs/batch16_train_multinode_v2.yaml
+#
+# 3. 使用自动生成脚本:
+#    bash configs/generate_multinode_configs.sh \
+#      configs/batch16_train_multinode_v2.yaml 2 192.168.1.100
+#
+#    然后在对应节点运行生成的配置文件
+#
+# ============================================================================

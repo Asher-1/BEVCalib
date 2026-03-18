@@ -1,0 +1,138 @@
+# BEVCalib B26A v2 最优配置 + 精细消融
+# 基于泛化评估结果: v7-opt-axis05 (0.429°, 0.7x衰退) 为最佳模型
+#
+# 关键发现:
+#   1. axis_loss=0.5 是最佳权重 (0.429° vs 0.3的0.717°)
+#   2. per-axis扰动是最大贡献者 (关闭后+66%)
+#   3. 数据增强无收益甚至有害 (关闭后反而略优)
+#   4. StepLR 在B26A上略优于 CosineWarmRestarts
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_v2.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_b26a_v2.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# v2 默认参数 (基于 v7-opt-axis05 最佳配置)
+# ============================================================================
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 10.0
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: null
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    # 核心: axis_loss=0.5 (已验证最优)
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # LR: StepLR (B26A上比Cosine更稳定)
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    # 正则化
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # 扰动策略: truncated_normal + per-axis (最大贡献者)
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    # 数据增强: 全部关闭 (B26A上无收益)
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    # 早停
+    early_stopping_patience: 30
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组
+# ============================================================================
+experiments:
+  # ============ 实验1: v2 最优配置 ============
+  - name: "v2_best (z=2)"
+    description: "v2最优: axis05 + StepLR + trunc_normal + per_axis + 无aug + 正则化"
+    dataset: "B26A"
+    version: "v2_best"
+
+  # ============ 实验2: per_axis_prob 消融 0.2 ============
+  - name: "v2_peraxis02 (z=2)"
+    description: "per_axis_prob=0.2 (降低单轴概率)"
+    dataset: "B26A"
+    version: "v2_peraxis02"
+    params:
+      per_axis_prob: 0.2
+
+  # ============ 实验3: per_axis_prob 消融 0.4 ============
+  - name: "v2_peraxis04 (z=2)"
+    description: "per_axis_prob=0.4 (提高单轴概率)"
+    dataset: "B26A"
+    version: "v2_peraxis04"
+    params:
+      per_axis_prob: 0.4
+
+  # ============ 实验4: per_axis_prob 消融 0.5 ============
+  - name: "v2_peraxis05 (z=2)"
+    description: "per_axis_prob=0.5 (50%单轴/50%耦合)"
+    dataset: "B26A"
+    version: "v2_peraxis05"
+    params:
+      per_axis_prob: 0.5
+
+  # ============ 实验5: axis_loss=0.3 (微调权重) ============
+  - name: "v2_axis03 (z=2)"
+    description: "axis_loss=0.3 (在0.3和0.5之间)"
+    dataset: "B26A"
+    version: "v2_axis03"
+    params:
+      weight_axis_rotation: 0.3
+
+  # ============ 实验6: axis_loss=0.6 (微调权重) ============
+  - name: "v2_axis06 (z=2)"
+    description: "axis_loss=0.6 (略高于最优0.5)"
+    dataset: "B26A"
+    version: "v2_axis06"
+    params:
+      weight_axis_rotation: 0.6
+
+  # ============ 实验7: 轻量增强 (验证小剂量是否有益) ============
+  - name: "v2_light_aug (z=2)"
+    description: "轻量增强: jitter=0.005, dropout=0.03, color=0.1"
+    dataset: "B26A"
+    version: "v2_light_aug"
+    params:
+      augment_pc_jitter: 0.005
+      augment_pc_dropout: 0.03
+      augment_color_jitter: 0.1
+
+  # ============ 实验8: 更强正则化 ============
+  - name: "v2_strong_reg (z=2)"
+    description: "更强正则化: drop_path=0.2, head_dropout=0.2"
+    dataset: "B26A"
+    version: "v2_strong_reg"
+    params:
+      drop_path_rate: 0.2
+      head_dropout: 0.2

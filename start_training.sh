@@ -25,6 +25,19 @@
 #   --rotation_only        仅优化旋转, 不优化平移 (平移使用设计值)
 #   --enable_axis_loss     启用分轴旋转损失 (Roll/Pitch/Yaw 独立监督)
 #   --weight_axis_rotation W  分轴旋转损失权重 (默认: 0.3)
+#   --lr_schedule TYPE     LR调度器: step 或 cosine_warm_restarts (默认: step)
+#   --warmup_epochs N      线性warmup轮数 (默认: 5)
+#   --backbone_lr_scale S  预训练backbone学习率倍率 (默认: 0.1)
+#   --cosine_T0 N          CosineAnnealingWarmRestarts T_0 (默认: 50)
+#   --cosine_Tmult N       CosineAnnealingWarmRestarts T_mult (默认: 2)
+#   --drop_path_rate R     Stochastic Depth比率 (默认: 0.1)
+#   --head_dropout R       预测头Dropout比率 (默认: 0.1)
+#   --perturb_distribution D  扰动分布: uniform 或 truncated_normal (默认: uniform)
+#   --per_axis_prob P      单轴扰动概率 (默认: 0.0)
+#   --augment_pc_jitter S  点云抖动sigma (默认: 0.0)
+#   --augment_pc_dropout R 点云随机丢弃比例 (默认: 0.0)
+#   --augment_color_jitter S 图像色彩抖动强度 (默认: 0.0)
+#   --early_stopping_patience N 早停耐心值 (默认: 0=禁用)
 #   --no-tb                不自动启动 TensorBoard
 #   --tb_port PORT         TensorBoard端口 (默认: 自动检测空闲端口, 起始6006)
 #
@@ -194,6 +207,19 @@ FOREGROUND=0
 ROTATION_ONLY=""
 ENABLE_AXIS_LOSS=""
 WEIGHT_AXIS_ROTATION=""
+LR_SCHEDULE=""
+WARMUP_EPOCHS=""
+BACKBONE_LR_SCALE=""
+COSINE_T0=""
+COSINE_TMULT=""
+DROP_PATH_RATE=""
+HEAD_DROPOUT=""
+PERTURB_DISTRIBUTION=""
+PER_AXIS_PROB=""
+AUGMENT_PC_JITTER=""
+AUGMENT_PC_DROPOUT=""
+AUGMENT_COLOR_JITTER=""
+EARLY_STOPPING_PATIENCE=""
 ENABLE_TB=1
 TB_PORT=""
 NNODES=""
@@ -253,6 +279,32 @@ while [[ $# -gt 0 ]]; do
             WEIGHT_AXIS_ROTATION="$2"
             shift 2
             ;;
+        --lr_schedule)
+            LR_SCHEDULE="$2"; shift 2 ;;
+        --warmup_epochs)
+            WARMUP_EPOCHS="$2"; shift 2 ;;
+        --backbone_lr_scale)
+            BACKBONE_LR_SCALE="$2"; shift 2 ;;
+        --cosine_T0)
+            COSINE_T0="$2"; shift 2 ;;
+        --cosine_Tmult)
+            COSINE_TMULT="$2"; shift 2 ;;
+        --drop_path_rate)
+            DROP_PATH_RATE="$2"; shift 2 ;;
+        --head_dropout)
+            HEAD_DROPOUT="$2"; shift 2 ;;
+        --perturb_distribution)
+            PERTURB_DISTRIBUTION="$2"; shift 2 ;;
+        --per_axis_prob)
+            PER_AXIS_PROB="$2"; shift 2 ;;
+        --augment_pc_jitter)
+            AUGMENT_PC_JITTER="$2"; shift 2 ;;
+        --augment_pc_dropout)
+            AUGMENT_PC_DROPOUT="$2"; shift 2 ;;
+        --augment_color_jitter)
+            AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
+        --early_stopping_patience)
+            EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
         --no-tb|--no-tensorboard)
             ENABLE_TB=0
             shift
@@ -601,6 +653,12 @@ _print_row "Trans Range:"   "${DDP_TRANS}m"
 _print_row "Learning Rate:" "$LEARNING_RATE"
 _print_row "Rotation Only:" "$([ -n "$ROTATION_ONLY" ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
 _print_row "Axis Loss:"    "$([ -n "$ENABLE_AXIS_LOSS" ] && echo "enabled (weight=${WEIGHT_AXIS_ROTATION:-0.3})" || echo 'disabled')"
+[ -n "$LR_SCHEDULE" ] && \
+_print_row "LR Schedule:"  "$LR_SCHEDULE"
+[ -n "$PERTURB_DISTRIBUTION" ] && \
+_print_row "Perturbation:" "$PERTURB_DISTRIBUTION"
+[ -n "$EARLY_STOPPING_PATIENCE" ] && [ "$EARLY_STOPPING_PATIENCE" != "0" ] && \
+_print_row "Early Stop:"   "patience=$EARLY_STOPPING_PATIENCE"
 _print_row "Execution:"     "$([ "$FOREGROUND" -eq 1 ] && echo 'Foreground (Ctrl+C to stop)' || echo 'Background (nohup)')"
 _print_row "TensorBoard:"   "$([ "$ENABLE_TB" -eq 1 ] && echo 'auto-start' || echo 'disabled (--no-tb)')"
 if [ "$USE_DDP" -eq 1 ] && [ "$NNODES" -gt 1 ]; then
@@ -768,6 +826,21 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$ENABLE_AXIS_LOSS" ] && AXIS_LOSS_ARGS="--enable_axis_loss"
     [ -n "$WEIGHT_AXIS_ROTATION" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --weight_axis_rotation $WEIGHT_AXIS_ROTATION"
 
+    OPTIM_ARGS=""
+    [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
+    [ -n "$WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --warmup_epochs $WARMUP_EPOCHS"
+    [ -n "$BACKBONE_LR_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_lr_scale $BACKBONE_LR_SCALE"
+    [ -n "$COSINE_T0" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_T0 $COSINE_T0"
+    [ -n "$COSINE_TMULT" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_Tmult $COSINE_TMULT"
+    [ -n "$DROP_PATH_RATE" ] && OPTIM_ARGS="$OPTIM_ARGS --drop_path_rate $DROP_PATH_RATE"
+    [ -n "$HEAD_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --head_dropout $HEAD_DROPOUT"
+    [ -n "$PERTURB_DISTRIBUTION" ] && OPTIM_ARGS="$OPTIM_ARGS --perturb_distribution $PERTURB_DISTRIBUTION"
+    [ -n "$PER_AXIS_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --per_axis_prob $PER_AXIS_PROB"
+    [ -n "$AUGMENT_PC_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_jitter $AUGMENT_PC_JITTER"
+    [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
+    [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
+    [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
+
     TRAIN_CMD="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
@@ -781,7 +854,8 @@ if [ "$USE_DDP" -eq 1 ]; then
         $USE_COMPILE \
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
-        $LR_ARG"
+        $LR_ARG \
+        $OPTIM_ARGS"
 
     if [ "$FOREGROUND" -eq 1 ]; then
         echo "  日志: $DDP_LOG_DIR/train.log (+ 终端输出)"
@@ -829,6 +903,21 @@ else
     [ -n "$ENABLE_AXIS_LOSS" ] && AXIS_LOSS_ARGS="--enable_axis_loss"
     [ -n "$WEIGHT_AXIS_ROTATION" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --weight_axis_rotation $WEIGHT_AXIS_ROTATION"
 
+    OPTIM_ARGS=""
+    [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
+    [ -n "$WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --warmup_epochs $WARMUP_EPOCHS"
+    [ -n "$BACKBONE_LR_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_lr_scale $BACKBONE_LR_SCALE"
+    [ -n "$COSINE_T0" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_T0 $COSINE_T0"
+    [ -n "$COSINE_TMULT" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_Tmult $COSINE_TMULT"
+    [ -n "$DROP_PATH_RATE" ] && OPTIM_ARGS="$OPTIM_ARGS --drop_path_rate $DROP_PATH_RATE"
+    [ -n "$HEAD_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --head_dropout $HEAD_DROPOUT"
+    [ -n "$PERTURB_DISTRIBUTION" ] && OPTIM_ARGS="$OPTIM_ARGS --perturb_distribution $PERTURB_DISTRIBUTION"
+    [ -n "$PER_AXIS_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --per_axis_prob $PER_AXIS_PROB"
+    [ -n "$AUGMENT_PC_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_jitter $AUGMENT_PC_JITTER"
+    [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
+    [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
+    [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
+
     TRAIN_CMD_0="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
@@ -840,7 +929,8 @@ else
         $USE_COMPILE \
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
-        $LR_ARG"
+        $LR_ARG \
+        $OPTIM_ARGS"
 
     TRAIN_CMD_1="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
@@ -853,7 +943,8 @@ else
         $USE_COMPILE \
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
-        $LR_ARG"
+        $LR_ARG \
+        $OPTIM_ARGS"
 
     if [ "$FOREGROUND" -eq 1 ]; then
         echo "[前台模式] 两个GPU训练并行执行, Ctrl+C 同时停止两个任务"

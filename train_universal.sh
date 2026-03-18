@@ -29,6 +29,19 @@
 #   --rotation_only          - Only optimize rotation (skip translation optimization, use design values)
 #   --enable_axis_loss       - Enable per-axis rotation loss (Roll/Pitch/Yaw independent supervision)
 #   --weight_axis_rotation W - Weight for per-axis rotation loss (default: 0.3)
+#   --lr_schedule TYPE       - LR scheduler: step or cosine_warm_restarts (default: step)
+#   --warmup_epochs N        - Linear warmup epochs (default: 5)
+#   --backbone_lr_scale S    - LR multiplier for pretrained backbone (default: 0.1)
+#   --cosine_T0 N            - CosineAnnealingWarmRestarts T_0 (default: 50)
+#   --cosine_Tmult N         - CosineAnnealingWarmRestarts T_mult (default: 2)
+#   --drop_path_rate R       - Stochastic depth rate (default: 0.1)
+#   --head_dropout R         - Dropout before prediction heads (default: 0.1)
+#   --perturb_distribution D - Perturbation distribution: uniform or truncated_normal (default: uniform)
+#   --per_axis_prob P        - Probability of single-axis perturbation (default: 0.0)
+#   --augment_pc_jitter S    - Point cloud jitter sigma in meters (default: 0.0)
+#   --augment_pc_dropout R   - Point cloud dropout ratio (default: 0.0)
+#   --augment_color_jitter S - Image color jitter strength (default: 0.0)
+#   --early_stopping_patience N - Early stopping patience in eval cycles (default: 0)
 #
 # Examples:
 #   # Single GPU training
@@ -99,6 +112,19 @@ USE_COMPILE=0
 ROTATION_ONLY=0
 ENABLE_AXIS_LOSS=0
 WEIGHT_AXIS_ROTATION=""
+LR_SCHEDULE=""
+WARMUP_EPOCHS=""
+BACKBONE_LR_SCALE=""
+COSINE_T0=""
+COSINE_TMULT=""
+DROP_PATH_RATE=""
+HEAD_DROPOUT=""
+PERTURB_DISTRIBUTION=""
+PER_AXIS_PROB=""
+AUGMENT_PC_JITTER=""
+AUGMENT_PC_DROPOUT=""
+AUGMENT_COLOR_JITTER=""
+EARLY_STOPPING_PATIENCE=""
 NNODES="1"
 NODE_RANK="0"
 MASTER_ADDR=""
@@ -228,9 +254,34 @@ while [[ $# -gt 0 ]]; do
             WEIGHT_AXIS_ROTATION="$2"
             shift 2
             ;;
+        --lr_schedule)
+            LR_SCHEDULE="$2"; shift 2 ;;
+        --warmup_epochs)
+            WARMUP_EPOCHS="$2"; shift 2 ;;
+        --backbone_lr_scale)
+            BACKBONE_LR_SCALE="$2"; shift 2 ;;
+        --cosine_T0)
+            COSINE_T0="$2"; shift 2 ;;
+        --cosine_Tmult)
+            COSINE_TMULT="$2"; shift 2 ;;
+        --drop_path_rate)
+            DROP_PATH_RATE="$2"; shift 2 ;;
+        --head_dropout)
+            HEAD_DROPOUT="$2"; shift 2 ;;
+        --perturb_distribution)
+            PERTURB_DISTRIBUTION="$2"; shift 2 ;;
+        --per_axis_prob)
+            PER_AXIS_PROB="$2"; shift 2 ;;
+        --augment_pc_jitter)
+            AUGMENT_PC_JITTER="$2"; shift 2 ;;
+        --augment_pc_dropout)
+            AUGMENT_PC_DROPOUT="$2"; shift 2 ;;
+        --augment_color_jitter)
+            AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
+        --early_stopping_patience)
+            EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
         *)
             echo "❌ Unknown option: $1"
-            echo "Available options: --dataset_root, --dataset_name, --cuda_device, --tensorboard_port, --log_suffix, --angle_range_deg, --trans_range, --batch_size, --learning_rate, --ddp, --nnodes, --node_rank, --master_addr, --master_port, --rdzv_timeout, --compile, --rotation_only, --enable_axis_loss, --weight_axis_rotation"
             exit 1
             ;;
     esac
@@ -350,6 +401,12 @@ _print_row "CUDA:"          "$CUDA_VER"
 _print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
 _print_row "Rotation Only:" "$([ "$ROTATION_ONLY" -eq 1 ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
 _print_row "Axis Loss:"    "$([ "$ENABLE_AXIS_LOSS" -eq 1 ] && echo "enabled (weight=${WEIGHT_AXIS_ROTATION:-0.3})" || echo 'disabled')"
+[ -n "$LR_SCHEDULE" ] && \
+_print_row "LR Schedule:"  "$LR_SCHEDULE"
+[ -n "$PERTURB_DISTRIBUTION" ] && \
+_print_row "Perturbation:" "$PERTURB_DISTRIBUTION"
+[ -n "$EARLY_STOPPING_PATIENCE" ] && [ "$EARLY_STOPPING_PATIENCE" != "0" ] && \
+_print_row "Early Stop:"   "patience=$EARLY_STOPPING_PATIENCE"
 if [ "$NNODES" -gt 1 ]; then
 _print_sep
 _print_row "Node Rank:"     "$NODE_RANK"
@@ -436,6 +493,21 @@ if [ -n "$WEIGHT_AXIS_ROTATION" ]; then
     WEIGHT_AXIS_FLAG="--weight_axis_rotation $WEIGHT_AXIS_ROTATION"
 fi
 
+OPTIM_FLAGS=""
+[ -n "$LR_SCHEDULE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --lr_schedule $LR_SCHEDULE"
+[ -n "$WARMUP_EPOCHS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --warmup_epochs $WARMUP_EPOCHS"
+[ -n "$BACKBONE_LR_SCALE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --backbone_lr_scale $BACKBONE_LR_SCALE"
+[ -n "$COSINE_T0" ] && OPTIM_FLAGS="$OPTIM_FLAGS --cosine_T0 $COSINE_T0"
+[ -n "$COSINE_TMULT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --cosine_Tmult $COSINE_TMULT"
+[ -n "$DROP_PATH_RATE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --drop_path_rate $DROP_PATH_RATE"
+[ -n "$HEAD_DROPOUT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --head_dropout $HEAD_DROPOUT"
+[ -n "$PERTURB_DISTRIBUTION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --perturb_distribution $PERTURB_DISTRIBUTION"
+[ -n "$PER_AXIS_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --per_axis_prob $PER_AXIS_PROB"
+[ -n "$AUGMENT_PC_JITTER" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pc_jitter $AUGMENT_PC_JITTER"
+[ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
+[ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
+[ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
+
 if [ -n "$DDP_NGPUS" ]; then
     if [ "$NNODES" -gt 1 ]; then
         # 检测NCCL使用的网络接口
@@ -510,7 +582,8 @@ case $MODE in
             $COMPILE_FLAG \
             $ROTATION_ONLY_FLAG \
             $AXIS_LOSS_FLAG \
-            $WEIGHT_AXIS_FLAG
+            $WEIGHT_AXIS_FLAG \
+            $OPTIM_FLAGS
         ;;
     
     finetune)
@@ -550,7 +623,8 @@ case $MODE in
             $COMPILE_FLAG \
             $ROTATION_ONLY_FLAG \
             $AXIS_LOSS_FLAG \
-            $WEIGHT_AXIS_FLAG
+            $WEIGHT_AXIS_FLAG \
+            $OPTIM_FLAGS
         ;;
     
     resume)
@@ -590,7 +664,8 @@ case $MODE in
             $COMPILE_FLAG \
             $ROTATION_ONLY_FLAG \
             $AXIS_LOSS_FLAG \
-            $WEIGHT_AXIS_FLAG
+            $WEIGHT_AXIS_FLAG \
+            $OPTIM_FLAGS
         ;;
     
     *)

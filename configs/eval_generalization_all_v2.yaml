@@ -1,14 +1,21 @@
-# 泛化性能评估配置文件
-# 用法: python run_generalization_eval.py --config configs/eval_generalization.yaml
+# BEVCalib all_training_data 全量泛化性能评估配置
+# 覆盖 logs/all_training_data 下所有训练实验 (含old目录)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_all_data.yaml
+#
+# 实验分组:
+#   v5_z5_*     - 5deg z=5 axis_loss消融 (新版, 含优化)
+#   v5_z2_*     - 5deg z=2 axis_loss消融 (新版, 含优化)
+#   old/v4_*    - 5deg 旧版baseline (无优化)
+#   old/10deg_* - 10deg 旧版实验 (对比训练角度影响)
 
-# 全局路径配置
 bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
-models_dir: "logs/all_training_data"  # 相对于 bevcalib_root
+models_dir: "logs/all_training_data/v2"
 test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
-output_dir: "logs/multi_eval_generalization_5deg"  # 相对于 bevcalib_root
-eval_script: "evaluate_checkpoint.py"  # 相对于 bevcalib_root
+output_dir: "logs/all_data_generalization_eval_v2"
+eval_script: "evaluate_checkpoint.py"
 
-# 评估参数
 eval_params:
   angle_range: 5.0
   trans_range: 0.15
@@ -16,44 +23,89 @@ eval_params:
   vis_interval: 200
   timeout: 1800
 
-# 模型列表
 models:
-  - label: "10deg-v4-z1-rot"
-    dir_name: "model_small_10deg_v4_z1_rotation"
-    ckpt: "ckpt_400.pth"
-    bev_zbound_step: "20.0"
-    rotation_only: 1
-    angle_deg: 10
-    z_voxels: 1
-    version: "v4"
-    mode_desc: "rotation_only"
-
-  - label: "10deg-v4-z5-rot"
-    dir_name: "model_small_10deg_v4_z5_rotation"
-    ckpt: "ckpt_400.pth"
-    bev_zbound_step: "4.0"
-    rotation_only: 1
-    angle_deg: 10
-    z_voxels: 5
-    version: "v4"
-    mode_desc: "rotation_only"
-
-  - label: "5deg-v4-z1-rot"
-    dir_name: "model_small_5deg_v4_z1_rotation"
-    ckpt: "ckpt_400.pth"
-    bev_zbound_step: "20.0"
-    rotation_only: 1
-    angle_deg: 5
-    z_voxels: 1
-    version: "v4"
-    mode_desc: "rotation_only"
-
-  - label: "5deg-v4-z5-rot"
-    dir_name: "model_small_5deg_v4_z5_rotation"
+  # ====================================================================
+  # v5 新版实验 - z=5 (axis_loss 消融)
+  # ====================================================================
+  - label: "v5-z5-axis03"
+    dir_name: "model_small_5deg_v5_z5_rotation_axis_loss0.3"
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
     angle_deg: 5
     z_voxels: 5
-    version: "v4"
-    mode_desc: "rotation_only"
+    version: "v5-z5-axis03"
+    mode_desc: "axis_loss=0.3 (z=5, 优化版)"
+
+  - label: "v5-z5-axis05"
+    dir_name: "model_small_5deg_v5_z5_rotation_axis_loss0.5"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-z5-axis05"
+    mode_desc: "axis_loss=0.5 (z=5, 优化版)"
+
+  - label: "v5-z5-axis10"
+    dir_name: "model_small_5deg_v5_z5_rotation_axis_loss1.0"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-z5-axis10"
+    mode_desc: "axis_loss=1.0 (z=5, 优化版)"
+
+  - label: "v5-z5-no-axis"
+    dir_name: "model_small_5deg_v5_z5_rotation_no_axis_loss"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-z5-no-axis"
+    mode_desc: "无axis_loss (z=5, 优化版)"
+
+  # ====================================================================
+  # v5 新版实验 - z=2 (axis_loss 消融)
+  # ====================================================================
+  - label: "v5-z2-axis01"
+    dir_name: "model_small_5deg_v5_z2_rotation_axis_loss0.1"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v5-z2-axis01"
+    mode_desc: "axis_loss=0.1 (z=2, 优化版)"
+
+  - label: "v5-z2-axis03"
+    dir_name: "model_small_5deg_v5_z2_rotation_axis_loss0.3"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v5-z2-axis03"
+    mode_desc: "axis_loss=0.3 (z=2, 优化版)"
+
+  - label: "v5-z2-axis05"
+    dir_name: "model_small_5deg_v5_z2_rotation_axis_loss0.5"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v5-z2-axis05"
+    mode_desc: "axis_loss=0.5 (z=2, 优化版)"
+
+  - label: "v5-z2-no-axis"
+    dir_name: "model_small_5deg_v5_z2_rotation_no_axis_loss"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v5-z2-no-axis"
+    mode_desc: "无axis_loss (z=2, 优化版)"

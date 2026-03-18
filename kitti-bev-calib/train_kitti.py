@@ -8,7 +8,7 @@ from torch.utils.data.distributed import DistributedSampler
 from kitti_dataset import KittiDataset
 from custom_dataset import CustomDataset
 from bev_calib import BEVCalib
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingWarmRestarts, LinearLR, SequentialLR
 from torch.utils.tensorboard import SummaryWriter
 import argparse
 from datetime import datetime, timedelta
@@ -30,6 +30,23 @@ from visualization import (
 def tprint(*args, **kwargs):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}]", *args, **kwargs)
+
+
+def _apply_color_jitter(imgs_tensor, strength):
+    """Apply random color jitter to a batch of images (B, C, H, W) in [0, 255]."""
+    B = imgs_tensor.shape[0]
+    for i in range(B):
+        img = imgs_tensor[i]  # (C, H, W)
+        brightness = 1.0 + (torch.rand(1).item() * 2 - 1) * strength * 0.3
+        img = img * brightness
+        contrast = 1.0 + (torch.rand(1).item() * 2 - 1) * strength * 0.3
+        mean = img.mean()
+        img = (img - mean) * contrast + mean
+        saturation = 1.0 + (torch.rand(1).item() * 2 - 1) * strength * 0.3
+        gray = 0.299 * img[0] + 0.587 * img[1] + 0.114 * img[2]
+        img = img * saturation + gray.unsqueeze(0) * (1 - saturation)
+        imgs_tensor[i] = img.clamp(0, 255)
+    return imgs_tensor
 
 def setup_ddp():
     """Auto-detect and initialize DDP when launched via torchrun."""
@@ -91,6 +108,34 @@ def parse_args():
                         help="启用分轴旋转损失 (1=启用, 0=禁用)")
     parser.add_argument("--weight_axis_rotation", type=float, default=0.3,
                         help="分轴旋转损失权重 (默认: 0.3)")
+    parser.add_argument("--drop_path_rate", type=float, default=0.1,
+                        help="Stochastic depth rate for transformer layers")
+    parser.add_argument("--head_dropout", type=float, default=0.1,
+                        help="Dropout rate before prediction heads")
+    parser.add_argument("--lr_schedule", type=str, default="step",
+                        choices=["step", "cosine_warm_restarts"],
+                        help="LR scheduler type")
+    parser.add_argument("--warmup_epochs", type=int, default=5,
+                        help="Linear warmup epochs")
+    parser.add_argument("--backbone_lr_scale", type=float, default=0.1,
+                        help="LR multiplier for pretrained backbone (SwinT)")
+    parser.add_argument("--cosine_T0", type=int, default=50,
+                        help="CosineAnnealingWarmRestarts T_0 period")
+    parser.add_argument("--cosine_Tmult", type=int, default=2,
+                        help="CosineAnnealingWarmRestarts T_mult")
+    parser.add_argument("--perturb_distribution", type=str, default="uniform",
+                        choices=["uniform", "truncated_normal"],
+                        help="Perturbation angle distribution")
+    parser.add_argument("--per_axis_prob", type=float, default=0.0,
+                        help="Probability of single-axis perturbation (0=disabled)")
+    parser.add_argument("--augment_pc_jitter", type=float, default=0.0,
+                        help="Point cloud Gaussian jitter sigma in meters (0=disabled)")
+    parser.add_argument("--augment_pc_dropout", type=float, default=0.0,
+                        help="Point cloud random dropout ratio (0=disabled)")
+    parser.add_argument("--augment_color_jitter", type=float, default=0.0,
+                        help="Image color jitter strength (0=disabled)")
+    parser.add_argument("--early_stopping_patience", type=int, default=0,
+                        help="Early stopping patience in epochs (0=disabled)")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
@@ -372,6 +417,8 @@ def main():
         rotation_only=rotation_only,
         enable_axis_loss=enable_axis_loss,
         weight_axis_rotation=args.weight_axis_rotation,
+        drop_path_rate=args.drop_path_rate,
+        head_dropout=args.head_dropout,
     ).to(device)
 
     if args.pretrain_ckpt is not None:
@@ -398,21 +445,56 @@ def main():
         if is_main:
             tprint(f"Model wrapped with DistributedDataParallel on {world_size} GPUs")
     
+    raw_model = model.module if use_ddp else model
+
     tprint(f"The weight decay is: {args.wd}")
     tprint(f"The initial learning rate is: {args.lr}")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+
+    backbone_params = []
+    head_params = []
+    for name, param in raw_model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'img_branch' in name or 'pc_branch' in name:
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+
+    backbone_lr = args.lr * args.backbone_lr_scale
+    optimizer = torch.optim.AdamW([
+        {'params': backbone_params, 'lr': backbone_lr},
+        {'params': head_params, 'lr': args.lr},
+    ], weight_decay=args.wd)
+
+    if is_main:
+        tprint(f"Differential LR: backbone={backbone_lr:.2e} ({len(backbone_params)} params), "
+               f"heads={args.lr:.2e} ({len(head_params)} params)")
 
     scheduler_choice = args.scheduler > 0
     if scheduler_choice:
-        scheduler = StepLR(optimizer, step_size=args.step_size, gamma=0.5)
+        if args.lr_schedule == "cosine_warm_restarts":
+            cosine_sched = CosineAnnealingWarmRestarts(optimizer, T_0=args.cosine_T0, T_mult=args.cosine_Tmult)
+            if args.warmup_epochs > 0:
+                warmup_sched = LinearLR(optimizer, start_factor=0.01, total_iters=args.warmup_epochs)
+                scheduler = SequentialLR(optimizer, [warmup_sched, cosine_sched],
+                                         milestones=[args.warmup_epochs])
+                if is_main:
+                    tprint(f"LR Schedule: LinearWarmup({args.warmup_epochs}ep) -> "
+                           f"CosineWarmRestarts(T0={args.cosine_T0}, Tmult={args.cosine_Tmult})")
+            else:
+                scheduler = cosine_sched
+                if is_main:
+                    tprint(f"LR Schedule: CosineWarmRestarts(T0={args.cosine_T0}, Tmult={args.cosine_Tmult})")
+        else:
+            scheduler = StepLR(optimizer, step_size=args.step_size, gamma=0.5)
+            if is_main:
+                tprint(f"LR Schedule: StepLR(step={args.step_size}, gamma=0.5)")
 
     use_amp = torch.cuda.is_available()
     amp_dtype = torch.float16
     scaler = GradScaler(enabled=use_amp)
     if use_amp and is_main:
         tprint(f"AMP enabled with {amp_dtype}, GradScaler=on")
-    
-    raw_model = model.module if use_ddp else model
     
     _identity_4x4 = torch.eye(4, device=device)
 
@@ -439,6 +521,8 @@ def main():
     last_epoch_train_errors = None
     last_epoch_val_errors = None
     checkpoint_records = []
+    early_stop_counter = 0
+    early_stop_triggered = False
     
     if is_main:
         tprint("=" * 80)
@@ -481,13 +565,35 @@ def main():
 
             t_prep_start = time.time()
             gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
-            init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=train_noise["angle_range_deg"], trans_range=train_noise["trans_range"], rotation_only=rotation_only)
-            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
+            init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(
+                gt_T_to_camera_np,
+                angle_range_deg=train_noise["angle_range_deg"],
+                trans_range=train_noise["trans_range"],
+                rotation_only=rotation_only,
+                distribution=args.perturb_distribution,
+                per_axis_prob=args.per_axis_prob,
+            )
+            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float()
+            if args.augment_color_jitter > 0:
+                resize_imgs = _apply_color_jitter(resize_imgs, args.augment_color_jitter)
+            resize_imgs = resize_imgs.to(device, non_blocking=True)
             if xyz_only_choise:
                 pcs_np = np.array(pcs)[:, :, :3]
             else:
                 pcs_np = np.array(pcs)
+            if args.augment_pc_jitter > 0:
+                pcs_np = pcs_np + np.random.normal(0, args.augment_pc_jitter, pcs_np.shape).astype(np.float32)
+            if args.augment_pc_dropout > 0:
+                keep_ratio = 1.0 - np.random.uniform(0, args.augment_pc_dropout)
+                n_pts = pcs_np.shape[1]
+                n_keep = max(1, int(n_pts * keep_ratio))
+                idx = np.random.choice(n_pts, n_keep, replace=False)
+                idx.sort()
+                pcs_np = pcs_np[:, idx, :]
+                if masks is not None:
+                    masks = [np.asarray(masks[b])[idx] for b in range(len(masks))]
             pcs_t = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
+            masks_t = torch.from_numpy(np.array(masks)).float().to(device, non_blocking=True) if masks is not None else None
             gt_T_to_camera_t = torch.from_numpy(gt_T_to_camera_np).to(device, non_blocking=True)
             init_T_to_camera_t = torch.from_numpy(init_T_to_camera_np.astype(np.float32)).to(device, non_blocking=True)
             B_cur = gt_T_to_camera_t.shape[0]
@@ -498,7 +604,7 @@ def main():
             t_compute_start = time.time()
             optimizer.zero_grad(set_to_none=True)
             with autocast(enabled=use_amp, dtype=amp_dtype):
-                T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=out_init_loss_choice)
+                T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice)
                 total_loss = loss["total_loss"]
             scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
@@ -1000,12 +1106,49 @@ def main():
                     'rot': val_pose_errors['rot_error'],
                     'errors': dict(val_pose_errors),
                 })
+                early_stop_counter = 0
+                best_ckpt_path = os.path.join(ckpt_save_dir, "ckpt_best_val.pth")
+                model_to_save = model.module if use_ddp else model
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model_to_save.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'train_noise': train_noise,
+                    'eval_noise': eval_noise,
+                    'rotation_only': rotation_only,
+                    'epoch_train_errors': last_epoch_train_errors,
+                    'epoch_val_errors': dict(val_pose_errors),
+                    'best_train': best_train,
+                    'best_val': best_val,
+                    'args': vars(args),
+                }, best_ckpt_path)
+                tprint(f"Best val model saved to {best_ckpt_path} "
+                       f"(val_rot={val_pose_errors['rot_error']:.4f}°)")
+            else:
+                early_stop_counter += 1
+                if args.early_stopping_patience > 0:
+                    tprint(f"Val did not improve for {early_stop_counter} eval cycles "
+                           f"(patience={args.early_stopping_patience})")
+
+            if args.early_stopping_patience > 0 and early_stop_counter >= args.early_stopping_patience:
+                tprint(f"Early stopping triggered at epoch {epoch+1} "
+                       f"(no val improvement for {early_stop_counter} eval cycles)")
+                early_stop_triggered = True
 
             val_loss = None
             loss = None
 
         if use_ddp:
+            stop_tensor = torch.tensor([1 if early_stop_triggered else 0],
+                                       device=device, dtype=torch.int32)
+            dist.broadcast(stop_tensor, src=0)
+            early_stop_triggered = stop_tensor.item() == 1
             dist.barrier()
+
+        if early_stop_triggered:
+            if is_main:
+                tprint("All ranks stopping due to early stopping.")
+            break
 
     if is_main:
         def _fmt_err(e):
