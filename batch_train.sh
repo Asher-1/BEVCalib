@@ -370,6 +370,27 @@ if params.get('enable_axis_loss', False):
 if params.get('weight_axis_rotation') is not None:
     args.append(f"--weight_axis_rotation {params['weight_axis_rotation']}")
 
+# generalization optimization params
+OPTIM_PARAMS = [
+    ('lr_schedule', '--lr_schedule'),
+    ('warmup_epochs', '--warmup_epochs'),
+    ('backbone_lr_scale', '--backbone_lr_scale'),
+    ('cosine_T0', '--cosine_T0'),
+    ('cosine_Tmult', '--cosine_Tmult'),
+    ('drop_path_rate', '--drop_path_rate'),
+    ('head_dropout', '--head_dropout'),
+    ('perturb_distribution', '--perturb_distribution'),
+    ('per_axis_prob', '--per_axis_prob'),
+    ('augment_pc_jitter', '--augment_pc_jitter'),
+    ('augment_pc_dropout', '--augment_pc_dropout'),
+    ('augment_color_jitter', '--augment_color_jitter'),
+    ('early_stopping_patience', '--early_stopping_patience'),
+]
+for yaml_key, cli_flag in OPTIM_PARAMS:
+    val = params.get(yaml_key)
+    if val is not None:
+        args.append(f"{cli_flag} {val}")
+
 # foreground
 if params.get('foreground', False):
     args.append("--fg")

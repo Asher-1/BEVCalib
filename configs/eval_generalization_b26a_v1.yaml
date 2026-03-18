@@ -1,0 +1,204 @@
+# BEVCalib B26A 全量泛化性能评估配置
+# 覆盖 logs/B26A 下所有训练实验，对比优化前后泛化能力
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_b26a.yaml
+#
+# 实验分组:
+#   v7_opt_*    - 泛化优化消融实验 (cosine LR, augmentation, per-axis perturb, etc.)
+#   v7_baseline - 无优化对照组
+#   v8-z5_*     - 旧版baseline (axis_loss 0.5 / base)
+#   v9_*        - 旧版axis_loss权重消融 (0.1 / 0.3 / 1.0)
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/generalization_eval_b26a_v1"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ====================================================================
+  # v7 优化消融实验 (ckpt_400 最终模型)
+  # ====================================================================
+  - label: "v7-opt-full"
+    dir_name: "model_small_5deg_v7_opt_full"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-full"
+    mode_desc: "全量优化(cosine+aug+peraxis+axisloss)"
+
+  - label: "v7-opt-full-best"
+    dir_name: "model_small_5deg_v7_opt_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-full-best"
+    mode_desc: "全量优化(best_val checkpoint)"
+
+  - label: "v7-opt-step-lr"
+    dir_name: "model_small_5deg_v7_opt_step_lr"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-step-lr"
+    mode_desc: "消融:StepLR(其余优化保留)"
+
+  - label: "v7-opt-step-lr-best"
+    dir_name: "model_small_5deg_v7_opt_step_lr"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-step-lr-best"
+    mode_desc: "消融:StepLR(best_val)"
+
+  - label: "v7-opt-no-aug"
+    dir_name: "model_small_5deg_v7_opt_no_aug"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-no-aug"
+    mode_desc: "消融:无数据增强"
+
+  - label: "v7-opt-no-aug-best"
+    dir_name: "model_small_5deg_v7_opt_no_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-no-aug-best"
+    mode_desc: "消融:无数据增强(best_val)"
+
+  - label: "v7-opt-no-peraxis"
+    dir_name: "model_small_5deg_v7_opt_no_peraxis"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-no-peraxis"
+    mode_desc: "消融:无per-axis扰动(uniform)"
+
+  - label: "v7-opt-no-peraxis-best"
+    dir_name: "model_small_5deg_v7_opt_no_peraxis"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-no-peraxis-best"
+    mode_desc: "消融:无per-axis扰动(best_val)"
+
+  - label: "v7-opt-axis05"
+    dir_name: "model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-axis05"
+    mode_desc: "axis_loss=0.5(其余全量优化)"
+
+  - label: "v7-opt-axis05-best"
+    dir_name: "model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-opt-axis05-best"
+    mode_desc: "axis_loss=0.5(best_val)"
+
+  - label: "v7-baseline"
+    dir_name: "model_small_5deg_v7_baseline"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-baseline"
+    mode_desc: "无优化对照组(StepLR+无aug+无正则)"
+
+  - label: "v7-baseline-best"
+    dir_name: "model_small_5deg_v7_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-baseline-best"
+    mode_desc: "无优化对照组(best_val)"
+
+  # ====================================================================
+  # v8 旧版实验 (axis_loss 消融)
+  # ====================================================================
+  - label: "v8-base"
+    dir_name: "model_small_5deg_v8-z5_base_rotation"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-base"
+    mode_desc: "旧版baseline(无axis_loss)"
+
+  - label: "v8-axis05"
+    dir_name: "model_small_5deg_v8-z5_axis_loss_0.5_drcv"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-axis05"
+    mode_desc: "旧版axis_loss=0.5"
+
+  # ====================================================================
+  # v9 axis_loss 权重消融
+  # ====================================================================
+  - label: "v9-axis01"
+    dir_name: "model_small_5deg_v9_axis_loss_0.1_drcv"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v9-axis01"
+    mode_desc: "axis_loss=0.1"
+
+  - label: "v9-axis03"
+    dir_name: "model_small_5deg_v9_axis_loss_0.3_drcv"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v9-axis03"
+    mode_desc: "axis_loss=0.3"
+
+  - label: "v9-axis10"
+    dir_name: "model_small_5deg_v9_axis_loss_1.0_drcv"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v9-axis10"
+    mode_desc: "axis_loss=1.0"
