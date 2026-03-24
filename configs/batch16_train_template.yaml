@@ -35,7 +35,7 @@ defaults:
     rotation_only: false        # 仅优化旋转参数
     
     # 执行模式
-    foreground: true            # 前台执行（批量训练推荐true）
+    foreground: true            # 批量模式下此项被忽略（自动强制前台执行）
     no_tensorboard: true        # 不启动TB（批量训练统一管理）
     tensorboard_port: null      # TB端口（null=自动检测）
     
@@ -118,8 +118,8 @@ experiments:
 #    null表示不传递该参数，使用start_training.sh的默认值
 
 # 2. 前台vs后台执行:
-#    - foreground: true  → 适合批量训练（串行执行）
-#    - foreground: false → 适合单个实验（后台运行）
+#    - batch_train.sh 会自动强制前台执行（忽略 foreground 设置），确保实验串行不抢GPU
+#    - foreground 设置仅在直接运行 start_training.sh 时生效
 
 # 3. 实验命名:
 #    - name字段只用于日志显示

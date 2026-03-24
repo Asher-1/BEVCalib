@@ -1,0 +1,135 @@
+# BEVCalib B26A v5 ckpt_400 泛化评估
+# 验证假说: CosineWR warm restart 后的 ckpt_400 泛化性能优于 best_val
+#
+# 核心对比:
+#   v5-cosinewr-z5 best_val (0.509°) vs ckpt_400 (?)
+#   v1-champion ckpt_400 (0.433°) — 已知基准
+#
+# CosineWR(T0=50,T_mult=2) 周期:
+#   P3: ep150-350, P4: ep350-750
+#   best_val ≈ ep341 (P3末尾收敛)
+#   ckpt_400 = ep400 (P4早期, LR已重置)
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v5"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v5_ckpt400"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== v5 主实验 ckpt_400 =====
+  - label: "v5-cosinewr-z5-ep400"
+    dir_name: "model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-ep400"
+    mode_desc: "CosineWR+z5+5°+no_roll3 ckpt_400 (P4早期)"
+
+  # ===== v5 主实验 ckpt_360 (P4刚开始) =====
+  - label: "v5-cosinewr-z5-ep360"
+    dir_name: "model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_360.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-ep360"
+    mode_desc: "CosineWR+z5+5°+no_roll3 ckpt_360 (P4 10ep)"
+
+  # ===== v5 主实验 ckpt_320 (P3后期) =====
+  - label: "v5-cosinewr-z5-ep320"
+    dir_name: "model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_320.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-ep320"
+    mode_desc: "CosineWR+z5+5°+no_roll3 ckpt_320 (P3后期)"
+
+  # ===== v5 ±20° ckpt_400 =====
+  - label: "v5-cosinewr-z5-20deg-ep400"
+    dir_name: "model_small_20deg_v5_cosinewr_z5_20deg"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 20
+    z_voxels: 5
+    version: "v5-cosinewr-z5-20deg-ep400"
+    mode_desc: "CosineWR+z5+20°+no_roll3 ckpt_400"
+
+  # ===== v5 ±10° ckpt_400 =====
+  - label: "v5-cosinewr-z5-10deg-ep400"
+    dir_name: "model_small_10deg_v5_cosinewr_z5_10deg"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 10
+    z_voxels: 5
+    version: "v5-cosinewr-z5-10deg-ep400"
+    mode_desc: "CosineWR+z5+10°+no_roll3 ckpt_400"
+
+  # ===== v5 roll3 ckpt_400 =====
+  - label: "v5-cosinewr-z5-roll3-ep400"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_roll3"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-roll3-ep400"
+    mode_desc: "CosineWR+z5+roll3 ckpt_400"
+
+  # ===== v5 no-aug ckpt_400 =====
+  - label: "v5-cosinewr-z5-no-aug-ep400"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_no_aug"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-no-aug-ep400"
+    mode_desc: "CosineWR+z5+无增强 ckpt_400"
+
+  # ===== v5 step-20deg ckpt_400 =====
+  - label: "v5-step-z5-20deg-ep400"
+    dir_name: "model_small_20deg_v5_step_z5_20deg"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 20
+    z_voxels: 5
+    version: "v5-step-z5-20deg-ep400"
+    mode_desc: "StepLR+z5+20° ckpt_400 (StepLR对照)"
+
+  # ===== 历史对照: v1冠军 (已知0.433°) =====
+  - label: "v1-champion"
+    dir_name: "../v1/model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v1-champion"
+    mode_desc: "v1冠军 ckpt_400 (基准0.433°)"
+
+  # ===== 对照: v5 best_val (已知0.509°) =====
+  - label: "v5-cosinewr-z5-bestval"
+    dir_name: "model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-bestval"
+    mode_desc: "v5主实验 best_val (基准0.509°)"

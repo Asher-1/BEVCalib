@@ -37,7 +37,11 @@
 #   --augment_pc_jitter S  点云抖动sigma (默认: 0.0)
 #   --augment_pc_dropout R 点云随机丢弃比例 (默认: 0.0)
 #   --augment_color_jitter S 图像色彩抖动强度 (默认: 0.0)
+#   --augment_intrinsic S  相机内参随机扰动强度 (默认: 0.0, e.g. 0.05=±5%)
 #   --early_stopping_patience N 早停耐心值 (默认: 0=禁用)
+#   --seed N               全局随机种子 (默认: 42)
+#   --pretrain_ckpt PATH   预训练权重路径 (用于refine/finetune训练)
+#   --num_epochs N         训练总epoch数 (默认: 400)
 #   --no-tb                不自动启动 TensorBoard
 #   --tb_port PORT         TensorBoard端口 (默认: 自动检测空闲端口, 起始6006)
 #
@@ -168,7 +172,30 @@ detect_gpus_per_node() {
 }
 
 detect_local_ip() {
-    hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
+    local ip=""
+    # 1. K8s Downward API (recommended: spec.containers[].env with fieldRef status.hostIP)
+    if [ -n "${NODE_IP:-}" ]; then ip="$NODE_IP"
+    elif [ -n "${MY_NODE_IP:-}" ]; then ip="$MY_NODE_IP"
+    elif [ -n "${HOST_IP:-}" ]; then ip="$HOST_IP"
+    fi
+    # 2. K8s API: query pod's status.hostIP
+    if [ -z "$ip" ] && [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+        local _token _ns _pod
+        _token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
+        _ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)
+        _pod=$(hostname)
+        if [ -n "$_token" ] && [ -n "$_ns" ] && [ -n "$_pod" ]; then
+            ip=$(curl -sk --connect-timeout 2 \
+                -H "Authorization: Bearer $_token" \
+                "https://kubernetes.default.svc/api/v1/namespaces/$_ns/pods/$_pod" 2>/dev/null \
+                | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',{}).get('hostIP',''))" 2>/dev/null)
+        fi
+    fi
+    # 3. Fallback: hostname -I (returns Pod IP in K8s, host IP on bare metal)
+    if [ -z "$ip" ]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    echo "${ip:-127.0.0.1}"
 }
 
 detect_public_ip() {
@@ -219,7 +246,12 @@ PER_AXIS_PROB=""
 AUGMENT_PC_JITTER=""
 AUGMENT_PC_DROPOUT=""
 AUGMENT_COLOR_JITTER=""
+AUGMENT_INTRINSIC=""
+EVAL_ANGLE=""
 EARLY_STOPPING_PATIENCE=""
+SEED=""
+PRETRAIN_CKPT=""
+NUM_EPOCHS=""
 ENABLE_TB=1
 TB_PORT=""
 NNODES=""
@@ -297,14 +329,28 @@ while [[ $# -gt 0 ]]; do
             PERTURB_DISTRIBUTION="$2"; shift 2 ;;
         --per_axis_prob)
             PER_AXIS_PROB="$2"; shift 2 ;;
+        --per_axis_weights)
+            PER_AXIS_WEIGHTS="$2"; shift 2 ;;
+        --axis_weights)
+            AXIS_WEIGHTS="$2"; shift 2 ;;
         --augment_pc_jitter)
             AUGMENT_PC_JITTER="$2"; shift 2 ;;
         --augment_pc_dropout)
             AUGMENT_PC_DROPOUT="$2"; shift 2 ;;
         --augment_color_jitter)
             AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
+        --augment_intrinsic)
+            AUGMENT_INTRINSIC="$2"; shift 2 ;;
+        --eval_angle)
+            EVAL_ANGLE="$2"; shift 2 ;;
         --early_stopping_patience)
             EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
+        --seed)
+            SEED="$2"; shift 2 ;;
+        --pretrain_ckpt)
+            PRETRAIN_CKPT="$2"; shift 2 ;;
+        --num_epochs)
+            NUM_EPOCHS="$2"; shift 2 ;;
         --no-tb|--no-tensorboard)
             ENABLE_TB=0
             shift
@@ -462,11 +508,11 @@ if [ -z "$CLUSTER_DETECTED" ]; then
         fi
 
     # 方式2: hostname 模式 (*-master-N / *-worker-N)
-    elif echo "$K8S_HOSTNAME" | grep -qE '-(master|worker)-[0-9]+$'; then
+    elif echo "$K8S_HOSTNAME" | grep -qE -- '-(master|worker)-[0-9]+$'; then
         CLUSTER_DETECTED="Kubernetes"
         echo "ℹ️  检测到 Kubernetes/Cloud 环境 (hostname: $K8S_HOSTNAME)"
 
-        if echo "$K8S_HOSTNAME" | grep -qE '-master-[0-9]+$'; then
+        if echo "$K8S_HOSTNAME" | grep -qE -- '-master-[0-9]+$'; then
             if [ -z "$NODE_RANK" ]; then
                 NODE_RANK=0
                 echo "    角色: master, node_rank=0"
@@ -475,8 +521,8 @@ if [ -z "$CLUSTER_DETECTED" ]; then
                 MASTER_ADDR=$(detect_local_ip)
                 echo "    master_addr=$MASTER_ADDR (本机IP)"
             fi
-        elif echo "$K8S_HOSTNAME" | grep -qE '-worker-[0-9]+$'; then
-            K8S_WORKER_NUM=$(echo "$K8S_HOSTNAME" | grep -oP 'worker-\K[0-9]+$')
+        elif echo "$K8S_HOSTNAME" | grep -qE -- '-worker-[0-9]+$'; then
+            K8S_WORKER_NUM=$(echo "$K8S_HOSTNAME" | sed 's/.*worker-//')
             if [ -z "$NODE_RANK" ]; then
                 NODE_RANK=$((K8S_WORKER_NUM + 1))
                 echo "    角色: worker-${K8S_WORKER_NUM}, node_rank=$NODE_RANK"
@@ -495,6 +541,19 @@ if [ -z "$CLUSTER_DETECTED" ]; then
                     echo "    请手动指定: --master_addr <master_ip>"
                 fi
             fi
+        fi
+    fi
+fi
+
+# 通用 hostname 模式: *-N (如 bev-0, node-3, gpu-12)
+if [ -z "$CLUSTER_DETECTED" ] && [ -z "$NODE_RANK" ]; then
+    _GEN_HOSTNAME=$(hostname 2>/dev/null || echo "")
+    if echo "$_GEN_HOSTNAME" | grep -qE '^[a-zA-Z]+-[0-9]+$'; then
+        _GEN_RANK=$(echo "$_GEN_HOSTNAME" | sed 's/.*-//')
+        if [ -n "$_GEN_RANK" ]; then
+            NODE_RANK="$_GEN_RANK"
+            CLUSTER_DETECTED="hostname"
+            echo "ℹ️  从 hostname 检测到 node_rank=$NODE_RANK (hostname: $_GEN_HOSTNAME)"
         fi
     fi
 fi
@@ -620,58 +679,6 @@ fi
 # 启动信息
 # ============================================================================
 
-if [ "$USE_DDP" -eq 1 ]; then
-    if [ "$NNODES" -gt 1 ]; then
-        TOTAL_GPUS=$((NNODES * DDP_NGPUS))
-        MODE_STR="DDP多机并行 (${NNODES}机 x ${DDP_NGPUS}GPU = ${TOTAL_GPUS}GPU)"
-    else
-        MODE_STR="DDP单机并行 (${DDP_NGPUS} GPUs)"
-    fi
-else
-    MODE_STR="独立多任务 (每GPU一个扰动设置)"
-fi
-
-_W=70
-_print_row() { printf "│  %-18s %-${_W}s│\n" "$1" "$2"; }
-_print_sep() { printf "├"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┤\n"; }
-
-echo ""
-printf "┌"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┐\n"
-printf "│%*s│\n" $((_W + 21)) ""
-printf "│%*s%s%*s│\n" $(( (_W + 21 - 32) / 2 )) "" "BEVCalib Training Configuration" $(( (_W + 21 - 32 + 1) / 2 )) ""
-printf "│%*s│\n" $((_W + 21)) ""
-_print_sep
-_print_row "Dataset:"       "$DATASET_NAME"
-_print_row "Dataset Path:"  "$DATASET_ROOT"
-_print_row "Version:"       "$VERSION"
-_print_sep
-_print_row "Mode:"          "$MODE_STR"
-_print_row "Batch Size:"    "$BATCH_SIZE"
-_print_row "Angle Range:"   "±${DDP_ANGLE}°"
-_print_row "Trans Range:"   "${DDP_TRANS}m"
-[ -n "$LEARNING_RATE" ] && \
-_print_row "Learning Rate:" "$LEARNING_RATE"
-_print_row "Rotation Only:" "$([ -n "$ROTATION_ONLY" ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
-_print_row "Axis Loss:"    "$([ -n "$ENABLE_AXIS_LOSS" ] && echo "enabled (weight=${WEIGHT_AXIS_ROTATION:-0.3})" || echo 'disabled')"
-[ -n "$LR_SCHEDULE" ] && \
-_print_row "LR Schedule:"  "$LR_SCHEDULE"
-[ -n "$PERTURB_DISTRIBUTION" ] && \
-_print_row "Perturbation:" "$PERTURB_DISTRIBUTION"
-[ -n "$EARLY_STOPPING_PATIENCE" ] && [ "$EARLY_STOPPING_PATIENCE" != "0" ] && \
-_print_row "Early Stop:"   "patience=$EARLY_STOPPING_PATIENCE"
-_print_row "Execution:"     "$([ "$FOREGROUND" -eq 1 ] && echo 'Foreground (Ctrl+C to stop)' || echo 'Background (nohup)')"
-_print_row "TensorBoard:"   "$([ "$ENABLE_TB" -eq 1 ] && echo 'auto-start' || echo 'disabled (--no-tb)')"
-if [ "$USE_DDP" -eq 1 ] && [ "$NNODES" -gt 1 ]; then
-_print_sep
-_print_row "Node Rank:"     "$NODE_RANK"
-_print_row "Master:"        "${MASTER_ADDR}:${MASTER_PORT}"
-[ -n "$CLUSTER_DETECTED" ] && \
-_print_row "Cluster:"       "$CLUSTER_DETECTED"
-_print_row "RDZV Timeout:"  "${RDZV_TIMEOUT}s"
-fi
-printf "└"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┘\n"
-echo ""
-
 # 检查是否有正在运行的训练
 RUNNING=$(ps aux | grep -E "train_kitti.py" | grep -v grep | wc -l)
 if [ "$RUNNING" -gt 0 ]; then
@@ -774,6 +781,16 @@ if [ "$ENABLE_TB" -eq 1 ] && [ "$IS_MASTER" -eq 1 ]; then
             fi
             tb_msg "  日志目录: $TB_LOG_DIR"
             tb_msg "  PID: $TB_PID"
+            _POD_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+            if [ -n "$_POD_IP" ] && [ "$_POD_IP" != "$LOCAL_IP" ]; then
+                tb_msg "  Pod IP: http://${_POD_IP}:${TB_PORT} (集群内部)"
+            fi
+            if [ -f /proc/1/cgroup ] && grep -q "kubepods\|docker" /proc/1/cgroup 2>/dev/null; then
+                if [ "$_POD_IP" = "$LOCAL_IP" ]; then
+                    tb_msg "  ⚠️  容器环境: 显示的IP为Pod IP, 外部可能无法访问"
+                    tb_msg "     设置 NODE_IP 环境变量指定宿主机IP"
+                fi
+            fi
             tb_msg "========================================"
         else
             tb_msg "⚠️  TensorBoard 启动失败, 请手动启动:"
@@ -825,6 +842,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     AXIS_LOSS_ARGS=""
     [ -n "$ENABLE_AXIS_LOSS" ] && AXIS_LOSS_ARGS="--enable_axis_loss"
     [ -n "$WEIGHT_AXIS_ROTATION" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --weight_axis_rotation $WEIGHT_AXIS_ROTATION"
+    [ -n "$AXIS_WEIGHTS" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --axis_weights $AXIS_WEIGHTS"
 
     OPTIM_ARGS=""
     [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
@@ -836,10 +854,19 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$HEAD_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --head_dropout $HEAD_DROPOUT"
     [ -n "$PERTURB_DISTRIBUTION" ] && OPTIM_ARGS="$OPTIM_ARGS --perturb_distribution $PERTURB_DISTRIBUTION"
     [ -n "$PER_AXIS_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --per_axis_prob $PER_AXIS_PROB"
+    [ -n "$PER_AXIS_WEIGHTS" ] && OPTIM_ARGS="$OPTIM_ARGS --per_axis_weights $PER_AXIS_WEIGHTS"
     [ -n "$AUGMENT_PC_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_jitter $AUGMENT_PC_JITTER"
     [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
     [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
+    [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic $AUGMENT_INTRINSIC"
+    [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
+    [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
+    [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
+    [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
+
+    TB_PORT_ARG=""
+    [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
 
     TRAIN_CMD="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
@@ -855,14 +882,15 @@ if [ "$USE_DDP" -eq 1 ]; then
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
         $LR_ARG \
+        $TB_PORT_ARG \
         $OPTIM_ARGS"
 
     if [ "$FOREGROUND" -eq 1 ]; then
         echo "  日志: $DDP_LOG_DIR/train.log (+ 终端输出)"
         echo ""
-        eval $TRAIN_CMD 2>&1 | tee "$DDP_LOG_DIR/train_fg.log"
+        eval $TRAIN_CMD
     else
-        nohup bash -c "$TRAIN_CMD" > "$DDP_LOG_DIR/nohup_output.log" 2>&1 &
+        nohup bash -c "$TRAIN_CMD" > /dev/null 2>&1 &
         PID1=$!
         echo "  PID: $PID1"
         echo "  日志: $DDP_LOG_DIR/train.log"
@@ -902,6 +930,7 @@ else
     AXIS_LOSS_ARGS=""
     [ -n "$ENABLE_AXIS_LOSS" ] && AXIS_LOSS_ARGS="--enable_axis_loss"
     [ -n "$WEIGHT_AXIS_ROTATION" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --weight_axis_rotation $WEIGHT_AXIS_ROTATION"
+    [ -n "$AXIS_WEIGHTS" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --axis_weights $AXIS_WEIGHTS"
 
     OPTIM_ARGS=""
     [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
@@ -913,10 +942,19 @@ else
     [ -n "$HEAD_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --head_dropout $HEAD_DROPOUT"
     [ -n "$PERTURB_DISTRIBUTION" ] && OPTIM_ARGS="$OPTIM_ARGS --perturb_distribution $PERTURB_DISTRIBUTION"
     [ -n "$PER_AXIS_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --per_axis_prob $PER_AXIS_PROB"
+    [ -n "$PER_AXIS_WEIGHTS" ] && OPTIM_ARGS="$OPTIM_ARGS --per_axis_weights $PER_AXIS_WEIGHTS"
     [ -n "$AUGMENT_PC_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_jitter $AUGMENT_PC_JITTER"
     [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
     [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
+    [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic $AUGMENT_INTRINSIC"
+    [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
+    [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
+    [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
+    [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
+
+    TB_PORT_ARG=""
+    [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
 
     TRAIN_CMD_0="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
@@ -930,6 +968,7 @@ else
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
         $LR_ARG \
+        $TB_PORT_ARG \
         $OPTIM_ARGS"
 
     TRAIN_CMD_1="bash train_universal.sh scratch \
@@ -944,6 +983,7 @@ else
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
         $LR_ARG \
+        $TB_PORT_ARG \
         $OPTIM_ARGS"
 
     if [ "$FOREGROUND" -eq 1 ]; then
@@ -952,14 +992,14 @@ else
 
         echo "[GPU 0] 小扰动训练 (10deg, 0.5m)..."
         echo "  日志: $GPU0_LOG_DIR/train.log"
-        eval $TRAIN_CMD_0 > "$GPU0_LOG_DIR/train_fg.log" 2>&1 &
+        eval $TRAIN_CMD_0 > /dev/null 2>&1 &
         PID1=$!
 
         sleep 2
 
         echo "[GPU 1] 标准扰动训练 (5deg, 0.3m)..."
         echo "  日志: $GPU1_LOG_DIR/train.log"
-        eval $TRAIN_CMD_1 > "$GPU1_LOG_DIR/train_fg.log" 2>&1 &
+        eval $TRAIN_CMD_1 > /dev/null 2>&1 &
         PID2=$!
 
         echo ""
@@ -971,7 +1011,7 @@ else
         trap "echo ''; echo '正在停止训练...'; kill $PID1 $PID2 2>/dev/null; wait $PID1 $PID2 2>/dev/null; echo '已停止'; exit 130" INT TERM
 
         # 实时显示两个任务的日志
-        tail -f "$GPU0_LOG_DIR/train_fg.log" "$GPU1_LOG_DIR/train_fg.log" &
+        tail -f "$GPU0_LOG_DIR/train.log" "$GPU1_LOG_DIR/train.log" &
         TAIL_PID=$!
 
         wait $PID1 $PID2 2>/dev/null
@@ -985,7 +1025,7 @@ else
         echo "========================================"
     else
         echo "[GPU 0] 小扰动训练 (10deg, 0.5m)..."
-        nohup bash -c "$TRAIN_CMD_0" > "$GPU0_LOG_DIR/nohup_output.log" 2>&1 &
+        nohup bash -c "$TRAIN_CMD_0" > /dev/null 2>&1 &
         PID1=$!
         echo "  PID: $PID1"
         echo "  日志: $GPU0_LOG_DIR/train.log"
@@ -993,7 +1033,7 @@ else
         sleep 2
 
         echo "[GPU 1] 标准扰动训练 (5deg, 0.3m)..."
-        nohup bash -c "$TRAIN_CMD_1" > "$GPU1_LOG_DIR/nohup_output.log" 2>&1 &
+        nohup bash -c "$TRAIN_CMD_1" > /dev/null 2>&1 &
         PID2=$!
         echo "  PID: $PID2"
         echo "  日志: $GPU1_LOG_DIR/train.log"

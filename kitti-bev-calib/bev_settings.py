@@ -72,13 +72,3 @@ vsize_xyz = [
     (ybound[1] - ybound[0]) / sparse_shape[1],
     (zbound[1] - zbound[0]) / sparse_shape[2],
 ]
-
-# ========== 打印当前配置（仅首次导入时）==========
-_printed = os.environ.get("_BEV_SETTINGS_PRINTED", "0")
-if _printed == "0":
-    _nx_z = int((zbound[1] - zbound[0]) / zbound[2])
-    print(f"[BEV Settings] 数据集类型: {DATASET_TYPE}")
-    print(f"[BEV Settings] xbound: {xbound}, ybound: {ybound}")
-    print(f"[BEV Settings] zbound: {zbound} → {_nx_z}个Z体素 (步长{zbound[2]}m)")
-    print(f"[BEV Settings] sparse_shape: {sparse_shape}")
-    os.environ["_BEV_SETTINGS_PRINTED"] = "1"

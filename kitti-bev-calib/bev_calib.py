@@ -91,6 +91,7 @@ class BEVCalib(nn.Module):
                  rotation_only = False,
                  enable_axis_loss = False,
                  weight_axis_rotation = 0.3,
+                 axis_weights = (3.0, 1.5, 1.0),
                  drop_path_rate = 0.1,
                  head_dropout = 0.1,
                 ):
@@ -138,6 +139,7 @@ class BEVCalib(nn.Module):
             rotation_only=rotation_only,
             enable_axis_loss=enable_axis_loss,
             weight_axis_rotation=weight_axis_rotation,
+            axis_weights=axis_weights,
         )
     
     def make_deformable_transformer(self, num_layers, drop_path_rate=0.1):

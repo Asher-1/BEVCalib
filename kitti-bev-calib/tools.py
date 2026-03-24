@@ -17,7 +17,8 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
                                          rotation_only=False,
                                          distribution='uniform',
                                          per_axis_prob=0.0,
-                                         curriculum_scale=1.0):
+                                         curriculum_scale=1.0,
+                                         per_axis_weights=None):
     """
     Vectorized batch perturbation with configurable distribution and per-axis mode.
 
@@ -29,6 +30,8 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
         distribution: 'uniform' or 'truncated_normal'
         per_axis_prob: probability of perturbing a single axis only (0=disabled)
         curriculum_scale: scale factor for perturbation range (0..1 for curriculum)
+        per_axis_weights: tuple of 3 floats for (roll, pitch, yaw) sampling weights
+                          in per-axis mode. None = uniform. e.g. (0.5, 0.3, 0.2)
     """
     B = T.shape[0]
     effective_angle = angle_range_deg * curriculum_scale
@@ -41,7 +44,12 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
 
     if use_per_axis:
         rotvecs = np.zeros((B, 3))
-        axis_idx = np.random.randint(0, 3, size=B)
+        if per_axis_weights is not None:
+            w = np.array(per_axis_weights, dtype=np.float64)
+            w = w / w.sum()
+            axis_idx = np.random.choice(3, size=B, p=w)
+        else:
+            axis_idx = np.random.randint(0, 3, size=B)
         if distribution == 'truncated_normal':
             angles = _sample_truncated_normal(-effective_angle, effective_angle, B)
         else:

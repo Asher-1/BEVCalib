@@ -274,12 +274,18 @@ def run_evaluations():
             import shutil
             shutil.rmtree(per_model_dir, ignore_errors=True)
 
-        ckpt_path = os.path.join(MODELS_DIR, mcfg["dir_name"],
+        model_base = os.path.join(MODELS_DIR, mcfg["dir_name"])
+        ckpt_path = os.path.join(model_base,
                                  os.path.basename(MODELS_DIR) +
                                 "_scratch/checkpoint", mcfg["ckpt"])
         if not os.path.isfile(ckpt_path):
-            print(f"\n[{idx+1}/{len(MODELS)}] {label}: SKIP - checkpoint not found: {ckpt_path}")
-            continue
+            import glob as _glob
+            candidates = _glob.glob(os.path.join(model_base, "*_scratch/checkpoint", mcfg["ckpt"]))
+            if candidates:
+                ckpt_path = candidates[0]
+            else:
+                print(f"\n[{idx+1}/{len(MODELS)}] {label}: SKIP - checkpoint not found: {ckpt_path}")
+                continue
 
         print(f"\n{'='*80}")
         print(f"[{idx+1}/{len(MODELS)}] Evaluating: {label}")

@@ -346,7 +346,16 @@ def load_bevcalib_inference(
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
     state = ckpt.get("model_state_dict", ckpt)
-    model.load_state_dict(state)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected:
+        loss_keys = [k for k in unexpected if 'loss_fn' in k]
+        non_loss = [k for k in unexpected if 'loss_fn' not in k]
+        if loss_keys:
+            print(f"[load] Skipped {len(loss_keys)} loss-only keys (not needed for inference)")
+        if non_loss:
+            print(f"[load] WARNING: unexpected non-loss keys: {non_loss}")
+    if missing:
+        print(f"[load] WARNING: missing keys: {missing}")
     epoch = ckpt.get("epoch", -1)
 
     model.to(device).eval()

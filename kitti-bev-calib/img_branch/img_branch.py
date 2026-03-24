@@ -361,7 +361,7 @@ class Cam2BEV(nn.Module):
         try:
             assert torch.all(cam_bev_mask == ref_mask)
         except:
-            print(f"ERROR: cam_bev_mask != ref_mask")
+            import sys; print(f"ERROR: cam_bev_mask != ref_mask", file=sys.stderr)
             torch.save(cam2ego_T, "cam2ego_T.pt")
             torch.save(cam_intrins, "cam_intrins.pt")
             torch.save(post_cam2ego_T, "post_cam2ego_T.pt")

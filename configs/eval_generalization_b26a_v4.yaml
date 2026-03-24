@@ -1,0 +1,119 @@
+# BEVCalib B26A v4 泛化性能评估配置
+# 7 个实验: 综合最优 + 消融 (增强/内参/扰动范围/z层数)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_b26a_v4.yaml
+#
+# 训练验证结果摘要 (同分布 ±5°):
+#   v4_angle20_z5:       0.26° ← 训练±20°, 验证±5°
+#   v4_z2_control:       0.24° ← z=2 (低分辨率)
+#   v4_best_z5:          0.28° ← 综合最优基线
+#   v4_intrinsic_aug_z5: 0.28° ← 内参增强
+#   v4_light_aug_z5:     0.32° ← 轻量增强
+#   v4_angle10_z5:       0.33° ← 训练±10°, 验证±5°
+#   v4_no_aug_z5:        0.34° ← 无增强
+#
+# 关键对比:
+#   1. 大扰动训练 (angle20 vs angle10 vs best): 验证扰动范围影响
+#   2. 增强消融 (best vs light_aug vs no_aug): 验证数据增强效果
+#   3. z层数 (best_z5 vs z2_control): 验证z分辨率影响 (预期z5更好)
+#   4. 内参增强 (intrinsic_aug vs best): 验证跨相机泛化改善
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v4"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v4"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== 主实验: v4 综合最优基线 =====
+  - label: "v4-best-z5"
+    dir_name: "model_small_5deg_v4_best_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-best-z5"
+    mode_desc: "v4综合最优: z5+StepLR+roll3+peraxis02+strong_aug"
+
+  - label: "v4-best-z5-final"
+    dir_name: "model_small_5deg_v4_best_z5"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-best-z5-final"
+    mode_desc: "v4综合最优(最终epoch)"
+
+  # ===== 消融: 扰动范围 =====
+  - label: "v4-angle10-z5"
+    dir_name: "model_small_10deg_v4_angle10_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 10
+    z_voxels: 5
+    version: "v4-angle10-z5"
+    mode_desc: "训练±10°扰动(2x信号强度)"
+
+  - label: "v4-angle20-z5"
+    dir_name: "model_small_20deg_v4_angle20_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 20
+    z_voxels: 5
+    version: "v4-angle20-z5"
+    mode_desc: "训练±20°扰动(论文级信号强度)"
+
+  # ===== 消融: 数据增强 =====
+  - label: "v4-light-aug-z5"
+    dir_name: "model_small_5deg_v4_light_aug_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-light-aug-z5"
+    mode_desc: "轻量增强(jitter=0.005,dropout=0.03,color=0.1)"
+
+  - label: "v4-no-aug-z5"
+    dir_name: "model_small_5deg_v4_no_aug_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-no-aug-z5"
+    mode_desc: "无数据增强"
+
+  # ===== 消融: 内参增强 =====
+  - label: "v4-intrinsic-aug-z5"
+    dir_name: "model_small_5deg_v4_intrinsic_aug_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-intrinsic-aug-z5"
+    mode_desc: "内参增强±5%(提升跨相机泛化)"
+
+  # ===== 对照: z=2 =====
+  - label: "v4-z2-control"
+    dir_name: "model_small_5deg_v4_z2_control"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v4-z2-control"
+    mode_desc: "z=2对照(验证z分辨率重要性)"

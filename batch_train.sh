@@ -60,10 +60,9 @@ BEVCalib 批量训练脚本 (配置文件驱动)
     nohup bash batch_train.sh configs/batch_train_5deg.yaml > batch.log 2>&1 &
 
 可用配置文件:
-    configs/batch_train_5deg.yaml           - 5度扰动Z分辨率对比
-    configs/batch_train_10deg_rotation.yaml - 10度rotation-only实验
-    configs/batch_train_lr_ablation.yaml    - 学习率消融实验
-
+    configs/batch8_train_b26a_optim_v1.yaml           - 5度扰动Z分辨率对比
+    configs/batch16_train_32nodes_v1.yaml - 10度rotation-only实验
+    configs/batch16_train_32nodes_optim_v3.yaml - 32节点优化实验
 EOF
 }
 
@@ -151,6 +150,16 @@ GLOBAL_DRY_RUN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(
 BATCH_LOG_DIR=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('batch_log_dir', 'logs'))" 2>/dev/null)
 WAIT_TIME=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('wait_between_experiments', 10))" 2>/dev/null)
 
+# TensorBoard 端口 (从 defaults.params.tensorboard_port 读取)
+TB_PORT=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); p=c.get('defaults',{}).get('params',{}) or {}; v=p.get('tensorboard_port'); print(v if v is not None else 6006)" 2>/dev/null)
+TB_PORT=${TB_PORT:-6006}
+
+# Node IP (K8s环境: 宿主机IP, 用于TensorBoard地址显示)
+YAML_NODE_IP=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); p=c.get('defaults',{}).get('params',{}) or {}; v=p.get('node_ip'); print(v if v and v != 'None' else '')" 2>/dev/null)
+if [ -n "$YAML_NODE_IP" ]; then
+    export NODE_IP="$YAML_NODE_IP"
+fi
+
 # 命令行 --dry-run 覆盖配置文件
 [ "$DRY_RUN" -eq 1 ] && GLOBAL_DRY_RUN="True"
 [ "$GLOBAL_DRY_RUN" == "True" ] && DRY_RUN=1
@@ -181,7 +190,30 @@ stop_tensorboard() {
 }
 
 detect_local_ip() {
-    hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
+    local ip=""
+    # 1. K8s Downward API (recommended: spec.containers[].env with fieldRef status.hostIP)
+    if [ -n "${NODE_IP:-}" ]; then ip="$NODE_IP"
+    elif [ -n "${MY_NODE_IP:-}" ]; then ip="$MY_NODE_IP"
+    elif [ -n "${HOST_IP:-}" ]; then ip="$HOST_IP"
+    fi
+    # 2. K8s API: query pod's status.hostIP
+    if [ -z "$ip" ] && [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+        local _token _ns _pod
+        _token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
+        _ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)
+        _pod=$(hostname)
+        if [ -n "$_token" ] && [ -n "$_ns" ] && [ -n "$_pod" ]; then
+            ip=$(curl -sk --connect-timeout 2 \
+                -H "Authorization: Bearer $_token" \
+                "https://kubernetes.default.svc/api/v1/namespaces/$_ns/pods/$_pod" 2>/dev/null \
+                | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',{}).get('hostIP',''))" 2>/dev/null)
+        fi
+    fi
+    # 3. Fallback: hostname -I (returns Pod IP in K8s, host IP on bare metal)
+    if [ -z "$ip" ]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    echo "${ip:-127.0.0.1}"
 }
 
 detect_public_ip() {
@@ -242,7 +274,7 @@ start_tensorboard() {
     fi
 
     local tb_port
-    tb_port=$(find_free_port 6006)
+    tb_port=$(find_free_port "${TB_PORT:-6006}")
 
     nohup tensorboard --logdir "$tb_logdir" --port "$tb_port" --bind_all \
         > "$tb_logdir/tensorboard.log" 2>&1 &
@@ -260,6 +292,17 @@ start_tensorboard() {
         [ -n "$public_ip" ] && tb_msg "  公网: http://${public_ip}:${tb_port}"
         tb_msg "  日志目录: $tb_logdir"
         tb_msg "  PID: $TB_PID"
+        local _pod_ip
+        _pod_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        if [ -n "$_pod_ip" ] && [ "$_pod_ip" != "$local_ip" ]; then
+            tb_msg "  Pod IP: http://${_pod_ip}:${tb_port} (集群内部)"
+        fi
+        if [ -f /proc/1/cgroup ] && grep -q "kubepods\|docker" /proc/1/cgroup 2>/dev/null; then
+            if [ "$_pod_ip" = "$local_ip" ]; then
+                tb_msg "  ⚠️  容器环境: 显示的IP为Pod IP, 外部可能无法访问"
+                tb_msg "     设置 NODE_IP 环境变量或 YAML node_ip 字段指定宿主机IP"
+            fi
+        fi
         tb_msg "========================================"
         log "TensorBoard 已启动: http://${local_ip}:${tb_port} (PID=$TB_PID)"
         log "  详见: $tb_startup_log"
@@ -275,13 +318,51 @@ start_tensorboard() {
 # 日志函数
 # =============================================================================
 
-BATCH_LOG="$BATCH_LOG_DIR/batch_train_$(date +%Y%m%d_%H%M%S).log"
+_DETECT_NODE_RANK() {
+    # 1. SLURM
+    [ -n "$SLURM_NODEID" ] && { echo "$SLURM_NODEID"; return; }
+    # 2. 环境变量 NODE_RANK (PyTorch Operator, 手动设置)
+    [ -n "$NODE_RANK" ] && { echo "$NODE_RANK"; return; }
+    # 3. 常见平台环境变量
+    [ -n "$RANK" ] && { echo "$RANK"; return; }
+    [ -n "$OMPI_COMM_WORLD_RANK" ] && { echo "$OMPI_COMM_WORLD_RANK"; return; }
+    # 4. hostname 模式
+    local _hn
+    _hn=$(hostname 2>/dev/null || echo "")
+    # 4a. K8s: *-master-N / *-worker-N
+    if echo "$_hn" | grep -qE -- '-master-[0-9]+$'; then
+        echo "0"; return
+    elif echo "$_hn" | grep -qE -- '-worker-[0-9]+$'; then
+        echo "$_hn" | sed 's/.*worker-//' ; return
+    fi
+    # 4b. 通用: *-N (如 bev-0, node-3, gpu-12)
+    if echo "$_hn" | grep -qE '^[a-zA-Z]+-[0-9]+$'; then
+        echo "$_hn" | sed 's/.*-//' ; return
+    fi
+    # 5. YAML 配置
+    local yaml_rank
+    yaml_rank=$(echo "$CONFIG_JSON" | python3 -c "
+import sys, json
+c = json.load(sys.stdin)
+d = c.get('defaults',{}).get('params',{}) or {}
+e0 = (c.get('experiments') or [{}])[0].get('params',{}) or {}
+r = e0.get('node_rank', d.get('node_rank'))
+print(r if r is not None else '')
+" 2>/dev/null)
+    echo "${yaml_rank:-}"
+}
+_NODE_RANK=$(_DETECT_NODE_RANK)
+
+_IS_MASTER=1
+if [ -n "$_NODE_RANK" ] && [ "$_NODE_RANK" != "0" ]; then
+    _IS_MASTER=0
+fi
+
 mkdir -p "$BATCH_LOG_DIR"
 
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
     echo "$msg"
-    echo "$msg" >> "$BATCH_LOG"
 }
 
 trap 'stop_tensorboard; log "批量训练被中断"; exit 130' INT TERM
@@ -381,19 +462,26 @@ OPTIM_PARAMS = [
     ('head_dropout', '--head_dropout'),
     ('perturb_distribution', '--perturb_distribution'),
     ('per_axis_prob', '--per_axis_prob'),
+    ('per_axis_weights', '--per_axis_weights'),
+    ('axis_weights', '--axis_weights'),
     ('augment_pc_jitter', '--augment_pc_jitter'),
     ('augment_pc_dropout', '--augment_pc_dropout'),
     ('augment_color_jitter', '--augment_color_jitter'),
+    ('augment_intrinsic', '--augment_intrinsic'),
+    ('eval_angle_range_deg', '--eval_angle'),
     ('early_stopping_patience', '--early_stopping_patience'),
+    ('seed', '--seed'),
+    ('pretrain_ckpt', '--pretrain_ckpt'),
+    ('num_epochs', '--num_epochs'),
 ]
 for yaml_key, cli_flag in OPTIM_PARAMS:
     val = params.get(yaml_key)
-    if val is not None:
+    if val is not None and str(val).strip() != '':
         args.append(f"{cli_flag} {val}")
 
-# foreground
-if params.get('foreground', False):
-    args.append("--fg")
+# 批量模式必须前台执行，否则 start_training.sh 会 nohup 后台启动并立即返回，
+# 导致多个实验同时抢占 GPU。忽略 YAML 中的 foreground 设置。
+args.append("--fg")
 
 # no_tensorboard
 if params.get('no_tensorboard', False):
@@ -433,7 +521,8 @@ log "================================================================"
 log "BEVCalib 批量训练启动"
 log "配置文件: $CONFIG_FILE"
 log "实验总数: $TOTAL"
-log "日志文件: $BATCH_LOG"
+[ -n "$_NODE_RANK" ] && log "节点: node_rank=$_NODE_RANK $([ "$_IS_MASTER" -eq 1 ] && echo '(master)' || echo '(worker)')"
+log "日志: 每个实验输出到 logs/<dataset>/model_*/train.log"
 if [ "$DRY_RUN" -eq 1 ]; then
     log "模式: DRY-RUN（仅打印命令）"
 fi
@@ -525,23 +614,17 @@ PYTHON_INFO
     
     log "  TensorBoard日志目录: $EXPERIMENT_LOG_DIR"
     
-    # 立即创建目录并启动 TensorBoard（不等待训练命令创建）
-    # TensorBoard 能监控空目录，训练产生的 event 文件会自动被发现
-    start_tensorboard "$EXPERIMENT_LOG_DIR"
+    if [ "$_IS_MASTER" -eq 1 ]; then
+        start_tensorboard "$EXPERIMENT_LOG_DIR"
+    fi
     
     START_TIME=$(date +%s)
     
-    # 执行训练命令
-    # - yes y: 自动确认已有进程的提示
-    # - tee: 同时输出到终端和批量日志文件
-    # - grep -v: 过滤DDP grad stride警告（无害但刷屏）
-    #   原始train.log（start_training.sh写入）仍保留完整输出
-    # - PIPESTATUS[1]: 捕获训练命令的真实退出码
+    NOISE_FILTER="Grad strides do not match bucket view strides|bucket_view\.sizes\(\)|grad\.sizes\(\) = \[|_execution_engine\.run_backward\(  # Calls"
+    
     set +e
     yes y 2>/dev/null | eval "$CMD" 2>&1 | \
-        grep --line-buffered -v -E \
-            "Grad strides do not match bucket view strides|bucket_view\.sizes\(\)|grad\.sizes\(\) = \[|_execution_engine\.run_backward\(  # Calls" | \
-        tee -a "$BATCH_LOG"
+        grep --line-buffered -v -E "$NOISE_FILTER"
     EXIT_CODE=${PIPESTATUS[1]}
     set -e
     
@@ -571,11 +654,13 @@ log "================================================================"
 log "批量训练全部完成"
 log "  总实验数: $TOTAL"
 log "  配置文件: $CONFIG_FILE"
-log "  日志文件: $BATCH_LOG"
+log "  日志位置: logs/<dataset>/model_*/train.log"
 log "================================================================"
-log ""
-log "下一步建议:"
-log "  1. 查看训练日志: tail -f logs/<dataset>/model_*/train.log"
-log "  2. TensorBoard查看: tensorboard --logdir logs/<dataset>/ --port 6006"
-log "  3. 分析性能: bash utils/scripts/quick_analyze.sh 5deg --skip-test"
+if [ "$_IS_MASTER" -eq 1 ]; then
+    log ""
+    log "下一步建议:"
+    log "  1. 查看训练日志: tail -f logs/<dataset>/model_*/train.log"
+    log "  2. TensorBoard查看: tensorboard --logdir logs/<dataset>/ --port 6006"
+    log "  3. 分析性能: bash utils/scripts/quick_analyze.sh 5deg --skip-test"
+fi
 log ""

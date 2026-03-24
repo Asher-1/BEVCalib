@@ -406,7 +406,14 @@ def main():
             rotation_only=rotation_only,
         ).to(device)
         ckpt = torch.load(cfg["ckpt_path"], map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
+        missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        if unexpected:
+            loss_keys = [k for k in unexpected if 'loss_fn' in k]
+            non_loss = [k for k in unexpected if 'loss_fn' not in k]
+            if loss_keys:
+                print(f"  Skipped {len(loss_keys)} loss-only keys (not needed for inference)")
+            if non_loss:
+                print(f"  WARNING: unexpected non-loss keys: {non_loss}")
         model.eval()
         epoch = ckpt.get("epoch", -1)
         print(f"  epoch      : {epoch}")

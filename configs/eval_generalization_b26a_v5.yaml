@@ -1,0 +1,123 @@
+# BEVCalib B26A v5 泛化性能评估配置
+# 6个v5实验 + v1冠军 + v4最佳 作为历史对照
+#
+# 用法:
+#   /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#       --config configs/eval_generalization_b26a_v5.yaml
+#
+# v5 训练验证结果 (同分布, seed=42):
+#   v5_cosinewr_z5:          0.288° ← CosineWR+z5+±5°+no_roll3 (val最佳)
+#   v5_cosinewr_z5_roll3:    0.297° ← CosineWR+z5+±5°+roll3 (消融)
+#   v5_step_z5_20deg:        0.318° ← StepLR+z5+±20° (LR消融)
+#   v5_cosinewr_z5_10deg:    0.323° ← CosineWR+z5+±10° (扰动消融)
+#   v5_cosinewr_z5_20deg:    0.327° ← CosineWR+z5+±20° (扰动消融)
+#   v5_cosinewr_z5_no_aug:   0.367° ← CosineWR+z5+±5°+无增强 (aug消融)
+#
+# 关键对比:
+#   1. CosineWR vs StepLR (±20°): v5_cosinewr_z5_20deg vs v5_step_z5_20deg
+#   2. roll3影响: v5_cosinewr_z5 vs v5_cosinewr_z5_roll3
+#   3. 扰动范围: v5_cosinewr_z5 vs _10deg vs _20deg
+#   4. 增强效果: v5_cosinewr_z5 vs v5_cosinewr_z5_no_aug
+#   5. 跨版本: v5 vs v1冠军(0.429°) vs v4最佳(0.572°)
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v5"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v5"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== v5 主实验: CosineWR+z5+±5°+no_roll3 =====
+  - label: "v5-cosinewr-z5"
+    dir_name: "model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5"
+    mode_desc: "v5主实验: CosineWR+z5+no_roll3+strong_aug (seed=42)"
+
+  # ===== v5 CosineWR+z5+±20° =====
+  - label: "v5-cosinewr-z5-20deg"
+    dir_name: "model_small_20deg_v5_cosinewr_z5_20deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 20
+    z_voxels: 5
+    version: "v5-cosinewr-z5-20deg"
+    mode_desc: "CosineWR+z5+±20°训练→±5°评估+no_roll3"
+
+  # ===== v5 CosineWR+z5+±10° =====
+  - label: "v5-cosinewr-z5-10deg"
+    dir_name: "model_small_10deg_v5_cosinewr_z5_10deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 10
+    z_voxels: 5
+    version: "v5-cosinewr-z5-10deg"
+    mode_desc: "CosineWR+z5+±10°训练→±5°评估+no_roll3"
+
+  # ===== v5 消融: CosineWR+roll3 =====
+  - label: "v5-cosinewr-z5-roll3"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_roll3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-roll3"
+    mode_desc: "消融: CosineWR+z5+roll3(axis_weights=3,1.5,1)"
+
+  # ===== v5 消融: StepLR+±20° =====
+  - label: "v5-step-z5-20deg"
+    dir_name: "model_small_20deg_v5_step_z5_20deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 20
+    z_voxels: 5
+    version: "v5-step-z5-20deg"
+    mode_desc: "消融: StepLR+z5+±20°+no_roll3(隔离LR影响)"
+
+  # ===== v5 消融: CosineWR+无增强 =====
+  - label: "v5-cosinewr-z5-no-aug"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_no_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-no-aug"
+    mode_desc: "消融: CosineWR+z5+无数据增强"
+
+  # ===== 历史对照: v1冠军 =====
+  - label: "v1-champion"
+    dir_name: "../v1/model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v1-champion"
+    mode_desc: "历史冠军: v1-CosineWR+z=2+axis05+no_roll3 (0.429°)"
+
+  # ===== 历史对照: v4最佳 =====
+  - label: "v4-angle20-z5"
+    dir_name: "../v4/model_small_20deg_v4_angle20_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 20
+    z_voxels: 5
+    version: "v4-angle20-z5"
+    mode_desc: "v4最佳: StepLR+z5+±20°+roll3 (0.572°)"

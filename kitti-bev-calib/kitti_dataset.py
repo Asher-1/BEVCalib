@@ -132,7 +132,7 @@ class KittiDataset(Dataset):
         img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
         pcd_path = os.path.join(self.dataset_root, 'sequences', seq, 'velodyne', id+'.bin')
         if not os.path.exists(img_path) or not os.path.exists(pcd_path):
-            print('File not exist')
+            import sys; print(f'[KittiDataset] File not exist: img={img_path}, pcd={pcd_path}', file=sys.stderr)
             assert False
         img = Image.open(img_path)
         pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)

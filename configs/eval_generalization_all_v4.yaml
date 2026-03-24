@@ -1,0 +1,107 @@
+# BEVCalib ALL数据集 v4 泛化性能评估配置
+# 6 个实验: 综合最优 + 消融 (增强/内参/per_axis/z层数)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_all_v4.yaml
+#
+# 训练验证结果摘要 (同分布 ±5°):
+#   v4_z5_light_aug:     0.43° ← 轻量增强
+#   v4_z2_reference:     0.45° ← z=2 对照
+#   v4_z5_best:          0.49° ← 综合最优基线
+#   v4_z5_no_aug:        0.52° ← 无增强
+#   v4_z5_peraxis02:     0.52° ← per_axis=0.2
+#   v4_z5_intrinsic_aug: 0.63° ← 内参增强
+#
+# 关键对比:
+#   1. z层数 (z5_best vs z2_reference): ALL数据集上z分辨率影响
+#   2. 增强强度 (z5_best vs z5_light_aug vs z5_no_aug)
+#   3. 内参增强 (z5_intrinsic_aug vs z5_best): 大数据集+内参增强效果
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v4"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v4"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== 主实验: v4 综合最优 =====
+  - label: "v4-z5-best"
+    dir_name: "model_small_5deg_v4_z5_best"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-z5-best"
+    mode_desc: "ALL v4综合最优: z5+StepLR+roll3+peraxis02+strong_aug"
+
+  - label: "v4-z5-best-final"
+    dir_name: "model_small_5deg_v4_z5_best"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-z5-best-final"
+    mode_desc: "ALL v4综合最优(最终epoch)"
+
+  # ===== 消融: 数据增强 =====
+  - label: "v4-z5-light-aug"
+    dir_name: "model_small_5deg_v4_z5_light_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-z5-light-aug"
+    mode_desc: "轻量增强(jitter=0.005,dropout=0.03,color=0.1)"
+
+  - label: "v4-z5-no-aug"
+    dir_name: "model_small_5deg_v4_z5_no_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-z5-no-aug"
+    mode_desc: "无数据增强"
+
+  # ===== 消融: per_axis =====
+  - label: "v4-z5-peraxis02"
+    dir_name: "model_small_5deg_v4_z5_peraxis02"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-z5-peraxis02"
+    mode_desc: "per_axis_prob=0.2(单轴扰动概率)"
+
+  # ===== 消融: 内参增强 =====
+  - label: "v4-z5-intrinsic-aug"
+    dir_name: "model_small_5deg_v4_z5_intrinsic_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-z5-intrinsic-aug"
+    mode_desc: "内参增强±5%(提升跨相机泛化)"
+
+  # ===== 对照: z=2 =====
+  - label: "v4-z2-reference"
+    dir_name: "model_small_5deg_v4_z2_reference"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v4-z2-reference"
+    mode_desc: "z=2对照(验证z分辨率对大数据集的影响)"
