@@ -230,7 +230,7 @@ class CustomDataset(Dataset):
                         if len(arr) == 12:
                             T_cam2sensing = np.vstack([arr.reshape(3, 4), [0, 0, 0, 1]])
         except Exception as e:
-            print(f"[CustomDataset] 警告: 无法解析扩展标定字段: {e}")
+            import sys; print(f"[CustomDataset] 警告: 无法解析扩展标定字段: {e}", file=sys.stderr)
         
         return D, camera_model, T_cam2sensing
 
@@ -250,7 +250,7 @@ class CustomDataset(Dataset):
             img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
         
         if not os.path.exists(img_path) or not os.path.exists(pcd_path):
-            print('File not exist')
+            import sys; print(f'[CustomDataset] File not exist: img={img_path}, pcd={pcd_path}', file=sys.stderr)
             assert False
         img = Image.open(img_path)
         # 注意: 不在这里resize图像，resize在collate_fn中进行，同时调整内参K

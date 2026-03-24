@@ -41,7 +41,12 @@
 #   --augment_pc_jitter S    - Point cloud jitter sigma in meters (default: 0.0)
 #   --augment_pc_dropout R   - Point cloud dropout ratio (default: 0.0)
 #   --augment_color_jitter S - Image color jitter strength (default: 0.0)
+#   --augment_intrinsic S    - Camera intrinsic augmentation strength (default: 0.0, e.g. 0.05=±5%)
+#   --eval_angle_range_deg D - Evaluation perturbation angle (default: same as training angle)
 #   --early_stopping_patience N - Early stopping patience in eval cycles (default: 0)
+#   --seed N                 - Global random seed for reproducibility (default: 42)
+#   --pretrain_ckpt PATH     - Pretrained checkpoint for finetune/refine training
+#   --num_epochs N           - Total training epochs (overrides default per mode)
 #
 # Examples:
 #   # Single GPU training
@@ -70,11 +75,11 @@ if ! python -c "import torch" &> /dev/null; then
         CONDA_BASE=$(conda info --base 2>/dev/null)
         if [ -n "$CONDA_BASE" ]; then
             source "$CONDA_BASE/etc/profile.d/conda.sh"
-            conda activate bevcalib 2>/dev/null || {
-                echo "❌ Failed to activate 'bevcalib' environment"
+            conda activate bevcalib 2>/dev/null || conda activate bevcalib310 2>/dev/null || {
+                echo "❌ Failed to activate 'bevcalib' or 'bevcalib310' environment"
                 echo ""
                 echo "Please run this script manually after activating the environment:"
-                echo "  conda activate bevcalib"
+                echo "  conda activate bevcalib310"
                 echo "  bash train_universal.sh $@"
                 exit 1
             }
@@ -124,7 +129,12 @@ PER_AXIS_PROB=""
 AUGMENT_PC_JITTER=""
 AUGMENT_PC_DROPOUT=""
 AUGMENT_COLOR_JITTER=""
+AUGMENT_INTRINSIC=""
+EVAL_ANGLE_RANGE_DEG=""
 EARLY_STOPPING_PATIENCE=""
+SEED=""
+PRETRAIN_CKPT=""
+NUM_EPOCHS_OVERRIDE=""
 NNODES="1"
 NODE_RANK="0"
 MASTER_ADDR=""
@@ -254,6 +264,8 @@ while [[ $# -gt 0 ]]; do
             WEIGHT_AXIS_ROTATION="$2"
             shift 2
             ;;
+        --axis_weights)
+            AXIS_WEIGHTS="$2"; shift 2 ;;
         --lr_schedule)
             LR_SCHEDULE="$2"; shift 2 ;;
         --warmup_epochs)
@@ -272,14 +284,26 @@ while [[ $# -gt 0 ]]; do
             PERTURB_DISTRIBUTION="$2"; shift 2 ;;
         --per_axis_prob)
             PER_AXIS_PROB="$2"; shift 2 ;;
+        --per_axis_weights)
+            PER_AXIS_WEIGHTS="$2"; shift 2 ;;
         --augment_pc_jitter)
             AUGMENT_PC_JITTER="$2"; shift 2 ;;
         --augment_pc_dropout)
             AUGMENT_PC_DROPOUT="$2"; shift 2 ;;
         --augment_color_jitter)
             AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
+        --augment_intrinsic)
+            AUGMENT_INTRINSIC="$2"; shift 2 ;;
+        --eval_angle_range_deg)
+            EVAL_ANGLE_RANGE_DEG="$2"; shift 2 ;;
         --early_stopping_patience)
             EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
+        --seed)
+            SEED="$2"; shift 2 ;;
+        --pretrain_ckpt)
+            PRETRAIN_CKPT="$2"; shift 2 ;;
+        --num_epochs)
+            NUM_EPOCHS_OVERRIDE="$2"; shift 2 ;;
         *)
             echo "❌ Unknown option: $1"
             exit 1
@@ -351,7 +375,8 @@ fi
 
 mkdir -p "$LOG_DIR"
 
-# 设置日志文件路径
+# 日志文件路径 (train_kitti.py 的 tprint() 直接写入 $LOG_DIR/train.log，
+# 不依赖 shell tee, 确保多机 DDP/torchrun 环境下日志完整)
 TRAIN_LOG_FILE="$LOG_DIR/train.log"
 
 PYTORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")
@@ -372,59 +397,153 @@ else
     COMPUTE_STR="Single GPU (auto)"
 fi
 
-_W=70
-_print_row() { printf "│  %-18s %-${_W}s│\n" "$1" "$2"; }
-_print_sep() { printf "├"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┤\n"; }
-_print_top() { printf "┌"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┐\n"; }
-_print_bot() { printf "└"; printf '─%.0s' $(seq 1 $((_W + 21))); printf "┘\n"; }
+_BOX_W=91
+_hline() { printf '%0.s─' $(seq 1 $_BOX_W); }
+_print_top() { printf "┌"; _hline; printf "┐\n"; }
+_print_bot() { printf "└"; _hline; printf "┘\n"; }
+_print_sep() { printf "├"; _hline; printf "┤\n"; }
+_print_empty() { printf "│%-${_BOX_W}s│\n" ""; }
+_print_center() {
+    local text="$1"
+    local dw=${#text}
+    local pad_l=$(( (_BOX_W - dw) / 2 ))
+    local pad_r=$(( _BOX_W - dw - pad_l ))
+    printf "│%*s%s%*s│\n" "$pad_l" "" "$text" "$pad_r" ""
+}
+_print_row() {
+    local label="$1" value="$2"
+    local content
+    content=$(printf "  %-18s %s" "$label" "$value")
+    local byte_len=${#content}
+    local char_len
+    char_len=$(printf "%s" "$content" | LC_ALL=en_US.UTF-8 wc -m)
+    local extra=$(( byte_len - char_len ))
+    printf "│%-$((_BOX_W + extra))s│\n" "$content"
+}
+_NEED_SEP=0
+_maybe_sep() {
+    if [ "$_NEED_SEP" -eq 1 ]; then
+        _print_sep
+    fi
+    _NEED_SEP=0
+}
+_section_end() { _NEED_SEP=1; }
 
+_print_config_box() {
 echo ""
 _print_top
-printf "│%*s│\n" $((_W + 21)) ""
-printf "│%*s%s%*s│\n" $(( (_W + 21 - 32) / 2 )) "" "BEVCalib Training Configuration" $(( (_W + 21 - 32 + 1) / 2 )) ""
-printf "│%*s│\n" $((_W + 21)) ""
+_print_empty
+_print_center "BEVCalib Training Configuration"
+_print_empty
 _print_sep
+
 _print_row "Dataset:"       "$DATASET_NAME"
 _print_row "Dataset Path:"  "$DATASET_ROOT"
 _print_row "Mode:"          "$MODE"
-_print_sep
+[ -n "$LOG_SUFFIX" ] && \
+_print_row "Version:"       "$LOG_SUFFIX"
+_section_end
+
+_maybe_sep
 _print_row "Batch Size:"    "$BATCH_SIZE"
-_print_row "Angle Range:"   "±${ANGLE_RANGE_DEG}°"
+_print_row "Angle Range:"   "+/-${ANGLE_RANGE_DEG} deg"
 _print_row "Trans Range:"   "${TRANS_RANGE}m"
 [ -n "$LEARNING_RATE" ] && \
 _print_row "Learning Rate:" "$LEARNING_RATE"
-_print_sep
+_print_row "Rotation Only:" "$([ "$ROTATION_ONLY" -eq 1 ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
+_section_end
+
+_maybe_sep
+_print_row "Axis Loss:"    "$([ "$ENABLE_AXIS_LOSS" -eq 1 ] && echo "enabled (weight=${WEIGHT_AXIS_ROTATION:-0.3})" || echo 'disabled')"
+[ -n "$AXIS_WEIGHTS" ] && \
+_print_row "Axis Weights:"  "R/P/Y = ${AXIS_WEIGHTS}"
+_section_end
+
+_HAS_LR_SECTION=0
+if [ -n "$LR_SCHEDULE" ]; then
+    _maybe_sep; _HAS_LR_SECTION=1
+    _print_row "LR Schedule:"   "$LR_SCHEDULE"
+fi
+[ -n "$WARMUP_EPOCHS" ] && {
+    [ "$_HAS_LR_SECTION" -eq 0 ] && { _maybe_sep; _HAS_LR_SECTION=1; }
+    _print_row "Warmup Epochs:" "$WARMUP_EPOCHS"
+}
+[ -n "$BACKBONE_LR_SCALE" ] && {
+    [ "$_HAS_LR_SECTION" -eq 0 ] && { _maybe_sep; _HAS_LR_SECTION=1; }
+    _print_row "Backbone LR:"   "x${BACKBONE_LR_SCALE}"
+}
+[ "$LR_SCHEDULE" = "cosine_warm_restarts" ] && [ -n "$COSINE_T0" ] && \
+    _print_row "Cosine T0/Tm:"  "T0=${COSINE_T0}, Tmult=${COSINE_TMULT:-2}"
+[ "$_HAS_LR_SECTION" -eq 1 ] && _section_end
+
+_HAS_REG=0
+[ -n "$DROP_PATH_RATE" ] && { _maybe_sep; _HAS_REG=1; _print_row "Drop Path:" "$DROP_PATH_RATE"; }
+[ -n "$HEAD_DROPOUT" ] && {
+    [ "$_HAS_REG" -eq 0 ] && { _maybe_sep; _HAS_REG=1; }
+    _print_row "Head Dropout:" "$HEAD_DROPOUT"
+}
+[ "$_HAS_REG" -eq 1 ] && _section_end
+
+_HAS_PERTURB=0
+[ -n "$PERTURB_DISTRIBUTION" ] && { _maybe_sep; _HAS_PERTURB=1; _print_row "Perturbation:" "$PERTURB_DISTRIBUTION"; }
+[ -n "$PER_AXIS_PROB" ] && {
+    [ "$_HAS_PERTURB" -eq 0 ] && { _maybe_sep; _HAS_PERTURB=1; }
+    _print_row "Per-Axis Prob:" "$PER_AXIS_PROB"
+}
+[ -n "$PER_AXIS_WEIGHTS" ] && {
+    [ "$_HAS_PERTURB" -eq 0 ] && { _maybe_sep; _HAS_PERTURB=1; }
+    _print_row "Per-Axis Wts:" "R/P/Y = ${PER_AXIS_WEIGHTS}"
+}
+[ "$_HAS_PERTURB" -eq 1 ] && _section_end
+
+_maybe_sep
+_AUG_STR=""
+[ -n "$AUGMENT_PC_JITTER" ] && [ "$AUGMENT_PC_JITTER" != "0" ] && [ "$AUGMENT_PC_JITTER" != "0.0" ] && \
+    _AUG_STR="${_AUG_STR}jitter=${AUGMENT_PC_JITTER} "
+[ -n "$AUGMENT_PC_DROPOUT" ] && [ "$AUGMENT_PC_DROPOUT" != "0" ] && [ "$AUGMENT_PC_DROPOUT" != "0.0" ] && \
+    _AUG_STR="${_AUG_STR}dropout=${AUGMENT_PC_DROPOUT} "
+[ -n "$AUGMENT_COLOR_JITTER" ] && [ "$AUGMENT_COLOR_JITTER" != "0" ] && [ "$AUGMENT_COLOR_JITTER" != "0.0" ] && \
+    _AUG_STR="${_AUG_STR}color=${AUGMENT_COLOR_JITTER} "
+[ -n "$AUGMENT_INTRINSIC" ] && [ "$AUGMENT_INTRINSIC" != "0" ] && [ "$AUGMENT_INTRINSIC" != "0.0" ] && \
+    _AUG_STR="${_AUG_STR}intrinsic=±${AUGMENT_INTRINSIC}"
+_print_row "Augmentation:"  "${_AUG_STR:-disabled}"
+[ -n "$EARLY_STOPPING_PATIENCE" ] && [ "$EARLY_STOPPING_PATIENCE" != "0" ] && \
+_print_row "Early Stop:"    "patience=$EARLY_STOPPING_PATIENCE"
+_section_end
+
+_maybe_sep
 _print_row "Compute:"       "$COMPUTE_STR"
 _print_row "GPU:"           "${GPU_NAME} (${GPU_MEM}MB) x${AVAIL_GPUS}"
 _print_row "PyTorch:"       "$PYTORCH_VER"
 _print_row "CUDA:"          "$CUDA_VER"
 _print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
-_print_row "Rotation Only:" "$([ "$ROTATION_ONLY" -eq 1 ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
-_print_row "Axis Loss:"    "$([ "$ENABLE_AXIS_LOSS" -eq 1 ] && echo "enabled (weight=${WEIGHT_AXIS_ROTATION:-0.3})" || echo 'disabled')"
-[ -n "$LR_SCHEDULE" ] && \
-_print_row "LR Schedule:"  "$LR_SCHEDULE"
-[ -n "$PERTURB_DISTRIBUTION" ] && \
-_print_row "Perturbation:" "$PERTURB_DISTRIBUTION"
-[ -n "$EARLY_STOPPING_PATIENCE" ] && [ "$EARLY_STOPPING_PATIENCE" != "0" ] && \
-_print_row "Early Stop:"   "patience=$EARLY_STOPPING_PATIENCE"
+_print_row "BEV Z-Step:"    "${BEV_ZBOUND_STEP:-2.0}"
 if [ "$NNODES" -gt 1 ]; then
-_print_sep
-_print_row "Node Rank:"     "$NODE_RANK"
-_print_row "Master:"        "${MASTER_ADDR}:${MASTER_PORT}"
-_print_row "RDZV Timeout:"  "${RDZV_TIMEOUT}s"
+    _section_end
+    _maybe_sep
+    _print_row "Node Rank:"     "$NODE_RANK"
+    _print_row "Master:"        "${MASTER_ADDR}:${MASTER_PORT}"
+    _print_row "RDZV Timeout:"  "${RDZV_TIMEOUT}s"
 fi
-_print_sep
+_section_end
+
+_maybe_sep
 _print_row "Log Directory:"     "$LOG_DIR"
-_print_row "Log File:"          "$TRAIN_LOG_FILE"
+if [ "$NODE_RANK" = "0" ]; then
+    _print_row "Log File:"      "$TRAIN_LOG_FILE"
+else
+    _print_row "Log File:"      "$TRAIN_LOG_FILE (master only)"
+fi
 _print_row "TensorBoard Port:"  "$TENSORBOARD_PORT"
 _print_bot
 echo ""
+}
 
-# 如果不是交互式终端（即通过 nohup 运行），自动重定向日志到文件
-if [ ! -t 1 ]; then
-    # 重定向 stdout 和 stderr 到日志文件，同时保留副本
-    exec > >(tee -a "$TRAIN_LOG_FILE") 2>&1
-    echo "日志将写入: $TRAIN_LOG_FILE"
+_CONFIG_OUTPUT=$(_print_config_box 2>&1)
+echo "$_CONFIG_OUTPUT"
+
+if [ "$NODE_RANK" = "0" ]; then
+    echo "$_CONFIG_OUTPUT" >> "$TRAIN_LOG_FILE"
 fi
 
 # Check if dataset exists
@@ -503,10 +622,20 @@ OPTIM_FLAGS=""
 [ -n "$HEAD_DROPOUT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --head_dropout $HEAD_DROPOUT"
 [ -n "$PERTURB_DISTRIBUTION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --perturb_distribution $PERTURB_DISTRIBUTION"
 [ -n "$PER_AXIS_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --per_axis_prob $PER_AXIS_PROB"
+[ -n "$PER_AXIS_WEIGHTS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --per_axis_weights $PER_AXIS_WEIGHTS"
+[ -n "$AXIS_WEIGHTS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --axis_weights $AXIS_WEIGHTS"
 [ -n "$AUGMENT_PC_JITTER" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pc_jitter $AUGMENT_PC_JITTER"
 [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
 [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
+[ -n "$AUGMENT_INTRINSIC" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_intrinsic $AUGMENT_INTRINSIC"
+[ -n "$EVAL_ANGLE_RANGE_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --eval_angle_range_deg $EVAL_ANGLE_RANGE_DEG"
 [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
+[ -n "$SEED" ] && OPTIM_FLAGS="$OPTIM_FLAGS --seed $SEED"
+[ -n "$PRETRAIN_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --pretrain_ckpt $PRETRAIN_CKPT"
+
+SCRATCH_EPOCHS=${NUM_EPOCHS_OVERRIDE:-400}
+FINETUNE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-50}
+RESUME_EPOCHS=${NUM_EPOCHS_OVERRIDE:-100}
 
 if [ -n "$DDP_NGPUS" ]; then
     if [ "$NNODES" -gt 1 ]; then
@@ -568,7 +697,7 @@ case $MODE in
             --dataset_root "$DATASET_ROOT" \
             --label ${DATASET_NAME}_scratch \
             --batch_size $BATCH_SIZE \
-            --num_epochs 400 \
+            --num_epochs $SCRATCH_EPOCHS \
             --save_ckpt_per_epoches 40 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
@@ -609,7 +738,7 @@ case $MODE in
             --pretrain_ckpt "$KITTI_PRETRAIN" \
             --label ${DATASET_NAME}_finetuned \
             --batch_size $BATCH_SIZE \
-            --num_epochs 50 \
+            --num_epochs $FINETUNE_EPOCHS \
             --save_ckpt_per_epoches 10 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
@@ -650,7 +779,7 @@ case $MODE in
             --pretrain_ckpt "$LAST_CKPT" \
             --label ${DATASET_NAME}_resume \
             --batch_size $BATCH_SIZE \
-            --num_epochs 100 \
+            --num_epochs $RESUME_EPOCHS \
             --save_ckpt_per_epoches 10 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \

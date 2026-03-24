@@ -14,12 +14,37 @@ import argparse
 from datetime import datetime, timedelta
 from torch.utils.data import random_split
 import numpy as np
+import random
 from pathlib import Path
 from tools import generate_single_perturbation_from_T
 import shutil
 import cv2
 import os
 import time
+
+
+def set_seed(seed, rank=0):
+    """Fix all random seeds for reproducible training.
+    
+    Each DDP rank gets a unique but deterministic seed (base_seed + rank)
+    so that data augmentation differs across GPUs while remaining reproducible.
+    cuDNN benchmark stays on for speed — its ~1e-6 level non-determinism
+    is negligible compared to the config-level differences we care about.
+    """
+    effective_seed = seed + rank
+    random.seed(effective_seed)
+    np.random.seed(effective_seed)
+    torch.manual_seed(effective_seed)
+    torch.cuda.manual_seed(effective_seed)
+    torch.cuda.manual_seed_all(effective_seed)
+    torch.backends.cudnn.benchmark = True
+
+
+def _worker_init_fn(worker_id):
+    """Seed each DataLoader worker deterministically."""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 from visualization import (
     compute_batch_pose_errors,
     visualize_batch_projection,
@@ -27,9 +52,106 @@ from visualization import (
     compute_pose_errors
 )
 
+import sys
+import io
+from contextlib import contextmanager
+
+_tprint_log_file = None
+_original_stderr = None
+
+class _StderrTee:
+    """Tee stderr to both original stderr and train.log file."""
+    def __init__(self, orig, log_file):
+        self._orig = orig
+        self._log_file = log_file
+    def write(self, s):
+        self._orig.write(s)
+        if self._log_file is not None and not self._log_file.closed:
+            try:
+                self._log_file.write(s)
+                self._log_file.flush()
+            except (ValueError, OSError):
+                pass
+    def flush(self):
+        self._orig.flush()
+    def fileno(self):
+        return self._orig.fileno()
+    def isatty(self):
+        return self._orig.isatty()
+
+def _cleanup_log():
+    global _tprint_log_file, _original_stderr
+    if _original_stderr is not None:
+        sys.stderr = _original_stderr
+        _original_stderr = None
+    if _tprint_log_file is not None and not _tprint_log_file.closed:
+        _tprint_log_file.flush()
+        _tprint_log_file.close()
+        _tprint_log_file = None
+
+def tprint_setup(log_dir):
+    """Setup tprint to also write to train.log in log_dir.
+    Also installs a stderr tee so warnings/errors go to train.log."""
+    global _tprint_log_file, _original_stderr
+    if _tprint_log_file is not None:
+        return
+    import atexit
+    log_path = os.path.join(log_dir, "train.log")
+    _tprint_log_file = open(log_path, "a", buffering=1)
+    _original_stderr = sys.stderr
+    sys.stderr = _StderrTee(sys.stderr, _tprint_log_file)
+    atexit.register(_cleanup_log)
+
 def tprint(*args, **kwargs):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}]", *args, **kwargs)
+    msg = f"[{ts}] " + " ".join(str(a) for a in args)
+    print(msg, flush=True)
+    if _tprint_log_file is not None:
+        _tprint_log_file.write(msg + "\n")
+        _tprint_log_file.flush()
+
+@contextmanager
+def capture_prints(is_main):
+    """Capture stdout+stderr from third-party modules (Dataset, Model init).
+    On master: tee stdout to terminal+train.log; stderr already handled by _StderrTee.
+    On workers: suppress entirely to avoid N-fold duplication in torchrun."""
+    if not is_main:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+        return
+
+    buf = io.StringIO()
+
+    class TeeWriter:
+        def __init__(self, orig, buf):
+            self._orig = orig
+            self._buf = buf
+        def write(self, s):
+            self._orig.write(s)
+            self._buf.write(s)
+        def flush(self):
+            self._orig.flush()
+        def fileno(self):
+            return self._orig.fileno()
+        def isatty(self):
+            return getattr(self._orig, 'isatty', lambda: False)()
+
+    old_stdout = sys.stdout
+    sys.stdout = TeeWriter(old_stdout, buf)
+    try:
+        yield
+    finally:
+        sys.stdout = old_stdout
+        captured = buf.getvalue()
+        if captured and _tprint_log_file is not None:
+            _tprint_log_file.write(captured)
+            _tprint_log_file.flush()
 
 
 def _apply_color_jitter(imgs_tensor, strength):
@@ -47,6 +169,38 @@ def _apply_color_jitter(imgs_tensor, strength):
         img = img * saturation + gray.unsqueeze(0) * (1 - saturation)
         imgs_tensor[i] = img.clamp(0, 255)
     return imgs_tensor
+
+
+def _augment_intrinsics(intrinsic_matrix, strength):
+    """Randomly perturb camera intrinsic matrix to improve robustness to unseen cameras.
+
+    Augmentation strategy:
+      - fx, fy scaled by same random factor (preserves aspect ratio)
+      - cx, cy independently offset by a smaller factor
+      - K[2,2] = 1 is preserved
+
+    The frustum geometry in LSS's get_geometry() depends on inv(K), so varying K
+    during training forces the model to generalize across different focal lengths.
+
+    Args:
+        intrinsic_matrix: (B, 3, 3) tensor on device
+        strength: max relative deviation, e.g. 0.05 means ±5%
+    Returns:
+        augmented (B, 3, 3) tensor (same device, same dtype)
+    """
+    B = intrinsic_matrix.shape[0]
+    dev = intrinsic_matrix.device
+    K = intrinsic_matrix.clone()
+
+    focal_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * strength
+    cx_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * strength * 0.5
+    cy_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * strength * 0.5
+
+    K[:, 0, 0] *= focal_scale       # fx
+    K[:, 1, 1] *= focal_scale       # fy
+    K[:, 0, 2] *= cx_scale          # cx
+    K[:, 1, 2] *= cy_scale          # cy
+    return K
 
 def setup_ddp():
     """Auto-detect and initialize DDP when launched via torchrun."""
@@ -108,6 +262,8 @@ def parse_args():
                         help="启用分轴旋转损失 (1=启用, 0=禁用)")
     parser.add_argument("--weight_axis_rotation", type=float, default=0.3,
                         help="分轴旋转损失权重 (默认: 0.3)")
+    parser.add_argument("--axis_weights", type=str, default="3.0,1.5,1.0",
+                        help="Roll,Pitch,Yaw weights for axis loss (default: 3.0,1.5,1.0)")
     parser.add_argument("--drop_path_rate", type=float, default=0.1,
                         help="Stochastic depth rate for transformer layers")
     parser.add_argument("--head_dropout", type=float, default=0.1,
@@ -128,14 +284,20 @@ def parse_args():
                         help="Perturbation angle distribution")
     parser.add_argument("--per_axis_prob", type=float, default=0.0,
                         help="Probability of single-axis perturbation (0=disabled)")
+    parser.add_argument("--per_axis_weights", type=str, default="",
+                        help="Roll,Pitch,Yaw sampling weights for per-axis mode (e.g. 0.5,0.3,0.2). Empty=uniform")
     parser.add_argument("--augment_pc_jitter", type=float, default=0.0,
                         help="Point cloud Gaussian jitter sigma in meters (0=disabled)")
     parser.add_argument("--augment_pc_dropout", type=float, default=0.0,
                         help="Point cloud random dropout ratio (0=disabled)")
     parser.add_argument("--augment_color_jitter", type=float, default=0.0,
                         help="Image color jitter strength (0=disabled)")
+    parser.add_argument("--augment_intrinsic", type=float, default=0.0,
+                        help="Camera intrinsic augmentation strength: max relative deviation for fx/fy/cx/cy (e.g. 0.05=±5%%, 0=disabled)")
     parser.add_argument("--early_stopping_patience", type=int, default=0,
                         help="Early stopping patience in epochs (0=disabled)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Global random seed for reproducibility (default: 42)")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
@@ -262,12 +424,28 @@ def main():
     
     use_ddp, rank, world_size, local_rank = setup_ddp()
     is_main = (rank == 0)
-    
+
+    set_seed(args.seed, rank=rank)
+
     if is_main:
+        os.makedirs(args.log_dir, exist_ok=True)
+        tprint_setup(args.log_dir)
         tprint(f"训练启动, 参数配置:")
         tprint(args)
+        from bev_settings import xbound, ybound, zbound, sparse_shape, DATASET_TYPE
+        _nx_z = int((zbound[1] - zbound[0]) / zbound[2])
+        tprint(f"[BEV Settings] 数据集类型: {DATASET_TYPE}")
+        tprint(f"[BEV Settings] xbound: {xbound}, ybound: {ybound}")
+        tprint(f"[BEV Settings] zbound: {zbound} → {_nx_z}个Z体素 (步长{zbound[2]}m)")
+        tprint(f"[BEV Settings] sparse_shape: {sparse_shape}")
     if use_ddp and is_main:
         tprint(f"DDP enabled: {world_size} GPUs, rank={rank}, local_rank={local_rank}")
+
+    if not is_main:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import logging
+        logging.disable(logging.WARNING)
     
     num_epochs = args.num_epochs
     dataset_root = args.dataset_root
@@ -293,7 +471,7 @@ def main():
             shutil.copytree(bev_calib_dir, dest_dir, dirs_exist_ok=True, 
                            ignore=shutil.ignore_patterns('logs', '__pycache__', '*.pyc', '.git*'))
         except Exception as e:
-            print(f"警告: 复制源代码失败: {e}")
+            tprint(f"警告: 复制源代码失败: {e}")
     
     writer = SummaryWriter(log_dir) if is_main else None
     
@@ -304,25 +482,28 @@ def main():
         target_height=args.target_height
     )
     
-    # 选择数据集类型
-    if args.use_custom_dataset:
-        dataset = CustomDataset(dataset_root, target_size=target_size)
-    else:
-        print("使用 KittiDataset")
-        dataset = KittiDataset(dataset_root)
+    # 选择数据集类型 (capture_prints suppresses worker stdout, writes master output to train.log)
+    with capture_prints(is_main):
+        if args.use_custom_dataset:
+            dataset = CustomDataset(dataset_root, target_size=target_size)
+        else:
+            if is_main:
+                print("使用 KittiDataset")
+            dataset = KittiDataset(dataset_root)
 
     # 数据利用率校验 (only on rank 0)
     if args.validate_data > 0 and is_main:
-        print("\n" + "="*60)
-        print("开始数据利用率校验...")
-        print("="*60)
+        tprint("=" * 60)
+        tprint("开始数据利用率校验...")
+        tprint("=" * 60)
         
-        validation_result = dataset.validate_data_utilization(
-            sample_ratio=args.validate_sample_ratio,
-            min_utilization=args.min_point_utilization,
-            min_valid_ratio=args.min_valid_ratio,
-            verbose=True
-        )
+        with capture_prints(is_main):
+            validation_result = dataset.validate_data_utilization(
+                sample_ratio=args.validate_sample_ratio,
+                min_utilization=args.min_point_utilization,
+                min_valid_ratio=args.min_valid_ratio,
+                verbose=True
+            )
         
         validation_log_path = os.path.join(log_dir, "data_validation.txt")
         with open(validation_log_path, 'w') as f:
@@ -333,26 +514,26 @@ def main():
                     f.write(f"{key}: {value:.4f}\n")
                 else:
                     f.write(f"{key}: {value}\n")
-        print(f"验证结果已保存到: {validation_log_path}")
+        tprint(f"验证结果已保存到: {validation_log_path}")
         
         if not validation_result['passed']:
-            print("\n错误: 数据利用率验证未通过，退出训练！")
-            print("   可以通过以下方式解决：")
-            print("   1. 检查 bev_settings.py 中的体素化范围配置是否与数据集匹配")
-            print("   2. 调整 --min_point_utilization 或 --min_valid_ratio 阈值")
-            print("   4. 使用 --validate_data=0 跳过验证（不推荐）")
+            tprint("错误: 数据利用率验证未通过，退出训练！")
+            tprint("   可以通过以下方式解决：")
+            tprint("   1. 检查 bev_settings.py 中的体素化范围配置是否与数据集匹配")
+            tprint("   2. 调整 --min_point_utilization 或 --min_valid_ratio 阈值")
+            tprint("   4. 使用 --validate_data=0 跳过验证（不推荐）")
             exit(1)
     elif is_main:
-        print("\n跳过数据利用率校验 (--validate_data=0)")
+        tprint("跳过数据利用率校验 (--validate_data=0)")
     if use_ddp:
         dist.barrier()
 
     if is_main:
         tprint(f"目标图像尺寸: {target_size[0]}x{target_size[1]} (宽x高)")
         if args.use_custom_dataset > 0:
-            print(f"   (自定义数据集模式,保持16:9宽高比)")
+            tprint("   (自定义数据集模式,保持16:9宽高比)")
         else:
-            print(f"   (KITTI数据集模式)")
+            tprint("   (KITTI数据集模式)")
     
     generator = torch.Generator().manual_seed(114514)
     train_size = int(0.8 * len(dataset))
@@ -370,7 +551,10 @@ def main():
     if is_main:
         tprint(f"DataLoader: num_workers={num_workers}, pin_memory=True, persistent_workers=True")
 
-    train_sampler = DistributedSampler(train_dataset, shuffle=True) if use_ddp else None
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=args.seed) if use_ddp else None
+
+    g = torch.Generator()
+    g.manual_seed(args.seed)
 
     train_loader = DataLoader(
         train_dataset,
@@ -383,6 +567,8 @@ def main():
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
+        worker_init_fn=_worker_init_fn,
+        generator=g,
     )
     
     val_loader = DataLoader(
@@ -394,6 +580,7 @@ def main():
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
+        worker_init_fn=_worker_init_fn,
     )
 
     deformable_choise = args.deformable > 0
@@ -402,24 +589,25 @@ def main():
     rotation_only = args.rotation_only > 0
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    torch.backends.cudnn.benchmark = True
-    
     img_shape = (target_size[1], target_size[0])
     if is_main:
         tprint(f"网络输入尺寸 (H, W): {img_shape}")
         tprint(f"优化模式: {'仅旋转 (rotation only)' if rotation_only else '旋转+平移 (translation+rotation)'}")
     
     enable_axis_loss = args.enable_axis_loss > 0
-    model = BEVCalib(
-        deformable=deformable_choise,
-        bev_encoder=bev_encoder_choise,
-        img_shape=img_shape,
-        rotation_only=rotation_only,
-        enable_axis_loss=enable_axis_loss,
-        weight_axis_rotation=args.weight_axis_rotation,
-        drop_path_rate=args.drop_path_rate,
-        head_dropout=args.head_dropout,
-    ).to(device)
+    axis_weights_tuple = tuple(float(x) for x in args.axis_weights.split(','))
+    with capture_prints(is_main):
+        model = BEVCalib(
+            deformable=deformable_choise,
+            bev_encoder=bev_encoder_choise,
+            img_shape=img_shape,
+            rotation_only=rotation_only,
+            enable_axis_loss=enable_axis_loss,
+            weight_axis_rotation=args.weight_axis_rotation,
+            axis_weights=axis_weights_tuple,
+            drop_path_rate=args.drop_path_rate,
+            head_dropout=args.head_dropout,
+        ).to(device)
 
     if args.pretrain_ckpt is not None:
         state_dict = torch.load(args.pretrain_ckpt, map_location=device)
@@ -447,8 +635,9 @@ def main():
     
     raw_model = model.module if use_ddp else model
 
-    tprint(f"The weight decay is: {args.wd}")
-    tprint(f"The initial learning rate is: {args.lr}")
+    if is_main:
+        tprint(f"The weight decay is: {args.wd}")
+        tprint(f"The initial learning rate is: {args.lr}")
 
     backbone_params = []
     head_params = []
@@ -490,12 +679,18 @@ def main():
             if is_main:
                 tprint(f"LR Schedule: StepLR(step={args.step_size}, gamma=0.5)")
 
+    if is_main:
+        tprint(f"Random seed: {args.seed} (cudnn.benchmark=True)")
+
     use_amp = torch.cuda.is_available()
     amp_dtype = torch.float16
     scaler = GradScaler(enabled=use_amp)
     if use_amp and is_main:
         tprint(f"AMP enabled with {amp_dtype}, GradScaler=on")
     
+    if is_main and args.augment_intrinsic > 0:
+        tprint(f"Intrinsic augmentation: ±{args.augment_intrinsic*100:.0f}% (fx/fy coupled, cx/cy ±{args.augment_intrinsic*50:.0f}%)")
+
     _identity_4x4 = torch.eye(4, device=device)
 
     train_noise = {
@@ -531,6 +726,8 @@ def main():
         if enable_axis_loss:
             formula += f" + {args.weight_axis_rotation} * axis_rotation_loss"
         tprint(formula)
+        if enable_axis_loss:
+            tprint(f"  Axis weights (R/P/Y): {args.axis_weights}")
         tprint("  Default weights rotation_only: w_rot=1.0, w_pc=1.0, w_quat=0.5")
         tprint("")
         tprint("Log Terminology:")
@@ -565,6 +762,9 @@ def main():
 
             t_prep_start = time.time()
             gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
+            per_axis_weights_parsed = None
+            if args.per_axis_weights:
+                per_axis_weights_parsed = tuple(float(x) for x in args.per_axis_weights.split(','))
             init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(
                 gt_T_to_camera_np,
                 angle_range_deg=train_noise["angle_range_deg"],
@@ -572,6 +772,7 @@ def main():
                 rotation_only=rotation_only,
                 distribution=args.perturb_distribution,
                 per_axis_prob=args.per_axis_prob,
+                per_axis_weights=per_axis_weights_parsed,
             )
             resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float()
             if args.augment_color_jitter > 0:
@@ -599,6 +800,8 @@ def main():
             B_cur = gt_T_to_camera_t.shape[0]
             post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
             intrinsic_matrix = torch.from_numpy(np.array(intrinsics, dtype=np.float32)).to(device, non_blocking=True)
+            if args.augment_intrinsic > 0:
+                intrinsic_matrix = _augment_intrinsics(intrinsic_matrix, args.augment_intrinsic)
             t_prep_total += time.time() - t_prep_start
 
             t_compute_start = time.time()
@@ -1043,7 +1246,10 @@ def main():
                         writer.add_image('Val/Projection', vis_image_tb, epoch)
 
             # 构建验证集标签（清晰标注扰动范围）
-            val_label = f"Val[±{eval_angle_range}°, ±{eval_trans_range}m]"
+            if rotation_only:
+                val_label = f"Val[±{eval_angle_range}°]"
+            else:
+                val_label = f"Val[±{eval_angle_range}°, ±{eval_trans_range}m]"
             
             for key in val_loss.keys():
                 val_loss[key] /= len(val_loader)
@@ -1241,18 +1447,19 @@ def main():
                     md_lines.append("ΔTrans = Eval Trans - Train Trans (泛化差距, 越小越好)")
 
         summary_text = "\n".join(md_lines)
-        print("\n" + summary_text)
+        tprint(summary_text)
 
         summary_md_path = os.path.join(log_dir, "training_summary.md")
         with open(summary_md_path, 'w') as f:
             f.write(summary_text + "\n")
 
-        print(f"\n  训练总结已保存到: {summary_md_path}")
-        print("=" * 80)
+        tprint(f"训练总结已保存到: {summary_md_path}")
+        tprint("=" * 80)
     
     if is_main and writer is not None:
         writer.close()
         tprint(f"Logs are saved at {log_dir}")
+    _cleanup_log()
     cleanup_ddp()
 
 

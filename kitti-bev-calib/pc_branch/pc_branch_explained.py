@@ -227,14 +227,17 @@ class Lidar2BEV(nn.Module):
             └──────────────────────────────┘
 
         注: 使用 @torch.no_grad() 因为体素化是纯几何操作，无需梯度
+        注: 官方实现使用累积变量方式，逐步拼接各batch结果
         """
+        # 初始化累积变量为None，第一个batch时赋值，后续batch拼接
+        vox, coors, num_points = None, None, None
+
         B, _, _ = pc.shape
         # B = batch_size (如24)
 
-        vox_list, coors_list, num_points_list = [], [], []
-
         for i in range(B):
             # -------- 单样本体素化 --------
+            # PointToVoxel: 根据坐标将点分配到3D网格体素
             vox_, coors_, num_points_ = self.ptvoxel(pc[i])
             # pc[i].shape = (N, 3)
             #
@@ -246,8 +249,16 @@ class Lidar2BEV(nn.Module):
             #
             # 典型值: M_i ≈ 30,000~80,000 (取决于点云密度)
 
+            # -------- 添加batch索引 --------
+            # 为每个体素创建batch标识，区分来自不同样本
+            batch_id = torch.full([vox_.shape[0], 1], i, dtype=torch.int32, device=vox_.device)
+            # batch_id.shape = (M_i, 1)
+            # batch_id = [[i], [i], ..., [i]] - 所有值都是当前batch索引i
+
+            # -------- 体素特征压缩 --------
+            # 将体素内多点特征压缩为单个特征向量
             if self.voxelize_reduce:
-                vox_ = vox_.sum(dim=1)
+                vox_ = torch.sum(vox_, dim=1, keepdim=False)
                 # (M_i, 10, 3) → (M_i, 3)
                 #
                 # 将每个体素内所有点的坐标求和
@@ -258,24 +269,30 @@ class Lidar2BEV(nn.Module):
                 # 为什么用SUM而非MEAN?
                 #   SUM同时编码了位置和密度信息
                 #   网络可以通过学习来区分这两种信息
+                #
+                # 注: keepdim=False 使输出维度从(M_i, 1, 3)变为(M_i, 3)
 
-            # -------- 添加batch索引 --------
-            batch_id = torch.full([vox_.shape[0], 1], i, dtype=torch.int32, device=vox_.device)
-            # batch_id.shape = (M_i, 1)
-            # batch_id = [[i], [i], ..., [i]]
-
-            coors_list.append(torch.cat([batch_id, coors_], dim=1))
+            # -------- 拼接batch索引到坐标 --------
+            coors_ = torch.cat([batch_id, coors_], dim=1)
             # (M_i, 1) cat (M_i, 3) → (M_i, 4)
             # 每个体素坐标: [batch_id, z_idx, y_idx, x_idx]
 
-            vox_list.append(vox_)
-            num_points_list.append(num_points_)
+            # -------- 累积或拼接结果 --------
+            if vox is None:
+                # 第一个batch: 直接赋值
+                vox = vox_
+                coors = coors_
+                num_points = num_points_
+            else:
+                # 后续batch: 拼接到已有结果
+                vox = torch.cat([vox, vox_], 0)  # zyx order (官方注释)
+                coors = torch.cat([coors, coors_], 0)
+                num_points = torch.cat([num_points, num_points_], 0)
 
-        # -------- 合并所有batch --------
-        return torch.cat(vox_list, 0), torch.cat(coors_list, 0), torch.cat(num_points_list, 0)
-        # vox:        (M_total, 3)   - M_total = ΣM_i
+        return vox, coors, num_points
+        # vox:        (M_total, 3)   - M_total = ΣM_i (所有batch的非空体素总和)
         # coors:      (M_total, 4)   - [batch_id, z_idx, y_idx, x_idx]
-        # num_points: (M_total,)
+        # num_points: (M_total,)     - 每个体素内的实际点数
         #
         # 典型值: M_total ≈ 24 × 50,000 = 1,200,000
 

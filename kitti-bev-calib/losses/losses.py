@@ -116,12 +116,17 @@ class axis_rotation_loss(nn.Module):
 
 
 class AdaptiveAxisRotationLoss(nn.Module):
-    """Per-axis rotation loss with static weighting that emphasizes harder axes.
-    Roll and Pitch get higher weight because BEV representation is inherently
-    less sensitive to rotations around these axes (they affect vertical geometry
-    which is collapsed in BEV projection)."""
+    """Per-axis weighted mean rotation loss.
 
-    def __init__(self, axis_weights=(2.0, 1.5, 1.0)):
+    Applies static (roll, pitch, yaw) weights to Euler-angle errors before
+    averaging, emphasizing axes that matter more for the task (e.g. roll for
+    BEV-based calibration).
+
+    Args:
+        axis_weights: (roll, pitch, yaw) static weights. Higher = more emphasis.
+    """
+
+    def __init__(self, axis_weights=(3.0, 1.5, 1.0)):
         super().__init__()
         self.register_buffer('axis_weights',
                              torch.tensor(axis_weights, dtype=torch.float32))
@@ -153,7 +158,9 @@ class AdaptiveAxisRotationLoss(nn.Module):
 
         w = self.axis_weights / self.axis_weights.sum() * 3.0
         weighted_diff = diff * w.unsqueeze(0)
-        loss = weighted_diff.mean()
+        mean_loss = weighted_diff.mean()
+        loss = mean_loss
+
         return loss, per_axis
 
 
@@ -198,7 +205,8 @@ class PC_reproj_loss(nn.Module):
 class realworld_loss(nn.Module):
     def __init__(self, weight_translation = 1.0, weight_quat_norm = 0.5, weight_rotation = 0.5, weight_PCreproj = 0.5, 
                  weight_bev_reproj = 0.5, weight_feat_align = 1.0, l1 = False, rotation_only = False,
-                 enable_axis_loss = False, weight_axis_rotation = 0.3):
+                 enable_axis_loss = False, weight_axis_rotation = 0.3,
+                 axis_weights = (3.0, 1.5, 1.0)):
         super(realworld_loss, self).__init__()
         self.rotation_only = rotation_only
         self.enable_axis_loss = enable_axis_loss
@@ -223,7 +231,7 @@ class realworld_loss(nn.Module):
         self.PC_reproj_loss = PC_reproj_loss()
         if enable_axis_loss:
             self.axis_rotation_loss = AdaptiveAxisRotationLoss(
-                axis_weights=(2.0, 1.5, 1.0)
+                axis_weights=axis_weights,
             )
     
     def forward(self, pred_translation, pred_rotation, pcs, gt_T_to_camera, init_T_to_camera, mask = None):

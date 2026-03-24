@@ -5,7 +5,7 @@
 bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
 models_dir: "logs/all_training_data/v1"  # 相对于 bevcalib_root
 test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
-output_dir: "logs/all_data_generalization_eval_v1"  # 相对于 bevcalib_root
+output_dir: "logs/evaluations/all_data_generalization_eval_v1"  # 相对于 bevcalib_root
 eval_script: "evaluate_checkpoint.py"  # 相对于 bevcalib_root
 
 # 评估参数

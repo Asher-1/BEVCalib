@@ -55,7 +55,8 @@ python utils/scripts/analyze_experiments.py --config utils/configs/experiment_co
 
 | 文件 | 说明 |
 | --- | --- |
-| `utils/scripts/analyze_experiments.py` | 🌟 统一入口脚本 |
+| `utils/scripts/analyze_experiments.py` | 统一入口脚本 |
+| `utils/scripts/analyze_roll_tail.py` | Roll尾部误差分析 (P99/Max) |
 | `utils/configs/experiment_config.yaml` | 配置文件（5deg实验） |
 | `utils/configs/experiment_config_rotation.yaml` | 配置文件（rotation实验） |
 | `utils/scripts/quick_analyze.sh` | 快捷脚本 |
@@ -594,6 +595,23 @@ python utils/scripts/analyze_experiments.py --config utils/configs/experiment_co
 # ============ 自定义配置 ============
 python utils/scripts/analyze_experiments.py --config utils/configs/my_config.yaml
 ```
+
+## Roll 尾部误差分析
+
+分析泛化评估中 Roll (LiDAR-X) 轴的 P99/Max 误差分布，找出高误差样本的序列分布和模式。
+
+```bash
+cd /mnt/drtraining/user/dahailu/code/BEVCalib
+python utils/scripts/analyze_roll_tail.py
+```
+
+默认分析 `generalization_eval_b26a_v1/v7-opt-axis05` 和 `all_data_generalization_eval_v3/v5-z2-axis05`。可修改脚本中的 `files` 列表指向其他评估结果。
+
+输出包含:
+- Roll > 0.8° 和 > 1.0° 的样本数量及占比
+- 按序列(00/01/02)的分布
+- Top 10 最差 Roll 误差样本详情
+- 跨模型高误差样本重叠分析
 
 ## 更新日志
 

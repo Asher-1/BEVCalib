@@ -1,5 +1,13 @@
-# BEVCalib 批量训练配置文件 - 多机DDP训练示例（优化版）
+# BEVCalib 批量训练配置文件 - 多机DDP训练 (v3 全面消融版)
 # 使用 defaults 区域消除重复配置
+#
+# 18个实验覆盖:
+#   1-6:   v3全量 + LR/Aug/Tail强度变体 + V3 baseline
+#   7-9:   尾部优化ABC消融 (Quantile/Roll-bias/Roll-weight 单独)
+#   10-11: Roll权重激进变体 (4.0, 5.0)
+#   12-14: per_axis_prob消融 (0.2, 0.4, 0.5)
+#   15-16: axis_loss权重消融 (0.3, 0.7)
+#   17-18: 正则化消融 (强/无)
 
 # 全局配置
 global:
@@ -9,7 +17,7 @@ global:
 
 # ============================================================================
 # 默认参数（所有实验继承）
-# 基于 B26A V10 最优配置 (v7-opt-axis05: 0.429°, 0.7x泛化衰退)
+# 融合 最优 + 尾部优化
 # ============================================================================
 defaults:
   env:
@@ -21,12 +29,12 @@ defaults:
     trans_range: 0.15
 
     # 训练参数
-    batch_size: 8
+    batch_size: 16
     learning_rate: 1e-4
 
     # DDP配置
     use_ddp: true
-    ddp_gpus: null
+    ddp_gpus: 8
 
     nnodes: 32                  # 32台机器
     node_rank: null             # 自动检测（SLURM）或手动指定
@@ -37,11 +45,14 @@ defaults:
     use_compile: false
     rotation_only: true
 
-    # 轴向损失
+    # 轴向损失 (V2最优: 0.5)
     enable_axis_loss: true
-    weight_axis_rotation: 0.3
+    weight_axis_rotation: 0.5
 
-    # 泛化优化参数（全部启用）
+    # v3: Roll权重提升
+    axis_weights: "3.0,1.5,1.0"
+
+    # LR调度 (大数据集可用cosine)
     lr_schedule: cosine_warm_restarts
     warmup_epochs: 5
     backbone_lr_scale: 0.1
@@ -52,11 +63,14 @@ defaults:
     drop_path_rate: 0.1
     head_dropout: 0.1
 
-    # 扰动策略 (per-axis是最大贡献者)
+    # 扰动策略
     perturb_distribution: truncated_normal
     per_axis_prob: 0.3
 
-    # 数据增强 (B26A上无收益，大数据集可适度开启)
+    # v3: Roll-biased per-axis sampling
+    per_axis_weights: "0.5,0.3,0.2"
+
+    # 数据增强 (大数据集可适度开启)
     augment_pc_jitter: 0.0
     augment_pc_dropout: 0.0
     augment_color_jitter: 0.0
@@ -64,87 +78,178 @@ defaults:
     # 早停
     early_stopping_patience: 30
 
-    # 执行模式
     foreground: true
     no_tensorboard: true
-    tensorboard_port: null
+    tensorboard_port: 6007
+    # K8s环境: 设置宿主机Node IP用于TensorBoard地址显示 (Pod IP无法从外部访问)
+    # 如果未设置，也可通过环境变量 NODE_IP 注入 (K8s Downward API)
+    node_ip: "10.16.9.60"
 
 # ============================================================================
-# 实验组配置（只需指定dataset/version/env差异）
+# 实验组
 # ============================================================================
 experiments:
-  # ============ 实验1: 全量优化基线 ============
-  - name: "full_optim_axis03 (z=2)"
-    description: "全部优化手段: cosine_LR + axis_loss + trunc_normal + per_axis + augment + early_stop"
+  # ============ 实验1: v3全量 (z=2, cosine) ============
+  - name: "v3_full (z=2, cosine)"
+    description: "v3全量: quantile + roll_bias + roll=3.0 + cosine_LR"
     dataset: "all"
-    version: "v6_z2_rotation_opt_full_axis03"
-    env:
-      BEV_ZBOUND_STEP: 10.0
+    version: "v3_z2_full_cosine"
+
+  # ============ 实验2: v3全量 (z=2, step) ============
+  - name: "v3_full (z=2, step)"
+    description: "v3全量: quantile + roll_bias + roll=3.0 + StepLR"
+    dataset: "all"
+    version: "v3_z2_full_step"
     params:
-      enable_axis_loss: true
-      weight_axis_rotation: 0.3
+      lr_schedule: step
+
+  # ============ 实验3: v3全量 (z=2, cosine + aug) ============
+  - name: "v3_full (z=2, cosine + aug)"
+    description: "v3全量(z=2): cosine + aug"
+    dataset: "all"
+    version: "v3_z2_full_cosine_aug"
+    params:
       augment_pc_jitter: 0.02
       augment_pc_dropout: 0.1
       augment_color_jitter: 0.3
 
-  # ============ 实验2: 配置 z=2 ============
-  - name: "full_optim_axis05 (z=2)"
-    description: "z=2: 验证axis_loss=0.5对泛化的影响"
+  # ============ 实验4: v3 + 轻量增强 ============
+  - name: "v3_light_aug (z=2)"
+    description: "v3 + 轻量增强: jitter=0.005, dropout=0.03, color=0.1"
     dataset: "all"
-    version: "v6_z2_rotation_opt_full_axis05"
-    env:
-      BEV_ZBOUND_STEP: 10.0
+    version: "v3_z2_light_aug"
     params:
-      enable_axis_loss: true
-      weight_axis_rotation: 0.5
-      augment_pc_jitter: 0.02
-      augment_pc_dropout: 0.1
-      augment_color_jitter: 0.3
-
-  # ============ 实验3: 全量优化基线 ============
-  - name: "full_optim_axis03_light_aug (z=2)"
-    description: "全部优化手段: cosine_LR + axis_loss + trunc_normal + per_axis + augment + early_stop"
-    dataset: "all"
-    version: "v6_z2_rotation_opt_full_axis03_light_aug"
-    env:
-      BEV_ZBOUND_STEP: 10.0
-    params:
-      enable_axis_loss: true
-      weight_axis_rotation: 0.3
       augment_pc_jitter: 0.005
       augment_pc_dropout: 0.03
       augment_color_jitter: 0.1
 
-  # ============ 实验4: 配置 z=2 ============
-  - name: "opt_axis05 (z=2)"
-    description: "z=2: 验证axis_loss=0.5对泛化的影响"
+  # ============ 实验5: V3 baseline (z=2, 无v3优化) ============
+  - name: "v3_baseline (z=2)"
+    description: "对照: axis05 + 无quantile + 无roll_bias + 旧权重"
     dataset: "all"
-    version: "v6_z2_rotation_opt_axis0.5"
-    env:
-      BEV_ZBOUND_STEP: 10.0
+    version: "v3_z2_baseline"
     params:
-      enable_axis_loss: true
-      weight_axis_rotation: 0.5
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
 
-  # ============ 实验5: Step LR + axis_loss=0.5 ============
-  - name: "opt_step (z=2)"
-    description: "z=2: 验证Step LR + axis_loss=0.5对泛化的影响"
-    dataset: "all"
-    version: "v6_z2_rotation_opt_step_axis0.5"
-    params:
-      lr_schedule: step
-      enable_axis_loss: true
-      weight_axis_rotation: 0.5
+  # ============================================================================
+  # 实验7-9: v3 尾部优化消融 (A/B/C 单独)
+  # ============================================================================
 
-  # ============ 实验6: Step LR + axis_loss=0.3 ============
-  - name: "opt_step_axis03 (z=2)"
-    description: "z=2: 验证Step LR + axis_loss=0.3对泛化的影响"
+  # ============ 实验7: 消融A - 仅Quantile Loss ============
+  - name: "v3_quantile_only (z=2)"
+    description: "消融A: 仅quantile_loss, 无roll_bias, 旧权重(2,1.5,1)"
     dataset: "all"
-    version: "v6_z2_rotation_opt_step_axis0.3"
+    version: "v3_z2_quantile_only"
     params:
-      lr_schedule: step
-      enable_axis_loss: true
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  # ============ 实验8: 消融B - 仅Roll-bias采样 ============
+  - name: "v3_roll_bias_only (z=2)"
+    description: "消融B: 仅roll_bias采样, 无quantile_loss, 旧权重(2,1.5,1)"
+    dataset: "all"
+    version: "v3_z2_roll_bias_only"
+    params:
+      axis_weights: "2.0,1.5,1.0"
+
+  # ============ 实验9: 消融C - 仅Roll权重提升 ============
+  - name: "v3_roll_weight_only (z=2)"
+    description: "消融C: 仅roll_weight=3.0, 无quantile_loss, 无roll_bias"
+    dataset: "all"
+    version: "v3_z2_roll_weight_only"
+    params:
+      per_axis_weights: null
+
+  # ============================================================================
+  # 实验10-11: 更激进的Roll权重
+  # ============================================================================
+
+  # ============ 实验10: Roll权重=4.0 ============
+  - name: "v3_roll_weight4 (z=2)"
+    description: "Roll权重=4.0 + quantile + roll_bias (更激进)"
+    dataset: "all"
+    version: "v3_z2_roll_weight4"
+    params:
+      axis_weights: "4.0,2.0,1.0"
+
+  # ============ 实验11: Roll权重=5.0 ============
+  - name: "v3_roll_weight5 (z=2)"
+    description: "Roll权重=5.0 (极端激进, 观察是否过拟合)"
+    dataset: "all"
+    version: "v3_z2_roll_weight5"
+    params:
+      axis_weights: "5.0,2.0,1.0"
+
+  # ============================================================================
+  # 实验12-14: per_axis_prob 消融
+  # ============================================================================
+
+  # ============ 实验12: per_axis_prob=0.2 ============
+  - name: "v3_peraxis02 (z=2)"
+    description: "per_axis_prob=0.2 (降低单轴概率)"
+    dataset: "all"
+    version: "v3_z2_peraxis02"
+    params:
+      per_axis_prob: 0.2
+
+  # ============ 实验13: per_axis_prob=0.4 ============
+  - name: "v3_peraxis04 (z=2)"
+    description: "per_axis_prob=0.4 (提高单轴概率)"
+    dataset: "all"
+    version: "v3_z2_peraxis04"
+    params:
+      per_axis_prob: 0.4
+
+  # ============ 实验14: per_axis_prob=0.5 ============
+  - name: "v3_peraxis05 (z=2)"
+    description: "per_axis_prob=0.5 (50%单轴/50%耦合)"
+    dataset: "all"
+    version: "v3_z2_peraxis05"
+    params:
+      per_axis_prob: 0.5
+
+  # ============================================================================
+  # 实验15-16: axis_loss 权重消融
+  # ============================================================================
+
+  # ============ 实验15: axis_loss=0.3 ============
+  - name: "v3_axis03 (z=2)"
+    description: "axis_loss=0.3 (低于最优0.5)"
+    dataset: "all"
+    version: "v3_z2_axis03"
+    params:
       weight_axis_rotation: 0.3
+
+  # ============ 实验16: axis_loss=0.7 ============
+  - name: "v3_axis07 (z=2)"
+    description: "axis_loss=0.7 (高于最优0.5)"
+    dataset: "all"
+    version: "v3_z2_axis07"
+    params:
+      weight_axis_rotation: 0.7
+
+  # ============================================================================
+  # 实验17-18: 正则化消融
+  # ============================================================================
+
+  # ============ 实验17: 更强正则化 ============
+  - name: "v3_strong_reg (z=2)"
+    description: "更强正则化: drop_path=0.2, head_dropout=0.2"
+    dataset: "all"
+    version: "v3_z2_strong_reg"
+    params:
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+
+  # ============ 实验18: 无正则化 ============
+  - name: "v3_no_reg (z=2)"
+    description: "无正则化: drop_path=0, head_dropout=0"
+    dataset: "all"
+    version: "v3_z2_no_reg"
+    params:
+      drop_path_rate: 0.0
+      head_dropout: 0.0
 
 # ============================================================================
 # 使用说明
@@ -156,20 +261,12 @@ experiments:
 #
 # 2. 手动多机训练:
 #    a) 确定master节点IP（例如: 192.168.1.100）
-#    b) 在Master节点（192.168.1.100）上:
-#       修改配置: master_addr: "192.168.1.100"
-#                node_rank: 0
-#       bash batch_train.sh configs/batch16_train_multinode_v2.yaml
+#    b) 在Master节点上:
+#       修改配置: master_addr: "192.168.1.100", node_rank: 0
+#       bash batch_train.sh configs/batch16_train_32nodes_optim_v3.yaml
 #
-#    c) 在Worker节点（192.168.1.101）上:
-#       修改配置: master_addr: "192.168.1.100"
-#                node_rank: 1
-#       bash batch_train.sh configs/batch16_train_multinode_v2.yaml
-#
-# 3. 使用自动生成脚本:
-#    bash configs/generate_multinode_configs.sh \
-#      configs/batch16_train_multinode_v2.yaml 2 192.168.1.100
-#
-#    然后在对应节点运行生成的配置文件
+#    c) 在Worker节点上:
+#       修改配置: master_addr: "192.168.1.100", node_rank: 1
+#       bash batch_train.sh configs/batch16_train_32nodes_optim_v3.yaml
 #
 # ============================================================================

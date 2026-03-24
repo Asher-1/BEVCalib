@@ -13,7 +13,7 @@
 bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
 models_dir: "logs/B26A/v1"
 test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
-output_dir: "logs/generalization_eval_b26a_v1"
+output_dir: "logs/evaluations/generalization_eval_b26a_v1"
 eval_script: "evaluate_checkpoint.py"
 
 eval_params:

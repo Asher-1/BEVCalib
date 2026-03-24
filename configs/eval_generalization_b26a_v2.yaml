@@ -1,0 +1,221 @@
+# BEVCalib B26A v2 - 泛化性能评估配置
+#
+# 覆盖 logs/B26A/v2 下全部16个训练实验 (best_val checkpoint)
+# 评估内容: 尾部优化消融 + V2精细消融 (per_axis / axis_loss / aug / reg)
+#
+# 实验分组:
+#   Part 1 - 尾部优化消融 (8个):
+#     v2_full_tail, v2_quantile_only, v2_roll_bias_only, v2_roll_weight_only,
+#     v2_roll_weight4, v2_strong_tail, v2_peraxis05(Part1), v2_v2_baseline
+#
+#   Part 2 - V2 精细消融 (9个, 与Part1有1个重叠):
+#     v2_base, v2_full_tail_z2, v2_peraxis02, v2_peraxis04, v2_peraxis05,
+#     v2_axis03, v2_axis06, v2_light_aug, v2_strong_reg
+#
+# 所有实验共享:
+#   - dataset: B26A (b26a1_1), angle: 5deg, rotation_only
+#   - BEV_ZBOUND_STEP=10.0 → z_voxels=2
+#   - StepLR + truncated_normal + backbone_lr_scale=0.1
+#   - ckpt: best_val (由early stopping选出的最优验证epoch)
+#
+# 用法 (必须用 bevcalib310 环境, 包含 drcv bev_pool CUDA kernel):
+#   /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py --config configs/eval_generalization_b26a_v2.yaml
+#
+# 评估结果:
+#   - 自动汇总: logs/evaluations/generalization_eval_b26a_v2/GENERALIZATION_REPORT.md
+#   - 深度分析: logs/evaluations/generalization_eval_b26a_v2/B26A_V2_ANALYSIS_REPORT.md
+#   - 最佳泛化模型: v2-roll-weight-only (Mean Rot 0.767°, 衰退仅1.3x)
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v2"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ====================================================================
+  # 基线 (Baselines)
+  # ====================================================================
+
+  - label: "v2-base"
+    dir_name: "v2/model_small_5deg_v2_base"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-base"
+    mode_desc: "V2最优: axis05+StepLR+trunc_normal+per_axis0.3+无aug"
+
+  - label: "v2-baseline"
+    dir_name: "v2/model_small_5deg_v2_v2_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-baseline"
+    mode_desc: "V2对照: 无tail/无roll_bias/旧权重(2,1.5,1)"
+
+  # ====================================================================
+  # per_axis_prob 消融 (单轴扰动概率: 0.2 / 0.3 / 0.4 / 0.5)
+  # ====================================================================
+
+  - label: "v2-peraxis02"
+    dir_name: "v2/model_small_5deg_v2_peraxis02"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-peraxis02"
+    mode_desc: "per_axis_prob=0.2(降低单轴概率)"
+
+  - label: "v2-peraxis04"
+    dir_name: "v2/model_small_5deg_v2_peraxis04"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-peraxis04"
+    mode_desc: "per_axis_prob=0.4(提高单轴概率)"
+
+  - label: "v2-peraxis05"
+    dir_name: "v2/model_small_5deg_v2_peraxis05"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-peraxis05"
+    mode_desc: "per_axis_prob=0.5(50%单轴/50%耦合)"
+
+  # ====================================================================
+  # axis_loss 权重消融 (0.3 / 0.5(base) / 0.6)
+  # ====================================================================
+
+  - label: "v2-axis03"
+    dir_name: "v2/model_small_5deg_v2_axis03"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-axis03"
+    mode_desc: "axis_loss=0.3(低于最优0.5)"
+
+  - label: "v2-axis06"
+    dir_name: "v2/model_small_5deg_v2_axis06"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-axis06"
+    mode_desc: "axis_loss=0.6(高于最优0.5)"
+
+  # ====================================================================
+  # 尾部优化消融 (Quantile Loss / Roll Bias / Roll Weight)
+  # ====================================================================
+
+  - label: "v2-full-tail"
+    dir_name: "v2/model_small_5deg_v2_full_tail"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-full-tail"
+    mode_desc: "全量尾部优化: quantile+roll_bias+roll_weight=3.0"
+
+  - label: "v2-full-tail-z2"
+    dir_name: "v2/model_small_5deg_v2_full_tail_z2"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-full-tail-z2"
+    mode_desc: "全量尾部优化(Part2重跑): quantile+roll_bias+roll_weight=3.0"
+
+  - label: "v2-quantile-only"
+    dir_name: "v2/model_small_5deg_v2_quantile_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-quantile-only"
+    mode_desc: "消融A: 仅quantile_loss(topk=0.1,weight=0.5)"
+
+  - label: "v2-roll-bias-only"
+    dir_name: "v2/model_small_5deg_v2_roll_bias_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-roll-bias-only"
+    mode_desc: "消融B: 仅roll_bias采样(0.5/0.3/0.2)"
+
+  - label: "v2-roll-weight-only"
+    dir_name: "v2/model_small_5deg_v2_roll_weight_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-roll-weight-only"
+    mode_desc: "消融C: 仅roll_weight=3.0(无quantile/无roll_bias)"
+
+  - label: "v2-roll-weight4"
+    dir_name: "v2/model_small_5deg_v2_roll_weight4"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-roll-weight4"
+    mode_desc: "更激进: roll_weight=4.0+quantile+roll_bias"
+
+  - label: "v2-strong-tail"
+    dir_name: "v2/model_small_5deg_v2_strong_tail"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-strong-tail"
+    mode_desc: "更强尾部惩罚(已废弃)"
+
+  # ====================================================================
+  # 数据增强 & 正则化消融
+  # ====================================================================
+
+  - label: "v2-light-aug"
+    dir_name: "v2/model_small_5deg_v2_light_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-light-aug"
+    mode_desc: "轻量增强: jitter=0.005+dropout=0.03+color=0.1"
+
+  - label: "v2-strong-reg"
+    dir_name: "v2/model_small_5deg_v2_strong_reg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "10.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 2
+    version: "v2-strong-reg"
+    mode_desc: "更强正则化: drop_path=0.2+head_dropout=0.2"
