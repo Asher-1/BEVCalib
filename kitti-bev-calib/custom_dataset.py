@@ -75,8 +75,6 @@ class CustomDataset(Dataset):
         self.dataset_root = data_folder
         self.K = {}
         self.T = {}  # LiDAR→Camera (inv(Tr))
-        self.D = {}  # 畸变系数
-        self.camera_model = {}  # 相机模型类型 (pinhole/fisheye)
         self.T_cam2sensing = {}  # Camera→Sensing (系统已知相机外参)
         
         self.target_size = target_size  # (width, height) for pre-resized lookup
@@ -112,11 +110,9 @@ class CustomDataset(Dataset):
                 self.K[seq] = calib.K_cam2
                 self.T[seq] = T_lidar_to_cam  # LiDAR → Camera (训练ground truth)
                 
-                # 解析扩展字段（pykitti不支持: D, camera_model, T_cam2sensing）
+                # 解析扩展字段（pykitti不支持: T_cam2sensing）
                 calib_path = os.path.join(self.dataset_root, 'sequences', seq, 'calib.txt')
-                D, camera_model, T_cam2s = self._parse_extended_calib(calib_path)
-                self.D[seq] = D
-                self.camera_model[seq] = camera_model
+                T_cam2s = self._parse_extended_calib(calib_path)
                 if T_cam2s is not None:
                     self.T_cam2sensing[seq] = T_cam2s
                 
@@ -204,27 +200,18 @@ class CustomDataset(Dataset):
         """从calib.txt解析扩展字段（pykitti不支持的自定义字段）
         
         Returns:
-            D: 畸变系数数组 或 None
-            camera_model: 'pinhole' 或 'fisheye'
             T_cam2sensing: Camera→Sensing 4x4矩阵 或 None
         """
-        D = None
-        camera_model = 'pinhole'
         T_cam2sensing = None
         
         if not os.path.exists(calib_path):
-            return D, camera_model, T_cam2sensing
+            return T_cam2sensing
         
         try:
             with open(calib_path, 'r') as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith('D:'):
-                        values = line.split(':')[1].strip().split()
-                        D = np.array([float(v) for v in values], dtype=np.float64)
-                    elif line.startswith('camera_model:'):
-                        camera_model = line.split(':')[1].strip()
-                    elif line.startswith('T_cam2sensing:'):
+                    if line.startswith('T_cam2sensing:'):
                         values = line.split(':')[1].strip().split()
                         arr = np.array([float(v) for v in values], dtype=np.float64)
                         if len(arr) == 12:
@@ -232,7 +219,7 @@ class CustomDataset(Dataset):
         except Exception as e:
             import sys; print(f"[CustomDataset] 警告: 无法解析扩展标定字段: {e}", file=sys.stderr)
         
-        return D, camera_model, T_cam2sensing
+        return T_cam2sensing
 
     def __len__(self):
         return len(self.all_files)
@@ -307,11 +294,9 @@ class CustomDataset(Dataset):
         gt_transform = self.T[seq]
         if self._use_resized and seq in self._resized_K:
             intrinsic = self._resized_K[seq]
-            distortion = None
         else:
             intrinsic = self.K[seq]
-            distortion = self.D.get(seq, None)
-        return img, pcd, gt_transform, intrinsic, distortion
+        return img, pcd, gt_transform, intrinsic
     
     def validate_data_utilization(self, sample_ratio=0.1, min_utilization=0.3, min_valid_ratio=0.9, verbose=True):
         """
@@ -430,7 +415,7 @@ if __name__ == "__main__":
     
     # 测试加载第一个样本
     print("\n测试加载样本...")
-    img, pcd, gt_transform, intrinsic, distortion = dataset[0]
+    img, pcd, gt_transform, intrinsic = dataset[0]
     
     print(f"图像尺寸: {img.size}")
     print(f"点云形状: {pcd.shape}")

@@ -47,9 +47,7 @@ def get_target_size(use_custom_dataset, target_width=None, target_height=None):
 def make_collate_fn(target_size):
     """创建带有指定 target_size 的 collate_fn"""
     def collate_fn(batch):
-        # item结构: (img, pcd, gt_transform, intrinsic, distortion)
-        # 去畸变 + 缩放在 crop_and_resize 中完成
-        processed_data = [crop_and_resize(item[0], target_size, item[3], False, item[4]) for item in batch]
+        processed_data = [crop_and_resize(item[0], target_size, item[3], False) for item in batch]
         imgs = [item[0] for item in processed_data]
         intrinsics = [item[1] for item in processed_data]
 
@@ -71,11 +69,8 @@ def make_collate_fn(target_size):
     
     return collate_fn
 
-def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
-    """
-    图像预处理: 缩放 → 更新内参
-    注意: 不再应用cv2.undistort (B26A相机输出已去畸变图像)
-    """
+def crop_and_resize(item, size, intrinsics, crop=True):
+    """图像预处理: 缩放 → 更新内参"""
     img = cv2.cvtColor(np.array(item), cv2.COLOR_RGB2BGR)
     
     h, w = img.shape[:2]

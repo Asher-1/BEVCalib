@@ -1,0 +1,78 @@
+# BEVCalib B26A Refine v5 泛化性能评估
+# 3个refine模型 + 2个基准模型
+#
+# 训练时val结果:
+#   refine_bestval (lr=1e-5): val=0.200° (原始best_val=0.288°, -30%)
+#   refine_v1champ (lr=1e-5): val=0.282°
+#   refine_lr5e6 (lr=5e-6):   val=0.254°
+#
+# 关键问题: val改善是否转化为泛化改善？
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v5_refine"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_refine_v5"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== Refine 1: v5 best_val → lr=1e-5 =====
+  - label: "refine-bestval-1e5"
+    dir_name: "model_small_5deg_v5_refine_bestval"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "refine-bestval-1e5"
+    mode_desc: "Refine: v5 best_val → lr=1e-5 StepLR 100ep (val=0.200°)"
+
+  # ===== Refine 2: v1 champion → lr=1e-5 =====
+  - label: "refine-v1champ-1e5"
+    dir_name: "model_small_5deg_v5_refine_v1champ"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "refine-v1champ-1e5"
+    mode_desc: "Refine: v1 champion → lr=1e-5 StepLR 100ep (val=0.282°)"
+
+  # ===== Refine 3: v5 best_val → lr=5e-6 =====
+  - label: "refine-bestval-5e6"
+    dir_name: "model_small_5deg_v5_refine_bestval_lr5e6"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "refine-bestval-5e6"
+    mode_desc: "Refine: v5 best_val → lr=5e-6 StepLR 100ep (val=0.254°)"
+
+  # ===== 基准: v1 champion (全局#1, 0.431°) =====
+  - label: "v1-champion"
+    dir_name: "v1/model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v1-champion"
+    mode_desc: "基准: v1冠军 ckpt_400 (0.431°)"
+
+  # ===== 基准: v5 best_val (全局#2, 0.502°) =====
+  - label: "v5-cosinewr-z5-bestval"
+    dir_name: "v5/model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-z5-bestval"
+    mode_desc: "基准: v5 best_val (0.502°)"

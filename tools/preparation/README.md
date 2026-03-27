@@ -18,7 +18,11 @@
   sequences/*/calib.txt
 ```
 
-**步骤 1** 从原始 bag 数据提取 PNG 图像 + 点云 + 标定文件（KITTI 格式）
+**步骤 1** 从原始 bag 数据提取图像并**去畸变** + 提取点云 + 生成标定文件（KITTI 格式）
+
+> **重要**: 步骤 1 中保存的 PNG 图像已经过去畸变处理（基于 `cameras.cfg` 中的畸变系数），
+> `calib.txt` 中的 `D` 写为零向量，内参 `P2` 为去畸变后的新内参。
+> 因此**下游所有模块（训练、推理、可视化）不应再次对图像进行去畸变**。
 
 **步骤 2** 将 4K PNG 批量 resize 为训练用 JPEG（4.3 MB → 40 KB，加载速度提升 10 倍）
 
@@ -261,7 +265,7 @@ python ../../kitti-bev-calib/train_kitti.py \
 | P0-P3 | 相机投影矩阵 (3x4) | cameras.cfg 内参 |
 | Tr | Camera → LiDAR (KITTI 标准，3x4) | lidars.cfg `sensor_to_lidar` + cameras.cfg `sensor_to_cam` 合成 |
 | T_cam2sensing | Camera → Sensing (系统已知相机外参，3x4) | cameras.cfg `sensor_to_cam` |
-| D | 畸变系数 | cameras.cfg 畸变参数 |
+| D | 畸变系数（全零，图像已去畸变） | cameras.cfg 畸变参数（已在步骤 1 中应用并清零） |
 | camera_model | 相机模型 (pinhole/fisheye) | cameras.cfg |
 
 **重要**: Tr 始终由 `configs/lidars.cfg` + `configs/cameras.cfg` 合成，不使用 BAG 中的外参。

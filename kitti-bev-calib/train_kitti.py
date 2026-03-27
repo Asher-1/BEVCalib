@@ -300,7 +300,7 @@ def parse_args():
                         help="Global random seed for reproducibility (default: 42)")
     return parser.parse_args()
 
-def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
+def crop_and_resize(item, size, intrinsics, crop=True):
     """
     图像预处理: 缩放 → 更新内参
     
@@ -309,7 +309,6 @@ def crop_and_resize(item, size, intrinsics, crop=True, distortion=None):
         size: (width, height) 目标尺寸
         intrinsics: (3, 3) 原始相机内参矩阵
         crop: 是否裁剪中间区域
-        distortion: 畸变系数 (保留参数但不使用)
     
     Returns:
         resized: (H, W, 3) BGR图像
@@ -391,10 +390,10 @@ class PreprocessedDataset(Dataset):
         result = self.dataset[idx]
         if result is None:
             return None
-        img, pcd, gt_transform, intrinsic, distortion = result
+        img, pcd, gt_transform, intrinsic = result
         if isinstance(img, np.ndarray) and img.shape[:2] == (self.target_size[1], self.target_size[0]):
             return img, pcd, gt_transform, intrinsic
-        resized_img, new_intrinsic = crop_and_resize(img, self.target_size, intrinsic, self.crop, distortion)
+        resized_img, new_intrinsic = crop_and_resize(img, self.target_size, intrinsic, self.crop)
         return resized_img, pcd, gt_transform, new_intrinsic
 
 

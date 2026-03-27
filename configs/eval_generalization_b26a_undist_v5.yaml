@@ -1,0 +1,109 @@
+# BEVCalib B26A 去畸变 v5 泛化性能评估
+# 5个去畸变训练模型 + v1-champion基准
+#
+# 训练时val结果:
+#   undist_best (5°, seed=42):          val=0.2868°
+#   undist_v1cfg (5°, 无固定seed):      val=0.3045°
+#   undist_refine_v1champ (5°, refine): val=0.2601°
+#   undist_angle10 (10°训练, 5°评估):   val=0.3302°
+#   undist_angle20 (20°训练, 5°评估):   val=0.3825°
+#
+# 关键问题:
+#   1. 去畸变是否提升泛化？(对比原始v5 seed=42的0.500°)
+#   2. 大扰动训练+小扰动评估是否提升泛化？
+#   3. refine v1 champion在去畸变数据上效果如何？
+#
+# 用法:
+#   /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_undist_v5.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v5_undist"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_undist_v5"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== 1. v5最佳配置 (5°, seed=42) =====
+  - label: "undist-best-5deg"
+    dir_name: "model_small_5deg_v5_undist_best"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "undist-best"
+    mode_desc: "去畸变 v5最佳配置 5° seed=42 (val=0.2868°)"
+
+  # ===== 2. v1-champion配置复现 (5°, 无固定seed) =====
+  - label: "undist-v1cfg-5deg"
+    dir_name: "model_small_5deg_v5_undist_v1cfg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "undist-v1cfg"
+    mode_desc: "去畸变 v1配置复现 5° 无固定seed (val=0.3045°)"
+
+  # ===== 3. refine v1-champion (5°, lr=5e-6) =====
+  - label: "undist-refine-v1champ"
+    dir_name: "model_small_5deg_v5_undist_refine_v1champ"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "undist-refine-v1champ"
+    mode_desc: "去畸变 refine v1冠军 lr=5e-6 100ep (val=0.2601°)"
+
+  # ===== 4. 10°大扰动训练 (eval@5°) =====
+  - label: "undist-angle10-eval5"
+    dir_name: "model_small_10deg_v5_undist_angle10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 10
+    z_voxels: 5
+    version: "undist-angle10"
+    mode_desc: "去畸变 10°训练+5°评估 (val@5°=0.3302°)"
+
+  # ===== 5. 20°大扰动训练 (eval@5°) =====
+  - label: "undist-angle20-eval5"
+    dir_name: "model_small_20deg_v5_undist_angle20"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 20
+    z_voxels: 5
+    version: "undist-angle20"
+    mode_desc: "去畸变 20°训练+5°评估 (val@5°=0.3825°)"
+
+  # ===== 基准: v1-champion (泛化=0.431°) =====
+  - label: "v1-champion"
+    dir_name: "../v1/model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v1-champion"
+    mode_desc: "基准: v1冠军 ckpt_400 (泛化=0.431°)"
+
+  # ===== 基准: v5 原始 seed=42 (泛化=0.500°) =====
+  - label: "v5-s42-original"
+    dir_name: "../v5/model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-s42-original"
+    mode_desc: "基准: v5 原始(有畸变) seed=42 best_val (泛化=0.500°)"

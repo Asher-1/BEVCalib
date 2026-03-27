@@ -187,7 +187,9 @@ def _collect_dataset_statistics(dataset_root):
             if 'camera_model' in calib:
                 calib_info['camera_model'] = str(calib['camera_model'])
             if 'D' in calib:
-                calib_info['has_distortion'] = True
+                D_vals = calib['D']
+                calib_info['has_distortion'] = bool(np.any(np.abs(D_vals) > 1e-10))
+                calib_info['images_pre_undistorted'] = not calib_info['has_distortion']
             
             if 'Tr' in calib:
                 Tr_3x4 = calib['Tr'].reshape(3, 4)
