@@ -1,0 +1,101 @@
+# BEVCalib ALL数据集 v5 泛化性能评估
+# 4个v5实验 + v4最佳基准
+#
+# 训练时val结果:
+#   cosinewr_z5_aug:  val=0.3131° (CosineWR + 强aug)
+#   step_z5_aug:      val=0.2939° (StepLR + 强aug)
+#   cosinewr_z5_noaug: val=0.3245° (CosineWR + 无aug)
+#   step_z5_noaug:    val=0.2925° (StepLR + 无aug) ← 最佳val
+#
+# 实验设计 (2x2 全覆盖):
+#   LR调度: CosineWR vs StepLR
+#   数据增强: strong_aug vs no_aug
+#
+# 关键问题:
+#   1. CosineWR vs StepLR 在大数据集上哪个泛化更好？
+#   2. 强数据增强在大数据集上是否仍然有益？
+#   3. v5能否超越v4最佳 (v4-z5-no-tail: 0.651°)？
+#
+# 用法:
+#   /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_all_v5.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v5"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v5"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== 1. CosineWR + 强aug (主实验) =====
+  - label: "v5-cosinewr-aug"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-aug"
+    mode_desc: "CosineWR + z5 + strong_aug + no_roll3 (val=0.3131°)"
+
+  # ===== 2. StepLR + 强aug (LR消融) =====
+  - label: "v5-step-aug"
+    dir_name: "model_small_5deg_v5_step_z5_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-step-aug"
+    mode_desc: "StepLR + z5 + strong_aug + no_roll3 (val=0.2939°)"
+
+  # ===== 3. CosineWR + 无aug (增强消融) =====
+  - label: "v5-cosinewr-noaug"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_noaug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-cosinewr-noaug"
+    mode_desc: "CosineWR + z5 + no_aug + uniform (val=0.3245°)"
+
+  # ===== 4. StepLR + 无aug (双消融基线) =====
+  - label: "v5-step-noaug"
+    dir_name: "model_small_5deg_v5_step_z5_noaug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-step-noaug"
+    mode_desc: "StepLR + z5 + no_aug + uniform (val=0.2925°)"
+
+  # ===== 基准: v4-z5-no-tail (v4最佳, 泛化=0.651°) =====
+  - label: "v4-z5-no-tail"
+    dir_name: "../v4/model_small_5deg_v4_z5_no_tail"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v4-z5-no-tail"
+    mode_desc: "基准: v4最佳 z5+no_tail (泛化=0.651°)"
+
+  # ===== 基准: v1-champion (全局#1, 泛化=0.431°) =====
+  - label: "v1-champion"
+    dir_name: "../../B26A/v1/model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v1-champion"
+    mode_desc: "基准: v1冠军 B26A ckpt_400 (泛化=0.431°)"

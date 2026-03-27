@@ -187,8 +187,7 @@ class KittiDataset(Dataset):
         
         gt_transform = self.T[seq]
         intrinsic = self.K[seq]
-        distortion = None  # KITTI原始数据集假设已去畸变
-        return img, pcd, gt_transform, intrinsic, distortion
+        return img, pcd, gt_transform, intrinsic
     
     def validate_data_utilization(self, sample_ratio=0.1, min_utilization=0.3, min_valid_ratio=0.9, verbose=True):
         """

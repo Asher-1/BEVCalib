@@ -192,7 +192,6 @@ def make_collate_fn(target_size):
         imgs = [p[0] for p in processed]
         intrinsics = [p[1] for p in processed]
         gt_T_to_camera = [item[2] for item in batch]
-        distortions = [item[4] if len(item) > 4 else None for item in batch]  # 畸变系数
         
         pcs = []
         masks = []
@@ -206,7 +205,7 @@ def make_collate_fn(target_size):
                 pc = np.concatenate([pc, np.full((max_num_points - pc.shape[0], pc.shape[1]), 999999)], axis=0)
             pcs.append(pc)
 
-        return imgs, pcs, masks, gt_T_to_camera, intrinsics, distortions
+        return imgs, pcs, masks, gt_T_to_camera, intrinsics
     
     return collate_fn
 
@@ -336,7 +335,7 @@ def evaluate_checkpoint(args):
     max_batches = args.max_batches if args.max_batches > 0 else len(val_loader)
     
     with torch.no_grad():
-        for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics, distortions) in enumerate(val_loader):
+        for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(val_loader):
             if batch_index >= max_batches:
                 break
             
@@ -810,7 +809,7 @@ def compare_checkpoints(args):
     max_batches = args.max_batches if args.max_batches > 0 else len(val_loader)
 
     with torch.no_grad():
-        for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics, distortions) in enumerate(val_loader):
+        for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(val_loader):
             if batch_index >= max_batches:
                 break
 

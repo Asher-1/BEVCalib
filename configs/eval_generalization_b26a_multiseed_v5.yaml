@@ -1,0 +1,79 @@
+# BEVCalib B26A 多Seed v5 泛化性能评估
+# 3个新seed模型 + 原始seed42 + v1 champion基准
+#
+# 训练时val结果:
+#   seed=41: val=0.2878°
+#   seed=42 (原始): val=0.2876°
+#   seed=43: val=0.2286° (最佳!)
+#   seed=44: val=0.2640°
+#
+# 关键问题: seed对泛化性能的影响有多大？seed=43能否超越v1 champion？
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v5_multiseed"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_multiseed_v5"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 1800
+
+models:
+  # ===== Seed 41: CosineWR+z5+strong_aug+no_roll3 =====
+  - label: "v5-s41-bestval"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_s41"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-s41-bestval"
+    mode_desc: "Seed=41 CosineWR+z5+aug best_val (val=0.2878°)"
+
+  # ===== Seed 43: CosineWR+z5+strong_aug+no_roll3 =====
+  - label: "v5-s43-bestval"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_s43"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-s43-bestval"
+    mode_desc: "Seed=43 CosineWR+z5+aug best_val (val=0.2286°, 最佳val!)"
+
+  # ===== Seed 44: CosineWR+z5+strong_aug+no_roll3 =====
+  - label: "v5-s44-bestval"
+    dir_name: "model_small_5deg_v5_cosinewr_z5_s44"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-s44-bestval"
+    mode_desc: "Seed=44 CosineWR+z5+aug best_val (val=0.2640°)"
+
+  # ===== 基准: Seed 42 (原始v5, 0.508°泛化) =====
+  - label: "v5-s42-bestval"
+    dir_name: "v5/model_small_5deg_v5_cosinewr_z5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v5-s42-bestval"
+    mode_desc: "基准: Seed=42 best_val (val=0.2876°, 泛化=0.508°)"
+
+  # ===== 基准: v1 champion (全局#1, 0.431°泛化) =====
+  - label: "v1-champion"
+    dir_name: "v1/model_small_5deg_v7_opt_axis05"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v1-champion"
+    mode_desc: "基准: v1冠军 ckpt_400 (泛化=0.431°)"

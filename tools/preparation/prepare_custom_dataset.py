@@ -2385,6 +2385,9 @@ class BEVCalibDatasetPreparer:
             [0, 0, 1]
         ])
         
+        # 10. 初始化图像去畸变（更新self.K为去畸变后的新内参）
+        self._init_undistortion_maps()
+        
         print(f"\n✓ 变换矩阵已计算 (从左往右读: T_A_to_B = A→B):")
         print(f"  === 坐标系变换矩阵 ===")
         print(f"  T_cam_to_sensing (Camera→Sensing, cameras.cfg):")
@@ -2917,7 +2920,7 @@ class BEVCalibDatasetPreparer:
                         
                         image = self._decode_image_msg_from_bytes(data)
                         if image is not None:
-                            # 使用bag_hash+局部计数器作为文件名，避免冲突
+                            image = self._undistort_image(image)
                             filename = f"{bag_hash}_{local_img_count:06d}.jpg"
                             filepath = self.temp_image_dir / filename
                             cv2.imwrite(str(filepath), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
@@ -3116,8 +3119,9 @@ class BEVCalibDatasetPreparer:
             self._save_pc_batch(pc_buffer)
     
     def _save_image_batch(self, batch: List[Tuple[float, np.ndarray]]):
-        """保存一批图像到临时目录"""
+        """保存一批图像到临时目录（已去畸变）"""
         for ts, image in batch:
+            image = self._undistort_image(image)
             filename = f"{self.image_counter:06d}.jpg"
             filepath = self.temp_image_dir / filename
             cv2.imwrite(str(filepath), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
@@ -3453,6 +3457,71 @@ class BEVCalibDatasetPreparer:
         except:
             pass
         return None
+    
+    def _init_undistortion_maps(self):
+        """预计算图像去畸变映射表，并更新self.K为去畸变后的新内参。
+        
+        根据cameras.cfg中的畸变系数，预计算cv2.remap所需的映射表。
+        去畸变后图像尺寸不变，但内参会更新以反映去畸变后的成像模型。
+        符合KITTI-Odometry的要求：保存的图像应已去畸变。
+        """
+        distortion = self.camera_config.get('distortion', {})
+        model_type = distortion.get('model_type', 'pinhole')
+        
+        intrinsic = self.camera_config['intrinsic']
+        w = intrinsic['img_width']
+        h = intrinsic['img_height']
+        
+        if model_type == 'fisheye':
+            D = np.array([distortion.get('k1', 0.0),
+                          distortion.get('k2', 0.0),
+                          distortion.get('k3', 0.0),
+                          distortion.get('k4', 0.0)])
+        else:
+            D = np.array([distortion.get('k1', 0.0),
+                          distortion.get('k2', 0.0),
+                          distortion.get('p1', 0.0),
+                          distortion.get('p2', 0.0),
+                          distortion.get('k3', 0.0)])
+        
+        if np.allclose(D, 0, atol=1e-10):
+            self._undist_map1 = None
+            self._undist_map2 = None
+            print(f"  ℹ️ 畸变系数全为0，跳过去畸变初始化")
+            return
+        
+        K_orig = self.K.copy()
+        
+        if model_type == 'fisheye':
+            D_col = D.reshape(4, 1)
+            new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectifyMap(
+                K_orig, D_col, (w, h), np.eye(3), balance=0, new_size=(w, h))
+            self._undist_map1, self._undist_map2 = cv2.fisheye.initUndistortRectifyMap(
+                K_orig, D_col, np.eye(3), new_K, (w, h), cv2.CV_16SC2)
+        else:
+            new_K, _roi = cv2.getOptimalNewCameraMatrix(
+                K_orig, D, (w, h), alpha=0, newImgSize=(w, h))
+            self._undist_map1, self._undist_map2 = cv2.initUndistortRectifyMap(
+                K_orig, D, None, new_K, (w, h), cv2.CV_16SC2)
+        
+        self.K = new_K
+        
+        print(f"\n  ✓ 图像去畸变初始化完成 (模型: {model_type})")
+        print(f"    原始内参: fx={K_orig[0,0]:.2f}, fy={K_orig[1,1]:.2f}, "
+              f"cx={K_orig[0,2]:.2f}, cy={K_orig[1,2]:.2f}")
+        print(f"    新内参:   fx={new_K[0,0]:.2f}, fy={new_K[1,1]:.2f}, "
+              f"cx={new_K[0,2]:.2f}, cy={new_K[1,2]:.2f}")
+        if model_type == 'fisheye':
+            print(f"    畸变系数: k1={D[0]:.6f}, k2={D[1]:.6f}, k3={D[2]:.6f}, k4={D[3]:.6f}")
+        else:
+            print(f"    畸变系数: k1={D[0]:.6f}, k2={D[1]:.6f}, p1={D[2]:.6f}, p2={D[3]:.6f}, k3={D[4]:.6f}")
+    
+    def _undistort_image(self, image: np.ndarray) -> np.ndarray:
+        """使用预计算的映射表对图像去畸变。"""
+        if self._undist_map1 is None:
+            return image
+        return cv2.remap(image, self._undist_map1, self._undist_map2,
+                         cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
     
     def _decode_image_msg_from_bytes(self, data: bytes) -> Optional[np.ndarray]:
         """从bytes解码图像"""
@@ -4215,30 +4284,14 @@ class BEVCalibDatasetPreparer:
         # T_cam2sensing: Camera→Sensing（cameras.cfg相机外参，系统已知量）
         T_cam2sensing_3x4 = self.T_cam_to_sensing[:3, :]
         
-        # D: 畸变系数（参考C++实现，投影时需要）
-        # 支持两种模型：
-        # 1. pinhole: k1, k2, p1, p2, k3 (OpenCV标准，5个参数)
-        # 2. fisheye: k1, k2, k3, k4 (KANNALA_BRANDT鱼眼模型，4个参数)
+        # D: 畸变系数 — 图像在prepare阶段已完成去畸变，此处写零
         distortion = self.camera_config.get('distortion', {})
         model_type = distortion.get('model_type', 'pinhole')
         
         if model_type == 'fisheye':
-            # 鱼眼模型：k1, k2, k3, k4（无切向畸变）
-            D = np.array([
-                distortion.get('k1', 0.0),
-                distortion.get('k2', 0.0),
-                distortion.get('k3', 0.0),
-                distortion.get('k4', 0.0)
-            ])
+            D = np.zeros(4)
         else:
-            # Pinhole模型：k1, k2, p1, p2, k3
-            D = np.array([
-                distortion.get('k1', 0.0),
-                distortion.get('k2', 0.0),
-                distortion.get('p1', 0.0),
-                distortion.get('p2', 0.0),
-                distortion.get('k3', 0.0)
-            ])
+            D = np.zeros(5)
         
         with open(calib_path, 'w') as f:
             # 完整的KITTI格式包含P0-P3，但BEVCalib只需要P2
@@ -4270,13 +4323,7 @@ class BEVCalibDatasetPreparer:
         print(f"  ✓ Tr: Camera→LiDAR (由lidars.cfg + cameras.cfg合成)")
         print(f"  ✓ T_cam2sensing: Camera→Sensing (cameras.cfg相机外参)")
         
-        # 根据模型类型打印畸变系数
-        if model_type == 'fisheye':
-            print(f"  ✓ 畸变模型: {model_type} (KANNALA_BRANDT)")
-            print(f"  ✓ 畸变系数: D (k1={D[0]:.6f}, k2={D[1]:.6f}, k3={D[2]:.6f}, k4={D[3]:.6f})")
-        else:
-            print(f"  ✓ 畸变模型: {model_type}")
-            print(f"  ✓ 畸变系数: D (k1={D[0]:.6f}, k2={D[1]:.6f}, p1={D[2]:.6f}, p2={D[3]:.6f}, k3={D[4]:.6f})")
+        print(f"  ✓ 图像已在prepare阶段去畸变，D=0")
     
     def _save_poses_file(self, synced_pairs: List[Tuple[int, int]], sequence_id: str):
         """保存位姿文件（KITTI-Odometry 格式）

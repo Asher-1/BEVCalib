@@ -58,16 +58,14 @@ def get_camera_fov(K: np.ndarray, D: np.ndarray, image_size: tuple) -> float:
         [w, 0]
     ], dtype=np.float32).reshape(-1, 1, 2)  # OpenCV要求的格式
     
-    # ✅ 使用cv::undistortPoints去畸变（对齐C++）
-    if D is not None and len(D) >= 4:
+    has_distortion = D is not None and len(D) >= 4 and np.any(np.abs(D) > 1e-6)
+    
+    if has_distortion:
         if len(D) == 4:
-            # fisheye model
             vertex_undist = cv2.fisheye.undistortPoints(vertex, K, D)
         else:
-            # pinhole model (5 or 8 parameters)
             vertex_undist = cv2.undistortPoints(vertex, K, D)
     else:
-        # 无畸变，直接使用K_inv转换
         K_inv = np.linalg.inv(K)
         vertex_undist = []
         for point in vertex[:, 0, :]:
