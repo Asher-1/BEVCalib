@@ -1,0 +1,239 @@
+# BEVCalib B26A V6-aug 实验: 在V6最优配置上验证数据增强+LR策略的影响
+#
+# 背景:
+#   V6 泛化评估发现:
+#   - v6-linear-baseline (1.194°) 优于 v1-champion (1.253°)
+#   - 但不如 V5 undist-best (1.047°)
+#   - 根因: V6 关闭了数据增强 + 使用 StepLR (V5 用 CosineWR + aug)
+#   - Pitch 误差是主要误差来源 (占 70-85%), BEV 投影对 Pitch 的约束天然较弱
+#
+# 实验设计 (8组, seed=42):
+#
+#   组A — Linear头 + 不同aug/LR组合 (验证 aug 和 CosineWR 的增益):
+#     1. v6a_linear_aug_step:        Linear + aug + StepLR (仅加aug)
+#     2. v6a_linear_noaug_cosine:    Linear + 无aug + CosineWR (仅换LR)
+#     3. v6a_linear_aug_cosine:      Linear + aug + CosineWR (最佳V5配置复现)
+#     4. v6a_linear_aug_cosine_pw:   Linear + aug + CosineWR + pitch_weight加强
+#
+#   组B — MLP头 + aug (验证 aug 能否缓解 MLP 过拟合):
+#     5. v6a_mlp_aug_step:           MLP + aug + StepLR
+#     6. v6a_mlp_aug_cosine:         MLP + aug + CosineWR
+#     7. v6a_mlp_geo_aug_step:       MLP + geodesic + aug + StepLR
+#     8. v6a_mlp_geo_aug_cosine:     MLP + geodesic + aug + CosineWR
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_v6_aug.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_b26a_v6_aug.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: null
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # 组A: Linear头 — aug + LR 消融
+  # =========================================================================
+
+  # A1: Linear + aug + StepLR (分离aug效果)
+  - name: "v6a_linear_aug_step"
+    description: "B26A v6a: Linear头+aug+StepLR (分离aug增益)"
+    dataset: "B26A"
+    version: "v6a_linear_aug_step"
+    params:
+      use_mlp_head: 0
+      use_geodesic_loss: 0
+      lr_schedule: step
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # A2: Linear + 无aug + CosineWR (分离LR效果)
+  - name: "v6a_linear_noaug_cosine"
+    description: "B26A v6a: Linear头+无aug+CosineWR (分离LR增益)"
+    dataset: "B26A"
+    version: "v6a_linear_noaug_cosine"
+    params:
+      use_mlp_head: 0
+      use_geodesic_loss: 0
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_color_jitter: 0.0
+
+  # A3: Linear + aug + CosineWR (V5最佳配置复现, 预期超越 V5 undist-best)
+  - name: "v6a_linear_aug_cosine"
+    description: "B26A v6a: Linear头+aug+CosineWR (V5最佳配置复现)"
+    dataset: "B26A"
+    version: "v6a_linear_aug_cosine"
+    params:
+      use_mlp_head: 0
+      use_geodesic_loss: 0
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # A4: Linear + aug + CosineWR + Pitch权重加强 (针对Pitch优化)
+  - name: "v6a_linear_aug_cosine_pw"
+    description: "B26A v6a: Linear+aug+CosineWR+pitch_weight=2.0 (Pitch优化)"
+    dataset: "B26A"
+    version: "v6a_linear_aug_cosine_pw"
+    params:
+      use_mlp_head: 0
+      use_geodesic_loss: 0
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,2.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # =========================================================================
+  # 组B: MLP头 + aug (验证 aug 能否缓解过拟合)
+  # =========================================================================
+
+  # B1: MLP + quat + aug + StepLR
+  - name: "v6a_mlp_aug_step"
+    description: "B26A v6a: MLP头+quat+aug+StepLR (aug缓解过拟合)"
+    dataset: "B26A"
+    version: "v6a_mlp_aug_step"
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 0
+      lr_schedule: step
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # B2: MLP + quat + aug + CosineWR
+  - name: "v6a_mlp_aug_cosine"
+    description: "B26A v6a: MLP头+quat+aug+CosineWR"
+    dataset: "B26A"
+    version: "v6a_mlp_aug_cosine"
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 0
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # B3: MLP + geodesic + aug + StepLR
+  - name: "v6a_mlp_geo_aug_step"
+    description: "B26A v6a: MLP头+geodesic+aug+StepLR"
+    dataset: "B26A"
+    version: "v6a_mlp_geo_aug_step"
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+      lr_schedule: step
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # B4: MLP + geodesic + aug + CosineWR (全部改进组合)
+  - name: "v6a_mlp_geo_aug_cosine"
+    description: "B26A v6a: MLP头+geodesic+aug+CosineWR (全改进组合)"
+    dataset: "B26A"
+    version: "v6a_mlp_geo_aug_cosine"
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+# ============================================================================
+# 消融矩阵 (8组实验)
+# ============================================================================
+#
+#   实验                  | Head    | Loss     | LR        | Aug  | Axis Weights | 目的
+#   ----------------------+---------+----------+-----------+------+--------------+----------------------------
+#   A1 lin_aug_step       | Linear  | quat     | StepLR    | 开启 | 1,1,1        | 分离aug效果
+#   A2 lin_noaug_cosine   | Linear  | quat     | CosineWR  | 关闭 | 1,1,1        | 分离LR效果
+#   A3 lin_aug_cosine     | Linear  | quat     | CosineWR  | 开启 | 1,1,1        | V5最佳配置复现
+#   A4 lin_aug_cosine_pw  | Linear  | quat     | CosineWR  | 开启 | 1,2,1        | Pitch权重加强
+#   B1 mlp_aug_step       | MLP     | quat     | StepLR    | 开启 | 1,1,1        | MLP+aug
+#   B2 mlp_aug_cosine     | MLP     | quat     | CosineWR  | 开启 | 1,1,1        | MLP+aug+CosineWR
+#   B3 mlp_geo_aug_step   | MLP     | geodesic | StepLR    | 开启 | 1,1,1        | MLP+geo+aug
+#   B4 mlp_geo_aug_cosine | MLP     | geodesic | CosineWR  | 开启 | 1,1,1        | 全改进组合
+#
+# 关键对比:
+#   A1 vs V6-linear-baseline:      aug 对 Linear 泛化的增益
+#   A2 vs V6-linear-baseline:      CosineWR 对 Linear 泛化的增益
+#   A3 vs A1, A3 vs A2:            aug+CosineWR 的交互效果
+#   A3 vs V5-undist-best:          V6配置能否复现V5最佳泛化
+#   A4 vs A3:                      Pitch 权重加强的效果
+#   B1 vs V6-mlp-baseline:         aug 能否缓解 MLP 过拟合
+#   B4 vs A3:                      MLP+全改进 vs Linear+全改进 的最终对比

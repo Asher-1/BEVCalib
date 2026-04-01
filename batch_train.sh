@@ -473,6 +473,10 @@ OPTIM_PARAMS = [
     ('seed', '--seed'),
     ('pretrain_ckpt', '--pretrain_ckpt'),
     ('num_epochs', '--num_epochs'),
+    ('use_geodesic_loss', '--use_geodesic_loss'),
+    ('use_mlp_head', '--use_mlp_head'),
+    ('use_deformable', '--use_deformable'),
+    ('bev_pool_factor', '--bev_pool_factor'),
 ]
 for yaml_key, cli_flag in OPTIM_PARAMS:
     val = params.get(yaml_key)
@@ -554,8 +558,10 @@ name = exp.get('name', f'exp{exp_idx}')
 desc = exp.get('description', '')
 dataset = exp.get('dataset', 'B26A')
 version = exp.get('version', 'v1')
+default_env = defaults.get('env') or {}
 exp_env = exp.get('env') or {}
-zstep = exp_env.get('BEV_ZBOUND_STEP', '')
+merged_env = {**default_env, **exp_env}
+zstep = merged_env.get('BEV_ZBOUND_STEP', '')
 angle = params.get('angle_range_deg', 5)  # 默认5度
 
 # 映射dataset配置名到实际目录名（与start_training.sh一致）

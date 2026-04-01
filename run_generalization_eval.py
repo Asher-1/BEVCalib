@@ -295,6 +295,10 @@ def run_evaluations():
 
         env = os.environ.copy()
         env["BEV_ZBOUND_STEP"] = mcfg["bev_zbound_step"]
+        for env_key in ("BEV_XBOUND_MIN", "BEV_XBOUND_MAX",
+                        "BEV_YBOUND_MIN", "BEV_YBOUND_MAX", "BEV_XY_STEP"):
+            if env_key.lower() in mcfg:
+                env[env_key] = str(mcfg[env_key.lower()])
 
         cmd = [
             sys.executable, EVAL_SCRIPT,
@@ -307,8 +311,15 @@ def run_evaluations():
             "--max_batches", "0",
             "--rotation_only", str(mcfg["rotation_only"]),
             "--vis_interval", str(VIS_INTERVAL),
-            "--batch_size", str(BATCH_SIZE),
+            "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
         ]
+        if "use_mlp_head" in mcfg:
+            cmd.extend(["--use_mlp_head", str(mcfg["use_mlp_head"])])
+        if "bev_pool_factor" in mcfg:
+            cmd.extend(["--bev_pool_factor", str(mcfg["bev_pool_factor"])])
+        if mcfg.get("use_drcv"):
+            cmd.append("--use_drcv")
+            env["USE_DRCV_BACKEND"] = "1"
 
         log_path = os.path.join(per_model_dir, "eval_run.log")
         os.makedirs(per_model_dir, exist_ok=True)

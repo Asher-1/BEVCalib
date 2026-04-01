@@ -21,6 +21,9 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'kitti-bev-calib'))
 
+if '--use_drcv' in sys.argv:
+    os.environ['USE_DRCV_BACKEND'] = '1'
+
 from custom_dataset import CustomDataset
 from bev_calib import BEVCalib
 from tools import generate_single_perturbation_from_T
@@ -209,6 +212,53 @@ def make_collate_fn(target_size):
     
     return collate_fn
 
+
+def _resolve_perturbation_from_ckpt(args, checkpoint):
+    """Auto-resolve perturbation params from checkpoint if not set via CLI.
+    
+    Priority: CLI explicit > checkpoint eval_noise > checkpoint train_noise > fallback defaults.
+    Also restores perturb_distribution / per_axis_prob / per_axis_weights from checkpoint args.
+    """
+    eval_noise = checkpoint.get('eval_noise') or {}
+    train_noise = checkpoint.get('train_noise') or {}
+    ckpt_args = checkpoint.get('args') or {}
+    
+    def _pick(key, eval_d, train_d):
+        v = eval_d.get(key)
+        if v is not None:
+            return v
+        return train_d.get(key)
+    
+    if args.angle_range_deg is None:
+        ckpt_angle = _pick('angle_range_deg', eval_noise, train_noise)
+        if ckpt_angle is not None:
+            args.angle_range_deg = float(ckpt_angle)
+            print(f"   angle_range_deg={args.angle_range_deg} (从checkpoint恢复)")
+        else:
+            args.angle_range_deg = 20.0
+            print(f"   angle_range_deg={args.angle_range_deg} (checkpoint无记录, 使用默认值)")
+    
+    if args.trans_range is None:
+        ckpt_trans = _pick('trans_range', eval_noise, train_noise)
+        if ckpt_trans is not None:
+            args.trans_range = float(ckpt_trans)
+            print(f"   trans_range={args.trans_range} (从checkpoint恢复)")
+        else:
+            args.trans_range = 1.5
+            print(f"   trans_range={args.trans_range} (checkpoint无记录, 使用默认值)")
+    
+    if not hasattr(args, 'perturb_distribution') or args.perturb_distribution is None:
+        args.perturb_distribution = ckpt_args.get('perturb_distribution', 'uniform')
+    if not hasattr(args, 'per_axis_prob') or args.per_axis_prob is None:
+        args.per_axis_prob = ckpt_args.get('per_axis_prob', 0.0)
+    if not hasattr(args, 'per_axis_weights') or args.per_axis_weights is None:
+        args.per_axis_weights = ckpt_args.get('per_axis_weights', '')
+    
+    if args.perturb_distribution != 'uniform' or args.per_axis_prob > 0:
+        print(f"   perturb_distribution={args.perturb_distribution}, "
+              f"per_axis_prob={args.per_axis_prob} (从checkpoint恢复)")
+
+
 def evaluate_checkpoint(args):
     """评估指定的 checkpoint"""
     
@@ -261,16 +311,28 @@ def evaluate_checkpoint(args):
     if ckpt_val_errors:
         print(f"   Val errors: Rot {ckpt_val_errors.get('rot_error', -1):.4f}deg")
     
+    # 从 checkpoint 自动恢复扰动参数（如果 CLI 未显式指定）
+    _resolve_perturbation_from_ckpt(args, checkpoint)
+    
     # 创建模型
+    state_dict = checkpoint['model_state_dict']
+    if args.use_mlp_head >= 0:
+        use_mlp_head = args.use_mlp_head > 0
+    else:
+        use_mlp_head = 'rotation_pred.0.weight' in state_dict
     print(f"\n2. 初始化模型（图像尺寸: {args.target_width}x{args.target_height}）...")
+    print(f"   回归头类型: {'MLP (V6)' if use_mlp_head else 'Linear (V5及更早)'}"
+          f"{' (auto-detected)' if args.use_mlp_head < 0 else ''}")
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
         img_shape=(args.target_height, args.target_width),
         rotation_only=rotation_only,
+        use_mlp_head=use_mlp_head,
+        bev_pool_factor=args.bev_pool_factor,
     ).to(device)
     
-    missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         print(f"   Missing keys: {missing}")
     if unexpected:
@@ -290,14 +352,12 @@ def evaluate_checkpoint(args):
         eval_dataset = dataset
         print(f"   ✓ 使用全量数据集: {len(eval_dataset)} 个样本（跨数据集泛化测试）")
     else:
-        val_size = int(len(dataset) * args.validate_sample_ratio)
-        train_size = len(dataset) - val_size
-        
         from torch.utils.data import random_split
-        import torch as torch_module
-        generator = torch_module.Generator().manual_seed(42)
+        train_size = int(0.8 * len(dataset))
+        val_size = len(dataset) - train_size
+        generator = torch.Generator().manual_seed(114514)
         _, eval_dataset = random_split(dataset, [train_size, val_size], generator=generator)
-        print(f"   ✓ 验证集: {len(eval_dataset)} 个样本 (ratio={args.validate_sample_ratio})")
+        print(f"   ✓ 验证集: {len(eval_dataset)} 个样本 (80/20划分, seed=114514, 与训练一致)")
     
     collate_fn = make_collate_fn((args.target_width, args.target_height))
     val_loader = DataLoader(
@@ -340,11 +400,17 @@ def evaluate_checkpoint(args):
                 break
             
             gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
+            _paw = None
+            if getattr(args, 'per_axis_weights', '') and args.per_axis_weights:
+                _paw = tuple(float(x) for x in args.per_axis_weights.split(','))
             init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
                 gt_T_to_camera_np,
                 angle_range_deg=args.angle_range_deg,
                 trans_range=args.trans_range,
                 rotation_only=rotation_only,
+                distribution=getattr(args, 'perturb_distribution', 'uniform'),
+                per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                per_axis_weights=_paw,
             )
             
             resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
@@ -728,13 +794,20 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
     checkpoint = torch.load(ckpt_path, map_location=device)
     epoch = checkpoint.get('epoch', 'unknown')
 
+    state_dict = checkpoint['model_state_dict']
+    if args.use_mlp_head >= 0:
+        use_mlp_head = args.use_mlp_head > 0
+    else:
+        use_mlp_head = 'rotation_pred.0.weight' in state_dict
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
         img_shape=(args.target_height, args.target_width),
         rotation_only=rotation_only,
+        use_mlp_head=use_mlp_head,
+        bev_pool_factor=args.bev_pool_factor,
     ).to(device)
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     train_err = checkpoint.get('epoch_train_errors', None)
@@ -764,7 +837,25 @@ def compare_checkpoints(args):
     print("=" * 80)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    rotation_only = args.rotation_only > 0
+
+    # Auto-detect rotation_only from checkpoint A (same logic as evaluate_checkpoint)
+    if args.rotation_only == -1:
+        ckpt_a = torch.load(args.ckpt_path_a, map_location='cpu')
+        if 'rotation_only' in ckpt_a:
+            rotation_only = ckpt_a['rotation_only']
+        elif 'optimize_translation' in ckpt_a:
+            rotation_only = not ckpt_a['optimize_translation']
+        else:
+            rotation_only = False
+        print(f"   rotation_only: {rotation_only} (从checkpoint A读取)")
+        _resolve_perturbation_from_ckpt(args, ckpt_a)
+        del ckpt_a
+    else:
+        rotation_only = args.rotation_only > 0
+        if args.angle_range_deg is None:
+            args.angle_range_deg = 20.0
+        if args.trans_range is None:
+            args.trans_range = 1.5
 
     print(f"\n1. 加载模型...")
     model_a, epoch_a, train_err_a, val_err_a = _load_model_from_ckpt(
@@ -780,12 +871,12 @@ def compare_checkpoints(args):
         eval_dataset = dataset
         print(f"   全量: {len(eval_dataset)} 样本")
     else:
-        val_size = int(len(dataset) * args.validate_sample_ratio)
-        train_size = len(dataset) - val_size
         from torch.utils.data import random_split
-        generator = torch.Generator().manual_seed(42)
+        train_size = int(0.8 * len(dataset))
+        val_size = len(dataset) - train_size
+        generator = torch.Generator().manual_seed(114514)
         _, eval_dataset = random_split(dataset, [train_size, val_size], generator=generator)
-        print(f"   验证集: {len(eval_dataset)} 样本")
+        print(f"   验证集: {len(eval_dataset)} 样本 (80/20划分, seed=114514, 与训练一致)")
 
     collate_fn = make_collate_fn((args.target_width, args.target_height))
     val_loader = DataLoader(eval_dataset, batch_size=args.batch_size,
@@ -815,10 +906,15 @@ def compare_checkpoints(args):
 
             gt_T_np = np.array(gt_T_to_camera).astype(np.float32)
 
-            rng_state = np.random.get_state()
+            _paw = None
+            if getattr(args, 'per_axis_weights', '') and args.per_axis_weights:
+                _paw = tuple(float(x) for x in args.per_axis_weights.split(','))
             init_T_np, _, _ = generate_single_perturbation_from_T(
                 gt_T_np, angle_range_deg=args.angle_range_deg,
-                trans_range=args.trans_range, rotation_only=rotation_only)
+                trans_range=args.trans_range, rotation_only=rotation_only,
+                distribution=getattr(args, 'perturb_distribution', 'uniform'),
+                per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                per_axis_weights=_paw)
 
             imgs_arr = np.array(imgs)
             pcs_np = np.array(pcs)[:, :, :3] if args.xyz_only > 0 else np.array(pcs)
@@ -1436,11 +1532,12 @@ def multi_eval_and_report(args):
     output_dir = args.output_dir or "logs/multi_eval_test_data"
     os.makedirs(output_dir, exist_ok=True)
 
+    angle_str = f"{args.angle_range_deg} deg" if args.angle_range_deg is not None else "auto (from checkpoint)"
     print("=" * 80)
     print("多模型泛化性能评估")
     print(f"  模型目录: {models_dir}")
     print(f"  数据集: {args.dataset_root}")
-    print(f"  扰动: {args.angle_range_deg} deg")
+    print(f"  扰动: {angle_str}")
     print(f"  输出: {output_dir}")
     print(f"  模型数: {len(MULTI_EVAL_MODELS)}")
     print("=" * 80)
@@ -1487,12 +1584,19 @@ def multi_eval_and_report(args):
                 "--output_dir", per_model_dir,
                 "--use_full_dataset",
                 "--max_batches", str(args.max_batches),
-                "--angle_range_deg", str(args.angle_range_deg),
-                "--trans_range", str(args.trans_range),
                 "--rotation_only", str(mcfg["rotation_only"]),
                 "--vis_interval", str(args.vis_interval),
                 "--batch_size", str(args.batch_size),
+                "--deformable", str(args.deformable),
+                "--bev_encoder", str(args.bev_encoder),
+                "--target_width", str(args.target_width),
+                "--target_height", str(args.target_height),
+                "--use_mlp_head", str(args.use_mlp_head),
             ]
+            if args.angle_range_deg is not None:
+                cmd += ["--angle_range_deg", str(args.angle_range_deg)]
+            if args.trans_range is not None:
+                cmd += ["--trans_range", str(args.trans_range)]
 
             proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
             if proc.returncode != 0:
@@ -1549,13 +1653,16 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None,
                        help="评估结果输出目录（默认: checkpoint目录下的 ckpt_xxx_eval/）。"
                             "跨数据集泛化测试时建议指定独立输出目录")
-    parser.add_argument("--angle_range_deg", type=float, default=20.0, help="扰动角度范围")
-    parser.add_argument("--trans_range", type=float, default=1.5, help="扰动平移范围")
+    parser.add_argument("--angle_range_deg", type=float, default=None,
+                       help="扰动角度范围（默认从checkpoint的eval_noise/train_noise读取，若无则20.0）")
+    parser.add_argument("--trans_range", type=float, default=None,
+                       help="扰动平移范围（默认从checkpoint的eval_noise/train_noise读取，若无则1.5）")
     parser.add_argument("--target_width", type=int, default=640, help="目标图像宽度")
     parser.add_argument("--target_height", type=int, default=360, help="目标图像高度")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-    parser.add_argument("--max_batches", type=int, default=5, help="最多评估的batch数（0表示全部）")
-    parser.add_argument("--validate_sample_ratio", type=float, default=0.1, help="验证集比例")
+    parser.add_argument("--max_batches", type=int, default=0, help="最多评估的batch数（0表示全部）")
+    parser.add_argument("--validate_sample_ratio", type=float, default=0.2,
+                       help="验证集比例（默认0.2，与训练时80/20划分一致）")
     parser.add_argument("--use_full_dataset", action='store_true', default=False,
                        help="使用全量数据集评估（跨数据集泛化测试时使用，忽略 validate_sample_ratio）")
     parser.add_argument("--deformable", type=int, default=0, help="是否使用 deformable attention")
@@ -1566,11 +1673,15 @@ def main():
     parser.add_argument("--vis_interval", type=int, default=1,
                        help="每隔N个样本保存一张可视化图（默认1=每帧都保存，"
                             "全量评估时建议设为50-100以减少IO）")
-    parser.add_argument("--use_inverse_transform", type=int, default=0, 
-                       help="是否对变换矩阵取逆后再使用 (1=是, 0=否) - 用于修复投影高度偏移")
-    parser.add_argument("--rotation_only", type=int, default=0,
+    parser.add_argument("--rotation_only", type=int, default=-1,
                        help="仅优化旋转 (1=仅旋转, 0=旋转+平移同时优化). "
-                            "设为-1时自动从checkpoint中读取")
+                            "设为-1时自动从checkpoint中读取（默认-1）")
+    parser.add_argument("--use_mlp_head", type=int, default=-1,
+                       help="回归头类型 (1=MLP, 0=Linear, -1=自动从checkpoint检测)")
+    parser.add_argument("--bev_pool_factor", type=int, default=0,
+                       help="BEV spatial avg-pool factor (0=disabled, 2=2x2 pool)")
+    parser.add_argument("--use_drcv", action='store_true', default=False,
+                       help="Use drcv sparse conv backend (env var handled before import)")
     
     args = parser.parse_args()
 

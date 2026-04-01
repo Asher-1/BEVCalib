@@ -351,6 +351,14 @@ while [[ $# -gt 0 ]]; do
             PRETRAIN_CKPT="$2"; shift 2 ;;
         --num_epochs)
             NUM_EPOCHS="$2"; shift 2 ;;
+        --use_geodesic_loss)
+            USE_GEODESIC_LOSS="$2"; shift 2 ;;
+        --use_mlp_head)
+            USE_MLP_HEAD="$2"; shift 2 ;;
+        --use_deformable)
+            USE_DEFORMABLE="$2"; shift 2 ;;
+        --bev_pool_factor)
+            BEV_POOL_FACTOR="$2"; shift 2 ;;
         --no-tb|--no-tensorboard)
             ENABLE_TB=0
             shift
@@ -413,7 +421,8 @@ while [[ $# -gt 0 ]]; do
             echo "可用选项: --ddp [N], --fg, --compile, --rotation_only, --enable_axis_loss, --weight_axis_rotation W,"
             echo "          --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
             echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
-            echo "          --rdzv_timeout SECONDS"
+            echo "          --rdzv_timeout SECONDS, --use_geodesic_loss 0/1, --use_mlp_head 0/1,"
+            echo "          --use_deformable 0/1, --bev_pool_factor N"
             exit 1
             ;;
     esac
@@ -864,6 +873,10 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
+    [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
+    [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
+    [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
+    [ -n "$BEV_POOL_FACTOR" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_pool_factor $BEV_POOL_FACTOR"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
@@ -952,18 +965,27 @@ else
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
+    [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
+    [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
+    [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
+    [ -n "$BEV_POOL_FACTOR" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_pool_factor $BEV_POOL_FACTOR"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
+
+    CLASSIC_ANGLE_0=${DDP_ANGLE:-10}
+    CLASSIC_TRANS_0=${DDP_TRANS:-0.5}
+    CLASSIC_ANGLE_1=${DDP_ANGLE:-5}
+    CLASSIC_TRANS_1=${DDP_TRANS:-0.3}
 
     TRAIN_CMD_0="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
         --cuda_device 0 \
-        --angle_range_deg 10 \
-        --trans_range 0.5 \
+        --angle_range_deg $CLASSIC_ANGLE_0 \
+        --trans_range $CLASSIC_TRANS_0 \
         --batch_size $BATCH_SIZE \
-        --log_suffix small_10deg_${VERSION} \
+        --log_suffix small_${CLASSIC_ANGLE_0}deg_${VERSION} \
         $USE_COMPILE \
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
@@ -975,10 +997,10 @@ else
         --dataset_root $DATASET_ROOT \
         --dataset_name $DATASET_NAME \
         --cuda_device 1 \
-        --angle_range_deg 5 \
-        --trans_range 0.3 \
+        --angle_range_deg $CLASSIC_ANGLE_1 \
+        --trans_range $CLASSIC_TRANS_1 \
         --batch_size $BATCH_SIZE \
-        --log_suffix small_5deg_${VERSION} \
+        --log_suffix small_${CLASSIC_ANGLE_1}deg_${VERSION} \
         $USE_COMPILE \
         $ROTATION_ONLY \
         $AXIS_LOSS_ARGS \
@@ -990,14 +1012,14 @@ else
         echo "[前台模式] 两个GPU训练并行执行, Ctrl+C 同时停止两个任务"
         echo ""
 
-        echo "[GPU 0] 小扰动训练 (10deg, 0.5m)..."
+        echo "[GPU 0] 训练 (${CLASSIC_ANGLE_0}deg, ${CLASSIC_TRANS_0}m)..."
         echo "  日志: $GPU0_LOG_DIR/train.log"
         eval $TRAIN_CMD_0 > /dev/null 2>&1 &
         PID1=$!
 
         sleep 2
 
-        echo "[GPU 1] 标准扰动训练 (5deg, 0.3m)..."
+        echo "[GPU 1] 训练 (${CLASSIC_ANGLE_1}deg, ${CLASSIC_TRANS_1}m)..."
         echo "  日志: $GPU1_LOG_DIR/train.log"
         eval $TRAIN_CMD_1 > /dev/null 2>&1 &
         PID2=$!
@@ -1024,7 +1046,7 @@ else
         echo "训练已完成 (exit=$EXIT_CODE)"
         echo "========================================"
     else
-        echo "[GPU 0] 小扰动训练 (10deg, 0.5m)..."
+        echo "[GPU 0] 训练 (${CLASSIC_ANGLE_0}deg, ${CLASSIC_TRANS_0}m)..."
         nohup bash -c "$TRAIN_CMD_0" > /dev/null 2>&1 &
         PID1=$!
         echo "  PID: $PID1"
@@ -1032,7 +1054,7 @@ else
 
         sleep 2
 
-        echo "[GPU 1] 标准扰动训练 (5deg, 0.3m)..."
+        echo "[GPU 1] 训练 (${CLASSIC_ANGLE_1}deg, ${CLASSIC_TRANS_1}m)..."
         nohup bash -c "$TRAIN_CMD_1" > /dev/null 2>&1 &
         PID2=$!
         echo "  PID: $PID2"
@@ -1044,8 +1066,8 @@ else
         echo "========================================"
         echo ""
         echo "训练进程PID:"
-        echo "  GPU 0 (小扰动 10deg): $PID1"
-        echo "  GPU 1 (标准扰动 5deg): $PID2"
+        echo "  GPU 0 (${CLASSIC_ANGLE_0}deg): $PID1"
+        echo "  GPU 1 (${CLASSIC_ANGLE_1}deg): $PID2"
         echo ""
         echo "日志:"
         echo "  tail -f $GPU0_LOG_DIR/train.log"

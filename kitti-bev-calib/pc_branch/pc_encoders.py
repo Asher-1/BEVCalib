@@ -1,10 +1,25 @@
+import os
 import torch
 import torch.nn as nn
-import spconv.pytorch as spconv
-from spconv.pytorch import functional as Fsp
 
-import torch.nn as nn
-import spconv.pytorch as spconv
+# Backend switch: set USE_DRCV_BACKEND=1 to use drcv.ops.spconv instead of spconv.pytorch
+USE_DRCV = os.environ.get("USE_DRCV_BACKEND", "0") == "1"
+
+if USE_DRCV:
+    import drcv.ops.spconv as spconv
+else:
+    import spconv.pytorch as spconv
+
+
+def _replace_feature(tensor, new_features):
+    """Cross-backend feature replacement on SparseConvTensor.
+    spconv v2 provides replace_feature(); drcv (spconv v1) uses direct assignment.
+    """
+    if hasattr(tensor, 'replace_feature'):
+        return tensor.replace_feature(new_features)
+    tensor.features = new_features
+    return tensor
+
 
 class SparseBasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1):
@@ -23,17 +38,18 @@ class SparseBasicBlock(nn.Module):
             self.bn2,
         )
 
-    def forward(self, x: spconv.SparseConvTensor):
+    def forward(self, x):
         residual = x
         out = self.bottle_neck(x)
-        out = out.replace_feature(out.features + residual.features)
-        out = out.replace_feature(self.relu(out.features))
+        out = _replace_feature(out, out.features + residual.features)
+        out = _replace_feature(out, self.relu(out.features))
         return out
 
+
 class SparseEncoder(nn.Module):
-    def __init__(self, sparse_shape, in_channels = 3, base_channels = 16, out_channels = 128, 
-                 layer_channels = [[16, 16, 32], [32, 32, 64], [64, 64, 128], [128, 128]],
-                 layer_paddings = [[0, 0, 1], [0, 0, 1], [0, 0, [1, 1, 0]], [0, 0]]
+    def __init__(self, sparse_shape, in_channels=3, base_channels=16, out_channels=128,
+                 layer_channels=[[16, 16, 32], [32, 32, 64], [64, 64, 128], [128, 128]],
+                 layer_paddings=[[0, 0, 1], [0, 0, 1], [0, 0, [1, 1, 0]], [0, 0]]
                  ):
         super(SparseEncoder, self).__init__()
         self.in_channels = in_channels
@@ -73,7 +89,7 @@ class SparseEncoder(nn.Module):
                     )
                 else:
                     block_list.append(
-                            SparseBasicBlock(out_channels, out_channels)
+                        SparseBasicBlock(out_channels, out_channels)
                     )
                 in_channels = out_channels
             self.conv_layers.append(block_list)
@@ -108,8 +124,7 @@ class SparseEncoder(nn.Module):
 
         x = self.conv_out(x)
 
-        x = x.dense(False) # B, X, Y, Z, C
+        x = x.dense(False)  # B, X, Y, Z, C
         B, X, Y, Z, C = x.shape
         x = x.view(B, X, Y, Z * C).permute(0, 3, 1, 2).contiguous()
         return x
-        

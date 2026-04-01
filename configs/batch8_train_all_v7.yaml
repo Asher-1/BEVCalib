@@ -1,0 +1,145 @@
+# BEVCalib ALL V7 训练配置
+#
+# 基于 V6 泛化评估结论:
+#   - ALL v6-linear-baseline: 0.494° (新历史最佳, 无aug, StepLR)
+#   - V4-z5-no-tail: 0.633° (旧冠军, 有aug, axis=3,1.5,1)
+#   - Linear + quaternion 是最优组合
+#
+# V7在ALL上的策略: 在0.494°基线上叠加aug/CosineWR/pitch_weight
+# 选择B26A快速验证中效果最好的3-4个配置上ALL
+#
+# 实验设计 (4组, seed=42, 全部 Linear+quaternion):
+#   1. v7_baseline:      无aug + StepLR + 1,1,1    (V6最佳复现)
+#   2. v7_aug:           有aug + StepLR + 1,1,1    (验证aug在ALL上增益)
+#   3. v7_aug_cosine:    有aug + CosineWR + 1,1,1  (aug+LR叠加)
+#   4. v7_pitch_cosine:  有aug + CosineWR + 1,2,1  (全配置最优预期)
+#
+# 用法 (本地8卡):
+#   bash batch_train.sh configs/batch8_train_all_v7.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # ALL V7: Linear+quaternion, 4组消融
+  # =========================================================================
+
+  # 1. V6最佳复现 — 确认0.494°可复现
+  - name: "v7_baseline"
+    description: "ALL V7: Linear+quat+StepLR+无aug (复现V6最佳0.494°)"
+    dataset: "all_training_data"
+    version: "v7_baseline"
+    params:
+      lr_schedule: step
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_color_jitter: 0.0
+
+  # 2. 加aug — 验证aug在ALL 78K帧上是否有增益
+  - name: "v7_aug"
+    description: "ALL V7: Linear+quat+StepLR+有aug (验证aug增益)"
+    dataset: "all_training_data"
+    version: "v7_aug"
+    params:
+      lr_schedule: step
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # 3. aug + CosineWR — 两个维度叠加
+  - name: "v7_aug_cosine"
+    description: "ALL V7: Linear+quat+CosineWR+有aug (aug+LR叠加)"
+    dataset: "all_training_data"
+    version: "v7_aug_cosine"
+    params:
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,1.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # 4. 全配置最优 — aug + CosineWR + Pitch加权
+  - name: "v7_pitch_cosine"
+    description: "ALL V7: Linear+quat+CosineWR+aug+pitch_wt=1,2,1 (预期最优)"
+    dataset: "all_training_data"
+    version: "v7_pitch_cosine"
+    params:
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 5
+      backbone_lr_scale: 0.1
+      axis_weights: "1.0,2.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+# ============================================================================
+# V7 ALL 消融矩阵 (4组)
+# ============================================================================
+#
+#   实验              | LR       | Aug | Axis Weights | 预期泛化
+#   ------------------+----------+-----+--------------+---------
+#   1 v7_baseline     | StepLR   | 无  | 1,1,1        | ~0.494° (复现)
+#   2 v7_aug          | StepLR   | 有  | 1,1,1        | <0.47°
+#   3 v7_aug_cosine   | CosineWR | 有  | 1,1,1        | <0.45°
+#   4 v7_pitch_cosine | CosineWR | 有  | 1,2,1        | <0.42°
+#
+# 关键对比:
+#   2 vs 1: aug 在 ALL 78K帧上的增益
+#   3 vs 2: CosineWR 额外增益
+#   4 vs 3: Pitch加权额外增益
+#   4 vs V4-z5-no-tail(0.633°): V7目标超越旧冠军34%+
