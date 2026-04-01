@@ -304,6 +304,14 @@ while [[ $# -gt 0 ]]; do
             PRETRAIN_CKPT="$2"; shift 2 ;;
         --num_epochs)
             NUM_EPOCHS_OVERRIDE="$2"; shift 2 ;;
+        --use_geodesic_loss)
+            USE_GEODESIC_LOSS="$2"; shift 2 ;;
+        --use_mlp_head)
+            USE_MLP_HEAD="$2"; shift 2 ;;
+        --use_deformable)
+            USE_DEFORMABLE="$2"; shift 2 ;;
+        --bev_pool_factor)
+            BEV_POOL_FACTOR="$2"; shift 2 ;;
         *)
             echo "❌ Unknown option: $1"
             exit 1
@@ -517,7 +525,7 @@ _print_row "GPU:"           "${GPU_NAME} (${GPU_MEM}MB) x${AVAIL_GPUS}"
 _print_row "PyTorch:"       "$PYTORCH_VER"
 _print_row "CUDA:"          "$CUDA_VER"
 _print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
-_print_row "BEV Z-Step:"    "${BEV_ZBOUND_STEP:-2.0}"
+_print_row "BEV Z-Step:"    "${BEV_ZBOUND_STEP:-4.0}"
 if [ "$NNODES" -gt 1 ]; then
     _section_end
     _maybe_sep
@@ -632,6 +640,11 @@ OPTIM_FLAGS=""
 [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
 [ -n "$SEED" ] && OPTIM_FLAGS="$OPTIM_FLAGS --seed $SEED"
 [ -n "$PRETRAIN_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --pretrain_ckpt $PRETRAIN_CKPT"
+[ -n "$USE_GEODESIC_LOSS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_geodesic_loss $USE_GEODESIC_LOSS"
+[ -n "$USE_MLP_HEAD" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_mlp_head $USE_MLP_HEAD"
+
+DEFORMABLE_VAL=${USE_DEFORMABLE:-0}
+[ -n "$BEV_POOL_FACTOR" ] && OPTIM_FLAGS="$OPTIM_FLAGS --bev_pool_factor $BEV_POOL_FACTOR"
 
 SCRATCH_EPOCHS=${NUM_EPOCHS_OVERRIDE:-400}
 FINETUNE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-50}
@@ -701,7 +714,7 @@ case $MODE in
             --save_ckpt_per_epoches 40 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
-            --deformable 0 \
+            --deformable $DEFORMABLE_VAL \
             --bev_encoder 1 \
             --xyz_only 1 \
             --scheduler 1 \
@@ -745,7 +758,7 @@ case $MODE in
             --lr $LR_FINETUNE \
             --scheduler 1 \
             --step_size 20 \
-            --deformable 0 \
+            --deformable $DEFORMABLE_VAL \
             --bev_encoder 1 \
             --xyz_only 1 \
             --use_custom_dataset 1 \
@@ -783,7 +796,7 @@ case $MODE in
             --save_ckpt_per_epoches 10 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
-            --deformable 0 \
+            --deformable $DEFORMABLE_VAL \
             --bev_encoder 1 \
             --xyz_only 1 \
             --scheduler 1 \

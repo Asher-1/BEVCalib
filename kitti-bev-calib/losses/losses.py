@@ -164,6 +164,33 @@ class AdaptiveAxisRotationLoss(nn.Module):
         return loss, per_axis
 
 
+class GeodesicRotationLoss(nn.Module):
+    """SO(3) geodesic distance loss: arccos((tr(R_pred^T @ R_gt) - 1) / 2).
+
+    Unlike quaternion distance, this operates directly on rotation matrices
+    and provides well-behaved gradients even at sub-degree errors.
+    """
+
+    def __init__(self, eps=1e-7):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred_rotation, gt_rotation):
+        """
+        Args:
+            pred_rotation: (B, 3, 3)
+            gt_rotation:   (B, 3, 3)
+        Returns:
+            loss: scalar (mean geodesic angle in radians)
+        """
+        R_diff = torch.bmm(pred_rotation.transpose(1, 2), gt_rotation)
+        tr = R_diff[:, 0, 0] + R_diff[:, 1, 1] + R_diff[:, 2, 2]
+        cos_angle = (tr - 1.0) / 2.0
+        cos_angle = cos_angle.clamp(-1.0 + self.eps, 1.0 - self.eps)
+        angle = torch.acos(cos_angle)
+        return angle.mean()
+
+
 class PC_reproj_loss(nn.Module):
     def __init__(self):
         super(PC_reproj_loss, self).__init__()
@@ -206,10 +233,12 @@ class realworld_loss(nn.Module):
     def __init__(self, weight_translation = 1.0, weight_quat_norm = 0.5, weight_rotation = 0.5, weight_PCreproj = 0.5, 
                  weight_bev_reproj = 0.5, weight_feat_align = 1.0, l1 = False, rotation_only = False,
                  enable_axis_loss = False, weight_axis_rotation = 0.3,
-                 axis_weights = (3.0, 1.5, 1.0)):
+                 axis_weights = (3.0, 1.5, 1.0),
+                 use_geodesic_loss = False):
         super(realworld_loss, self).__init__()
         self.rotation_only = rotation_only
         self.enable_axis_loss = enable_axis_loss
+        self.use_geodesic_loss = use_geodesic_loss
         if rotation_only:
             self.weight_translation = 0.0
             self.weight_rotation = weight_rotation * 2.0
@@ -227,6 +256,7 @@ class realworld_loss(nn.Module):
             self.translation_loss = translation_loss(l1 = True)
             self.real_translation_loss = translation_loss(l1 = False)
         self.rotation_loss = rotation_loss()
+        self.geodesic_loss = GeodesicRotationLoss()
         self.quat_norm_loss = quat_norm_loss()
         self.PC_reproj_loss = PC_reproj_loss()
         if enable_axis_loss:
@@ -282,7 +312,12 @@ class realworld_loss(nn.Module):
                 pcs, gt_T_to_camera, gt_translation, pred_rotation, mask)
 
         with torch.cuda.amp.autocast(enabled=False):
-            rotation_loss = self.rotation_loss(pred_rotation.float(), gt_rotation.float())
+            quat_rotation_loss = self.rotation_loss(pred_rotation.float(), gt_rotation.float())
+            if self.use_geodesic_loss:
+                geo_loss = self.geodesic_loss(pred_rotation.float(), gt_rotation.float())
+                rotation_loss = geo_loss
+            else:
+                rotation_loss = quat_rotation_loss
 
         loss = self.weight_translation * translation_loss \
                 + self.weight_rotation * rotation_loss \
@@ -306,10 +341,12 @@ class realworld_loss(nn.Module):
         ret = {
             "total_loss" : loss,
             "translation_loss" : real_trans_loss, # l2, m
-            "rotation_loss" : rotation_loss / torch.pi * 180.0, # degree
+            "rotation_loss" : quat_rotation_loss / torch.pi * 180.0, # degree (always quat-based for display)
             "quat_norm_loss" : quat_norm_loss, 
             "PC_reproj_loss" : PC_reproj_loss,
         }
+        if self.use_geodesic_loss:
+            ret["geodesic_loss"] = geo_loss / torch.pi * 180.0
         if self.enable_axis_loss:
             ret["axis_rotation_loss"] = axis_loss_val / torch.pi * 180.0
             for k, v in axis_details.items():

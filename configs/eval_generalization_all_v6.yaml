@@ -1,0 +1,126 @@
+# BEVCalib ALL V6 泛化性能评估
+# 8个V6模型 (MLP×5 + Linear×3) 在ALL数据集(78409帧,8序列)上训练
+#
+# 训练时最佳 val_rot:
+#   MLP + quaternion:  v6_baseline          val=0.0970°
+#   MLP + geodesic:    v6_geodesic          val=0.1169°
+#   MLP + geo + drcv:  v6_geodesic_drcv     val=0.1036°
+#   MLP + geo + bs4:   v6_hires_bs4         val=0.0971°
+#   MLP + geo + pool2: v6_hires_pool2x      val=0.1220°
+#   Linear + quat:     v6_linear_baseline   val=0.1659°
+#   Linear + geodesic: v6_linear_geodesic   val=0.1529°
+#   Linear + geo+pool: v6_linear_hires      val=0.1880°
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_all_v6.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v6"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v6"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== MLP 回归头 ====================
+
+  - label: "all-v6-mlp-baseline"
+    dir_name: "model_small_5deg_v6_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-mlp-baseline"
+    mode_desc: "ALL V6 MLP头 + quaternion loss (val=0.0970°)"
+
+  - label: "all-v6-mlp-geodesic"
+    dir_name: "model_small_5deg_v6_geodesic"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-mlp-geodesic"
+    mode_desc: "ALL V6 MLP头 + geodesic loss (val=0.1169°)"
+
+  - label: "all-v6-mlp-geodesic-drcv"
+    dir_name: "model_small_5deg_v6_geodesic_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 1
+    use_drcv: true
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-mlp-geodesic-drcv"
+    mode_desc: "ALL V6 MLP头 + geodesic + drcv后端 (val=0.1036°)"
+
+  - label: "all-v6-mlp-hires-bs4"
+    dir_name: "model_small_5deg_v6_hires_bs4"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-mlp-hires-bs4"
+    mode_desc: "ALL V6 MLP头 + geodesic + batch_size=4 (val=0.0971°)"
+
+  - label: "all-v6-mlp-hires-pool2x"
+    dir_name: "model_small_5deg_v6_hires_pool2x"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 1
+    bev_pool_factor: 2
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-mlp-hires-pool2x"
+    mode_desc: "ALL V6 MLP头 + geodesic + BEV pool 2x (val=0.1220°)"
+
+  # ==================== Linear 回归头 ====================
+
+  - label: "all-v6-linear-baseline"
+    dir_name: "model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-linear-baseline"
+    mode_desc: "ALL V6 Linear头 + quaternion loss (val=0.1659°)"
+
+  - label: "all-v6-linear-geodesic"
+    dir_name: "model_small_5deg_v6_linear_geodesic"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-linear-geodesic"
+    mode_desc: "ALL V6 Linear头 + geodesic loss (val=0.1529°)"
+
+  - label: "all-v6-linear-hires"
+    dir_name: "model_small_5deg_v6_linear_hires"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    bev_pool_factor: 2
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-linear-hires"
+    mode_desc: "ALL V6 Linear头 + geodesic + BEV pool 2x (val=0.1880°)"

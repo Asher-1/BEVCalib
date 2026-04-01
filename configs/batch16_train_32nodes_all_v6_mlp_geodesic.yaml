@@ -1,0 +1,225 @@
+# BEVCalib all_training_data (去畸变) — v6 MLP开关 + Geodesic Loss 全量数据实验
+#
+# ===== 设计思路 =====
+#
+#   基于 B26A v6 消融实验, 在全量数据上验证 MLP vs Linear 回归头的泛化影响
+#
+#   核心改进:
+#     1. 回归头: 单层Linear vs 3层MLP (--use_mlp_head 0/1)
+#     2. Loss:  四元数距离 vs SO(3) geodesic distance (--use_geodesic_loss 0/1)
+#     3. BEV分辨率: X=[0,100] Y=[-50,50] step=1m (100x100 grid, 1m/voxel)
+#
+#   lucidrains deformable attention: rel_pos_bias is O(N*K) memory — OOM at N=10000 (100×100 BEV).
+#   Hires experiments use bev_pool_factor: 2 (pool2x) instead of use_deformable.
+#
+#   数据集: all_training_data_v2 (去畸变), 32节点×8GPU, batch_size=16
+#   LR策略: 全部 StepLR (大数据集最稳定)
+#
+#   7 个实验 (MLP/Linear × quat/geodesic/hires + drcv后端验证):
+#
+#   组A — MLP回归头:
+#     1. v6_baseline:  MLP+quat loss+原BEV
+#     2. v6_geodesic:  MLP+geodesic loss+原BEV
+#     3. v6_hires:     MLP+geodesic+BEV高分辨率
+#
+#   组B — Linear回归头 (对照):
+#     4. v6_linear_baseline:  Linear+quat loss+原BEV
+#     5. v6_linear_geodesic:  Linear+geodesic loss+原BEV
+#     6. v6_linear_hires:     Linear+geodesic+BEV高分辨率
+#
+#   组C — drcv后端验证:
+#     7. v6_geodesic_drcv:  MLP+geodesic+drcv后端 (对比A2)
+#
+# 用法:
+#   bash batch_train.sh configs/batch16_train_32nodes_all_v6_mlp_geodesic.yaml
+#   bash batch_train.sh --dry-run configs/batch16_train_32nodes_all_v6_mlp_geodesic.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数 (StepLR + 去畸变全量数据)
+# ============================================================================
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    learning_rate: 1e-4
+
+    # 32 节点 DDP
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: 6007
+    node_ip: "10.16.9.60"
+
+# ============================================================================
+# 实验组 (7 个实验)
+# ============================================================================
+experiments:
+  # =========================================================================
+  # 组A: MLP回归头 (use_mlp_head=1)
+  # =========================================================================
+
+  # ===== A1: MLP+quat loss+原BEV =====
+  - name: "v6_baseline"
+    description: "ALL v6对照: MLP头+quat loss+BEV200m"
+    dataset: "all"
+    version: "v6_baseline"
+    params:
+      use_mlp_head: 1
+
+  # ===== A2: MLP+geodesic loss+原BEV =====
+  - name: "v6_geodesic"
+    description: "ALL v6消融: MLP头+geodesic loss+BEV200m"
+    dataset: "all"
+    version: "v6_geodesic"
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+
+  # ===== A3: MLP+geodesic+hires+pool2x (replaces deformable; see header OOM note) =====
+  - name: "v6_hires_pool2x"
+    description: "ALL hires: MLP+geodesic+标准transformer+2x BEV spatial pooling (pool2x, not deformable)"
+    dataset: "all"
+    version: "v6_hires_pool2x"
+    env:
+      BEV_XBOUND_MIN: 0
+      BEV_XBOUND_MAX: 100
+      BEV_YBOUND_MIN: -50
+      BEV_YBOUND_MAX: 50
+      BEV_XY_STEP: 1.0
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+      bev_pool_factor: 2
+
+  # =========================================================================
+  # 组B: Linear回归头 (use_mlp_head=0, 对照)
+  # =========================================================================
+
+  # ===== B1: Linear+quat loss+原BEV =====
+  - name: "v6_linear_baseline"
+    description: "ALL v6对照: Linear头+quat loss+BEV200m (≈v5架构)"
+    dataset: "all"
+    version: "v6_linear_baseline"
+    params:
+      use_mlp_head: 0
+
+  # ===== B2: Linear+geodesic loss+原BEV =====
+  - name: "v6_linear_geodesic"
+    description: "ALL v6消融: Linear头+geodesic loss+BEV200m"
+    dataset: "all"
+    version: "v6_linear_geodesic"
+    params:
+      use_mlp_head: 0
+      use_geodesic_loss: 1
+
+  # ===== B3: Linear+geodesic+hires+pool2x =====
+  - name: "v6_linear_hires"
+    description: "ALL hires: Linear+geodesic+标准transformer+2x BEV spatial pooling (pool2x)"
+    dataset: "all"
+    version: "v6_linear_hires"
+    env:
+      BEV_XBOUND_MIN: 0
+      BEV_XBOUND_MAX: 100
+      BEV_YBOUND_MIN: -50
+      BEV_YBOUND_MAX: 50
+      BEV_XY_STEP: 1.0
+    params:
+      use_mlp_head: 0
+      use_geodesic_loss: 1
+      bev_pool_factor: 2
+
+  # =========================================================================
+  # 组C: drcv 后端验证 (USE_DRCV_BACKEND=1)
+  # =========================================================================
+  # 以 A2 (MLP+geodesic) 为基准，切换点云稀疏卷积后端为 drcv，
+  # 验证 drcv 替换 spconv 后训练精度是否一致。
+  # C1 与 A2 唯一区别: USE_DRCV_BACKEND=1
+  # 预期: 收敛曲线和最终精度与 A2 无显著差异
+
+  # ===== C1: MLP+geodesic+drcv后端 =====
+  - name: "v6_geodesic_drcv"
+    description: "ALL v6验证: MLP头+geodesic loss+drcv后端 (对比A2)"
+    dataset: "all"
+    version: "v6_geodesic_drcv"
+    env:
+      USE_DRCV_BACKEND: 1
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+
+# ============================================================================
+# 消融矩阵 (7组, 全部 StepLR, seed=42)
+# ============================================================================
+#
+#   实验               | Head    | Loss     | BEV       | Backend | 目的
+#   -------------------+---------+----------+-----------+---------+---------------------------
+#   A1 baseline        | MLP     | quat     | 200m/2m   | spconv  | MLP基线
+#   A2 geodesic        | MLP     | geodesic | 200m/2m   | spconv  | +geodesic loss
+#   A3 hires           | MLP     | geodesic | 100m/1m   | spconv  | +BEV高分辨率
+#   B1 lin_baseline    | Linear  | quat     | 200m/2m   | spconv  | Linear基线 (≈v5)
+#   B2 lin_geodesic    | Linear  | geodesic | 200m/2m   | spconv  | Linear+geodesic
+#   B3 lin_hires       | Linear  | geodesic | 100m/1m   | spconv  | Linear+高分辨率
+#   C1 geodesic_drcv   | MLP     | geodesic | 200m/2m   | drcv    | drcv后端验证
+#
+# 关键对比:
+#   A1 vs B1: 大数据集上 MLP vs Linear 的影响
+#   A2 vs B2: geodesic loss 在两种 head 下的效果
+#   A3 vs B3: BEV高分辨率 在两种 head 下的效果
+#   A1 vs A2 vs A3: MLP下各改进的递进效果
+#   B1 vs B2 vs B3: Linear下各改进的递进效果
+#   A2 vs C1: spconv vs drcv 后端对训练精度的影响
+#
+# ============================================================================
+# 使用说明
+# ============================================================================
+#
+# 1. 确保去畸变数据集已准备:
+#    数据路径: /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_v2
+#
+# 2. SLURM集群（推荐）:
+#    sbatch --nodes=32 configs/run_batch_train.slurm
+#    nnodes/node_rank/master_addr 自动从环境变量检测
+#
+# 3. 评估:
+#    /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#        --config configs/eval_generalization_all_v6.yaml

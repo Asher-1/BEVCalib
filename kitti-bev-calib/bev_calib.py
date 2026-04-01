@@ -94,9 +94,14 @@ class BEVCalib(nn.Module):
                  axis_weights = (3.0, 1.5, 1.0),
                  drop_path_rate = 0.1,
                  head_dropout = 0.1,
+                 use_geodesic_loss = False,
+                 use_mlp_head = True,
+                 bev_pool_factor = 0,
                 ):
         super(BEVCalib, self).__init__()
+        self.use_mlp_head = use_mlp_head
         self.rotation_only = rotation_only
+        self.bev_pool_factor = bev_pool_factor
         self.img_branch = Cam2BEV(img_shape=img_shape)
         self.pc_branch = Lidar2BEV()
         self.bev_encoder_use = bev_encoder
@@ -132,16 +137,40 @@ class BEVCalib(nn.Module):
             num_layers = num_layers * 4
         )
         self.head_drop = nn.Dropout(head_dropout)
-        if not self.rotation_only:
-            self.translation_pred = nn.Linear(self.embed_dim, 3)
-        self.rotation_pred = nn.Linear(self.embed_dim, 4)
+        if self.use_mlp_head:
+            if not self.rotation_only:
+                self.translation_pred = self._build_regression_head(
+                    self.embed_dim, 3, head_dropout)
+            self.rotation_pred = self._build_regression_head(
+                self.embed_dim, 4, head_dropout)
+        else:
+            if not self.rotation_only:
+                self.translation_pred = nn.Linear(self.embed_dim, 3)
+            self.rotation_pred = nn.Linear(self.embed_dim, 4)
         self.loss_fn = realworld_loss(
             rotation_only=rotation_only,
             enable_axis_loss=enable_axis_loss,
             weight_axis_rotation=weight_axis_rotation,
             axis_weights=axis_weights,
+            use_geodesic_loss=use_geodesic_loss,
         )
     
+    @staticmethod
+    def _build_regression_head(in_dim, out_dim, dropout=0.1):
+        """Multi-layer MLP regression head with residual-style bottleneck."""
+        mid_dim = in_dim // 2
+        return nn.Sequential(
+            nn.Linear(in_dim, mid_dim),
+            nn.LayerNorm(mid_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mid_dim, mid_dim),
+            nn.LayerNorm(mid_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mid_dim, out_dim),
+        )
+
     def make_deformable_transformer(self, num_layers, drop_path_rate=0.1):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
         layers = []
@@ -232,6 +261,12 @@ class BEVCalib(nn.Module):
             x = x.mean(dim = 1) # B, C
         else:
             B, C, H, W = x.shape
+            if self.bev_pool_factor > 1:
+                pf = self.bev_pool_factor
+                x = nn.functional.avg_pool2d(x, pf)
+                cam_bev_mask = nn.functional.max_pool2d(
+                    cam_bev_mask.reshape(B, 1, H, W).float(), pf).squeeze(1)
+                _, _, H, W = x.shape
             x = x.permute(0, 2, 3, 1).reshape(B, H * W, C) # B, H * W, C
             bev_mask = cam_bev_mask.reshape(B, H * W).bool()
             max_valid_cnt = int(bev_mask.sum(dim=1).max().item()) # int, max number of valid points in a batch

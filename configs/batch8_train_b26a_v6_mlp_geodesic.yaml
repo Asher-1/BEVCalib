@@ -1,0 +1,196 @@
+# BEVCalib B26A v6 消融实验: MLP回归头开关 + Geodesic Loss + BEV高分辨率
+#
+# 核心改进:
+#   1. 回归头: 单层Linear vs 3层MLP (--use_mlp_head 0/1)
+#   2. Loss:  四元数距离 vs SO(3) geodesic distance (--use_geodesic_loss 0/1)
+#   3. BEV分辨率: X=[0,100] Y=[-50,50] step=1m (100x100 grid, 1m/voxel)
+#
+# 实验设计 (6组消融, 全部 StepLR, 无aug):
+#
+#   组A — MLP回归头 (use_mlp_head=1):
+#     1. v6_baseline:      MLP+quat loss+原BEV
+#     2. v6_geodesic:      MLP+geodesic loss+原BEV
+#     3. v6_hires:         MLP+geodesic+BEV高分辨率
+#
+#   组B — Linear回归头 (use_mlp_head=0, 对照):
+#     4. v6_linear_baseline: Linear+quat loss+原BEV
+#     5. v6_linear_geodesic: Linear+geodesic loss+原BEV
+#     6. v6_linear_hires:    Linear+geodesic+BEV高分辨率
+#
+# 数据集: B26A (去畸变), 400 epochs, 无数据增强
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_v6_mlp_geodesic.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_b26a_v6_mlp_geodesic.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: null
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # 组A: MLP回归头 (use_mlp_head=1)
+  # =========================================================================
+
+  # ===== A1: MLP+quat loss+原BEV =====
+  - name: "v6_baseline"
+    description: "B26A v6对照: MLP头+quat loss+BEV200m"
+    dataset: "B26A"
+    version: "v6_baseline"
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 0
+
+  # ===== A2: MLP+geodesic loss+原BEV =====
+  - name: "v6_geodesic"
+    description: "B26A v6消融: MLP头+geodesic loss+BEV200m"
+    dataset: "B26A"
+    version: "v6_geodesic"
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+
+  # =========================================================================
+  # 组A3-A4: MLP+geodesic+BEV高分辨率 — 两种方案对比
+  # =========================================================================
+  # hires BEV 100x100 有效token接近10000, 标准self-attention O(N^2)在batch=8时
+  # 超出A30 24GB显存。
+  # 注: lucidrains deformable attention 的 rel_pos_bias 对 N=10000 同样OOM,
+  #     需要换用 DETR 风格 multi-scale deformable attention 才能用。
+  # 当前可行方案:
+  #   A3: spatial pooling 2x (100x100→50x50=2500 tokens, 标准transformer, batch=8)
+  #   A4: 标准transformer + batch=2 (保留全分辨率100x100, 吞吐降低)
+
+  # ===== A3: spatial pooling 2x =====
+  - name: "v6_hires_pool2x"
+    description: "B26A hires: MLP+geodesic+标准transformer+2x spatial pooling"
+    dataset: "B26A"
+    version: "v6_hires_pool2x"
+    env:
+      BEV_XBOUND_MIN: 0
+      BEV_XBOUND_MAX: 100
+      BEV_YBOUND_MIN: -50
+      BEV_YBOUND_MAX: 50
+      BEV_XY_STEP: 1.0
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+      bev_pool_factor: 2
+
+  # ===== A4: 标准transformer + batch=4 =====
+  - name: "v6_hires_bs4"
+    description: "B26A hires: MLP+geodesic+标准transformer+batch=4"
+    dataset: "B26A"
+    version: "v6_hires_bs4"
+    env:
+      BEV_XBOUND_MIN: 0
+      BEV_XBOUND_MAX: 100
+      BEV_YBOUND_MIN: -50
+      BEV_YBOUND_MAX: 50
+      BEV_XY_STEP: 1.0
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+      batch_size: 4
+
+  # =========================================================================
+  # 组B: Linear回归头对照 (use_mlp_head=0)
+  # =========================================================================
+
+  # ===== B3: Linear+geodesic+hires+pool2x =====
+  - name: "v6_linear_hires"
+    description: "B26A hires: Linear+geodesic+pool2x"
+    dataset: "B26A"
+    version: "v6_linear_hires"
+    env:
+      BEV_XBOUND_MIN: 0
+      BEV_XBOUND_MAX: 100
+      BEV_YBOUND_MIN: -50
+      BEV_YBOUND_MAX: 50
+      BEV_XY_STEP: 1.0
+    params:
+      use_mlp_head: 0
+      use_geodesic_loss: 1
+      bev_pool_factor: 2
+
+  # =========================================================================
+  # 组C: drcv 后端验证 (USE_DRCV_BACKEND=1)
+  # =========================================================================
+  - name: "v6_geodesic_drcv"
+    description: "B26A v6验证: MLP头+geodesic loss+drcv后端 (对比A2)"
+    dataset: "B26A"
+    version: "v6_geodesic_drcv"
+    env:
+      USE_DRCV_BACKEND: 1
+    params:
+      use_mlp_head: 1
+      use_geodesic_loss: 1
+
+# ============================================================================
+# 消融矩阵 (7组, 全部 StepLR, seed=42, 无aug)
+# ============================================================================
+#
+#   实验               | Head    | Loss     | BEV       | Backend | 目的
+#   -------------------+---------+----------+-----------+---------+----------------------------
+#   A1 baseline        | MLP     | quat     | 200m/2m   | spconv  | MLP基线
+#   A2 geodesic        | MLP     | geodesic | 200m/2m   | spconv  | +geodesic loss
+#   A3 hires           | MLP     | geodesic | 100m/1m   | spconv  | +BEV高分辨率
+#   B1 lin_base        | Linear  | quat     | 200m/2m   | spconv  | Linear基线 (≈v5)
+#   B2 lin_geo         | Linear  | geodesic | 200m/2m   | spconv  | Linear+geodesic
+#   B3 lin_hires       | Linear  | geodesic | 100m/1m   | spconv  | Linear+高分辨率
+#   C1 geodesic_drcv   | MLP     | geodesic | 200m/2m   | drcv    | drcv后端验证
+#
+# 关键对比:
+#   A1 vs B1: MLP vs Linear 在 quat loss 下的对比
+#   A2 vs B2: MLP vs Linear 在 geodesic loss 下的对比
+#   A3 vs B3: MLP vs Linear 在高分辨率BEV下的对比
+#   A1 vs A2: MLP下 geodesic vs quat loss
+#   B1 vs B2: Linear下 geodesic vs quat loss
+#   A2 vs C1: spconv vs drcv 后端对训练精度的影响

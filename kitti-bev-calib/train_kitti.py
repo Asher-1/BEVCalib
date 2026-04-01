@@ -264,10 +264,16 @@ def parse_args():
                         help="分轴旋转损失权重 (默认: 0.3)")
     parser.add_argument("--axis_weights", type=str, default="3.0,1.5,1.0",
                         help="Roll,Pitch,Yaw weights for axis loss (default: 3.0,1.5,1.0)")
+    parser.add_argument("--use_geodesic_loss", type=int, default=0,
+                        help="Use SO(3) geodesic loss instead of quaternion distance (1=enable)")
+    parser.add_argument("--use_mlp_head", type=int, default=1,
+                        help="Use 3-layer MLP regression head (1=MLP, 0=single Linear)")
     parser.add_argument("--drop_path_rate", type=float, default=0.1,
                         help="Stochastic depth rate for transformer layers")
     parser.add_argument("--head_dropout", type=float, default=0.1,
                         help="Dropout rate before prediction heads")
+    parser.add_argument("--bev_pool_factor", type=int, default=0,
+                        help="Spatial avg-pool factor before transformer (0=disabled, 2=2x2 pool)")
     parser.add_argument("--lr_schedule", type=str, default="step",
                         choices=["step", "cosine_warm_restarts"],
                         help="LR scheduler type")
@@ -594,6 +600,8 @@ def main():
         tprint(f"优化模式: {'仅旋转 (rotation only)' if rotation_only else '旋转+平移 (translation+rotation)'}")
     
     enable_axis_loss = args.enable_axis_loss > 0
+    use_geodesic_loss = args.use_geodesic_loss > 0
+    use_mlp_head = args.use_mlp_head > 0
     axis_weights_tuple = tuple(float(x) for x in args.axis_weights.split(','))
     with capture_prints(is_main):
         model = BEVCalib(
@@ -606,6 +614,9 @@ def main():
             axis_weights=axis_weights_tuple,
             drop_path_rate=args.drop_path_rate,
             head_dropout=args.head_dropout,
+            use_geodesic_loss=use_geodesic_loss,
+            use_mlp_head=use_mlp_head,
+            bev_pool_factor=args.bev_pool_factor,
         ).to(device)
 
     if args.pretrain_ckpt is not None:
@@ -720,14 +731,19 @@ def main():
     
     if is_main:
         tprint("=" * 80)
+        tprint(f"Regression Head: {'MLP (3-layer)' if use_mlp_head else 'Linear (single layer)'}")
         tprint("Loss Calculation Formula:")
-        formula = "  total_loss = w_rot * rotation_loss(radians) + w_pc * PC_reproj_loss + w_quat * quat_norm_loss"
+        rot_label = "geodesic_loss(radians)" if use_geodesic_loss else "rotation_loss(radians)"
+        formula = f"  total_loss = w_rot * {rot_label} + w_pc * PC_reproj_loss + w_quat * quat_norm_loss"
         if enable_axis_loss:
             formula += f" + {args.weight_axis_rotation} * axis_rotation_loss"
         tprint(formula)
         if enable_axis_loss:
             tprint(f"  Axis weights (R/P/Y): {args.axis_weights}")
-        tprint("  Default weights rotation_only: w_rot=1.0, w_pc=1.0, w_quat=0.5")
+        if rotation_only:
+            tprint("  Default weights (rotation_only): w_rot=1.0, w_pc=1.0, w_trans=0.0, w_quat=0.5")
+        else:
+            tprint("  Default weights (full-pose): w_rot=0.5, w_pc=0.5, w_trans=1.0, w_quat=0.5")
         tprint("")
         tprint("Log Terminology:")
         tprint("  • rotation_loss: displayed in degrees (°) for readability, but total_loss uses radians")
@@ -913,6 +929,8 @@ def main():
                     unit_str = " (weighted sum)"
                 elif key == "rotation_loss":
                     unit_str = "° (for display; total_loss uses radians)"
+                elif key == "geodesic_loss":
+                    unit_str = "° (geodesic; drives training)"
                 elif key == "PC_reproj_loss":
                     unit_str = " (point cloud reprojection)"
                 elif key == "quat_norm_loss":
@@ -1259,6 +1277,8 @@ def main():
                     unit_str = " (weighted sum)"
                 elif key == "rotation_loss":
                     unit_str = "° (for display; total_loss uses radians)"
+                elif key == "geodesic_loss":
+                    unit_str = "° (geodesic; drives training)"
                 elif key == "PC_reproj_loss":
                     unit_str = " (point cloud reprojection)"
                 elif key == "quat_norm_loss":
