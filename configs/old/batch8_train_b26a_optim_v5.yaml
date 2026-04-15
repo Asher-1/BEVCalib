@@ -1,0 +1,150 @@
+# BEVCalib B26A v5 — 基于 v1冠军配置 + v4关键发现
+#
+# v4评估核心结论 (50+模型跨版本泛化排名):
+#
+#   B26A全局冠军: v1-v7-opt-axis05 = 0.429° (CosineWR, axis05, no roll3, z=2)
+#   v4 B26A最佳: v4-angle20-z5 = 0.572° (StepLR, roll3, ±20°, z=5)
+#
+#   新发现:
+#     1. CosineWR > StepLR: v1冠军(CosineWR)=0.429° vs v4(StepLR)=0.603° (+40%)
+#        CosineWR的周期性重启提供隐式正则化, 在小数据集上至关重要
+#     2. roll3(axis_weights=3,1.5,1) 可能有害: v1冠军没有roll3
+#     4. ±20°训练有效: B26A上0.572°(v4最佳) = 强信号有助泛化
+#     5. z=5 > z=2: 已跨版本/数据集验证
+#
+#   v5策略: CosineWR + z=5 + ±20° + 去除roll3 (回归v1冠军的简洁性)
+#   目标: 突破0.40°
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_optim_v5.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_b26a_optim_v5.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数 (v5: v1冠军基因 + v4新发现)
+# ============================================================================
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0  # z=5 (v4验证: 比z=2好44%)
+    USE_DRCV_BACKEND: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: null
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    # axis_loss=0.5 (v1冠军配置, 跨版本验证有效)
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # 去除roll3 (v1冠军没有axis_weights, v5回归等权重)
+    # 注意: train_kitti.py默认值是3.0,1.5,1.0, 必须显式设置为1.0,1.0,1.0
+    axis_weights: "1.0,1.0,1.0"
+
+    # CosineWR (v1冠军配置: 周期性重启=隐式正则化)
+    lr_schedule: cosine_warm_restarts
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+    cosine_T0: 50
+    cosine_Tmult: 2
+
+    # 正则化
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # per_axis_prob=0.3 (v1冠军值)
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    per_axis_weights: null
+
+    # strong_aug (v1冠军配置)
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.1
+    augment_color_jitter: 0.3
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组 (6个实验, 3个关键变量: CosineWR, ±20°, roll3)
+# ============================================================================
+experiments:
+  # ===== 主实验1: v1冠军 + z=5 =====
+  # v1冠军配置(CosineWR+axis05+strong_aug) 在 z=5 上的表现
+  # 预期: < 0.40° (z=5提升 + CosineWR正则化)
+  - name: "v5_cosinewr_z5"
+    description: "v5主实验: v1冠军配置+z=5(CosineWR+axis05+no_roll3)"
+    dataset: "B26A"
+    version: "v5_cosinewr_z5"
+
+  # ===== 主实验2: v1冠军 + z=5 + ±20° =====
+  # 综合最强配置: CosineWR正则化 + z=5几何先验 + ±20°强信号
+  # 预期: < 0.35° (目标突破当前所有记录)
+  - name: "v5_cosinewr_z5_20deg"
+    description: "v5最强: CosineWR+z=5+±20°训练→±5°评估"
+    dataset: "B26A"
+    version: "v5_cosinewr_z5_20deg"
+    params:
+      angle_range_deg: 20
+      eval_angle_range_deg: 5
+
+  # ===== 主实验3: v1冠军 + z=5 + ±10° =====
+  # 中间扰动, 验证信号强度梯度
+  - name: "v5_cosinewr_z5_10deg"
+    description: "v5: CosineWR+z=5+±10°训练→±5°评估"
+    dataset: "B26A"
+    version: "v5_cosinewr_z5_10deg"
+    params:
+      angle_range_deg: 10
+      eval_angle_range_deg: 5
+
+  # ===== 消融1: CosineWR + z=5 + roll3 =====
+  # 对照: 在CosineWR下, roll3是否也有害?
+  - name: "v5_cosinewr_z5_roll3"
+    description: "消融: CosineWR+z=5+roll3(验证roll3与CosineWR交互)"
+    dataset: "B26A"
+    version: "v5_cosinewr_z5_roll3"
+    params:
+      axis_weights: "3.0,1.5,1.0"
+
+  # ===== 消融2: StepLR + z=5 + ±20° + no_roll3 =====
+  # 对照: 仅改LR策略, 隔离CosineWR vs StepLR的影响
+  - name: "v5_step_z5_20deg"
+    description: "消融: StepLR+z=5+±20°+no_roll3(隔离LR影响)"
+    dataset: "B26A"
+    version: "v5_step_z5_20deg"
+    params:
+      lr_schedule: step
+      angle_range_deg: 20
+      eval_angle_range_deg: 5
+
+  # ===== 消融3: CosineWR + z=5 + no_aug =====
+  # 对照: CosineWR下, 增强是否仍然必要?
+  - name: "v5_cosinewr_z5_no_aug"
+    description: "消融: CosineWR+z=5+无增强(验证aug与CosineWR交互)"
+    dataset: "B26A"
+    version: "v5_cosinewr_z5_no_aug"
+    params:
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_color_jitter: 0.0

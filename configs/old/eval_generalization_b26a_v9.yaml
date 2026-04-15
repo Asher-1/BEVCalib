@@ -1,0 +1,72 @@
+# BEVCalib B26A V9 泛化性能评估
+#
+# V9 (3组):
+#   1. v9-baseline:       StepLR+无aug+Z=5 (验证stratified split影响)
+#   2. v9-z10-pitch3:     Z=10 + axis_wt=1,3,1
+#   3. v9-z10-pitch3-pa:  Z=10 + pitch3 + per_axis_wt=1,2,1 (双重pitch)
+#
+# + ALL-V6 冠军对照
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_v9.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v9"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v9"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V9 B26A (3组) ====================
+  - label: "v9-baseline"
+    dir_name: "model_small_5deg_v9_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v9-baseline"
+    mode_desc: "B26A V9 Z=5+1,1,1 (stratified split验证)"
+
+  - label: "v9-z10-pitch3"
+    dir_name: "model_small_5deg_v9_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v9-z10-pitch3"
+    mode_desc: "B26A V9 Z=10+pitch3"
+
+  - label: "v9-z10-pitch3-pa"
+    dir_name: "model_small_5deg_v9_z10_pitch3_pa"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v9-z10-pitch3-pa"
+    mode_desc: "B26A V9 Z=10+pitch3+per_axis=1,2,1"
+
+  # ==================== 基线 ====================
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291"

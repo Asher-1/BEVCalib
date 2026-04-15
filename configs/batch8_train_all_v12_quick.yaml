@@ -1,0 +1,162 @@
+# BEVCalib ALL V12 快速筛选训练 — max_frames_per_seq=1000
+#
+# 目的: 用每序列1000帧 (~11K总帧) 快速筛选最佳配置
+#       全量训练 130K帧需要 6-8h/实验, 此配置约 40min/实验
+#
+# 筛选后的 Top-2 配置将用 batch8_train_all_v12.yaml 做全量训练
+#
+# 实验矩阵 (与 batch8_train_all_v12 完全一致, 仅加 max_frames_per_seq):
+#   1. v12_v6_repro:          V6冠军复现 (Z=5+1,1,1+StepLR)
+#   2. v12_z10_pitch3:        Z=10+pitch3 (核心实验)
+#   3. v12_z10_pitch3_cosine: Z=10+pitch3+CosineAnnealing
+#   4. v12_z10_pitch3_aug:    Z=10+pitch3+轻度增强
+#   5. v12_z10_cosine_aug:    Z=10+pitch3+Cosine+增强 (全组合)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v12_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5         # 训练时旋转扰动范围 (±5°), 每个batch随机生成GT附近的初始位姿
+    trans_range: 0.15          # 训练时平移扰动范围 (±0.15m), rotation_only时不生效
+
+    # === 训练基础配置 ===
+    batch_size: 16             # 每GPU的batch size, 有效BS = batch_size × ddp_gpus × grad_accum_steps
+    learning_rate: 1e-4        # 初始学习率 (AdamW), backbone会乘以backbone_lr_scale
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true              # 启用PyTorch DistributedDataParallel
+    ddp_gpus: 8                # 每个节点使用的GPU数量
+    nnodes: 1                  # 节点数 (1=单机, >1=多机训练)
+    node_rank: null             # 当前节点编号 (多机时设置, 从0开始)
+    master_addr: null           # 主节点IP (多机时设置)
+    master_port: null           # 主节点端口 (多机时设置)
+
+    # === 模型配置 ===
+    use_compile: false         # torch.compile编译加速 (需PyTorch 2.0+, 实验性)
+    rotation_only: true        # 仅预测旋转 (3-DOF), false=预测旋转+平移 (6-DOF)
+
+    # === 损失函数 ===
+    enable_axis_loss: true     # 启用逐轴旋转损失 (Roll/Pitch/Yaw分别计算, 按axis_weights加权)
+    weight_axis_rotation: 0.5  # 逐轴损失的总权重系数 (total_loss += 0.5 * axis_loss)
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0            # 0=Linear单层回归头, 1=MLP三层回归头
+    use_geodesic_loss: 0       # 0=标准L1旋转损失(度), 1=geodesic旋转损失(SO3距离)
+
+    # === 正则化 ===
+    drop_path_rate: 0.1        # SwinTransformer的drop path率 (随机深度正则化)
+    head_dropout: 0.1          # 回归头前的dropout率
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal  # 扰动角度采样分布: uniform/truncated_normal
+    per_axis_prob: 0.3         # 单轴扰动概率 (0.3=30%概率只扰动一个轴, 0=总是三轴同时扰动)
+    per_axis_weights: null     # 单轴扰动时R/P/Y的采样权重 (null=均匀, "1,2,1"=Pitch概率2倍)
+
+    # === 学习率调度 ===
+    lr_schedule: step          # step=StepLR(每step_size epoch衰减0.5), cosine_warm_restarts=余弦退火
+    warmup_epochs: 5           # 线性warmup epoch数 (从lr*0.01线性增到lr)
+    backbone_lr_scale: 0.1     # backbone(SwinT)学习率缩放因子 (backbone_lr = lr × 0.1)
+
+    # === 数据增强 ===
+    augment_pc_jitter: 0.0     # 点云高斯噪声σ (米), 0=关闭
+    augment_pc_dropout: 0.0    # 点云随机丢弃比例 (0-1), 0=关闭
+    augment_color_jitter: 0.0  # 图像颜色抖动强度 (0-1), 0=关闭
+
+    # === 训练控制 ===
+    early_stopping_patience: 30  # 早停patience (val loss连续30个eval周期不下降则停止, 0=关闭)
+    seed: 42                   # 全局随机种子 (保证可复现性, 每个DDP rank会+rank偏移)
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500   # 每个序列最大帧数 (均匀采样), null=使用全部帧. 1000帧→训练量约1/12
+    eval_epoches: 50           # 每N个epoch做一次验证评估, 默认50 (减少评估开销)
+    grad_accum_steps: 1        # 梯度累积步数 (2=每2个micro-batch更新一次, AllReduce通信减半)
+
+    # === 运行模式 ===
+    foreground: true           # 前台运行 (batch模式必须, 防止多实验并行抢GPU)
+    no_tensorboard: true       # 关闭TensorBoard日志 (quick模式不需要可视化)
+    tensorboard_port: null     # TensorBoard端口 (null=自动分配)
+
+experiments:
+  # 1. V6冠军复现
+  - name: "v12_v6_repro_quick"
+    description: "ALL V12 Quick: V6复现 (Z=5+1,1,1, 1K帧/seq)"
+    dataset: "ALL"
+    version: "v12_v6_repro_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. Z=10 + pitch3
+  - name: "v12_z10_pitch3_quick"
+    description: "ALL V12 Quick: Z=10+pitch3 (1K帧/seq)"
+    dataset: "ALL"
+    version: "v12_z10_pitch3_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. Z=10 + pitch3 + CosineAnnealing
+  - name: "v12_z10_pitch3_cosine_quick"
+    description: "ALL V12 Quick: Z=10+pitch3+Cosine (1K帧/seq)"
+    dataset: "ALL"
+    version: "v12_z10_pitch3_cosine_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      lr_schedule: cosine
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+
+  # 4. Z=10 + pitch3 + 轻度增强
+  - name: "v12_z10_pitch3_aug_quick"
+    description: "ALL V12 Quick: Z=10+pitch3+增强 (1K帧/seq)"
+    dataset: "ALL"
+    version: "v12_z10_pitch3_aug_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_color_jitter: 0.1
+
+  # 5. 全组合: Z=10 + pitch3 + Cosine + 增强
+  - name: "v12_z10_cosine_aug_quick"
+    description: "ALL V12 Quick: Z=10+pitch3+Cosine+增强 (1K帧/seq)"
+    dataset: "ALL"
+    version: "v12_z10_cosine_aug_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      lr_schedule: cosine
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+      augment_pc_jitter: 0.02
+      augment_color_jitter: 0.1
+
+# ============================================================================
+# Quick vs Full 对比
+# ============================================================================
+#
+# 参数            | Quick (本配置)          | Full (v12原配置)
+# ----------------+------------------------+------------------
+# 帧数/序列       | 1000                   | 全部 (~12K avg)
+# 总训练帧数      | ~11,000 (80%)=8,800    | ~130,000 (80%)=104K
+# 预计训练时间    | ~40 min/实验            | ~6-8 h/实验
+# 5组总时间       | ~3.5 h                  | ~30-40 h
+# 用途            | 快速配置筛选            | 最终模型训练

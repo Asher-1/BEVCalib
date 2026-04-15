@@ -1,0 +1,120 @@
+# BEVCalib B26A V13 Depth 泛化性能评估
+#
+# V13 B26A Depth (4组实验, 对应 batch8_train_b26a_v13_depth.yaml):
+#   A. v13-fd-replace-v2:  修复版 FD (SpatialAligner, 去 min-max)
+#   B. v13-fd-dual-path:   双路融合 (FD depth + img feats -> depth_net)
+#   C. v13-fd-supervision: 标准 LSS + FD 辅助深度监督 (推理无开销)
+#   D. v13-baseline-z10:   标准 LSS Z=10+pitch3+Cosine (对照组)
+#
+# + B26A V12 最佳 + ALL-V6 冠军对照
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_v13_depth.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v13_depth"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v13_depth"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V13 B26A Depth (4组) ====================
+
+  - label: "v13-fd-replace-v2"
+    dir_name: "model_small_5deg_v13_fd_replace_v2"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_foundation_depth: 1
+    depth_model_type: midas_small
+    fd_mode: replace_v2
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 10
+    version: "v13-fd-replace-v2"
+    mode_desc: "B26A V13A Fixed FD replace_v2 (SpatialAligner)"
+
+  - label: "v13-fd-dual-path"
+    dir_name: "model_small_5deg_v13_fd_dual_path"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_foundation_depth: 1
+    depth_model_type: midas_small
+    fd_mode: dual_path
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 10
+    version: "v13-fd-dual-path"
+    mode_desc: "B26A V13B Dual-path (FD depth + features)"
+
+  - label: "v13-fd-supervision"
+    dir_name: "model_small_5deg_v13_fd_supervision"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_foundation_depth: 1
+    depth_model_type: midas_small
+    fd_mode: supervision
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 10
+    version: "v13-fd-supervision"
+    mode_desc: "B26A V13C LSS + FD depth supervision (alpha=0.5)"
+
+  - label: "v13-baseline-z10"
+    dir_name: "model_small_5deg_v13_baseline_z10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v13-baseline-z10"
+    mode_desc: "B26A V13D 标准LSS Z=10+pitch3+Cosine (对照, 无FD)"
+
+  # ==================== 历史最佳基线 ====================
+
+  - label: "v12-z10-cosine-aug"
+    dir_name: "../v12/model_small_5deg_v12_z10_cosine_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v12-z10-cosine-aug"
+    mode_desc: "B26A V12 Z=10+Cosine+增强 (val 0.23, V12最佳)"
+
+  - label: "v11-z10-pitch5"
+    dir_name: "../v11/model_small_5deg_v11_z10_pitch5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10-pitch5"
+    mode_desc: "B26A V11 Z=10+pitch5 (val 0.20, V11最佳)"
+
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291"

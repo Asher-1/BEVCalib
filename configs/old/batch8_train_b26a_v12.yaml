@@ -1,0 +1,104 @@
+# BEVCalib B26A V12 完整训练配置 (3组实验合并)
+#
+# V12 B26A 消融实验:
+#   1. v12_v6_repro:          V6配置复现 (Z=5, 对照组)
+#   2. v12_z10_pitch3_cosine: Z=10+pitch3+CosineAnnealing (核心新方案)
+#   3. v12_z10_cosine_aug:    Z=10+pitch3+Cosine+增强 (全组合)
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 bash batch_train.sh configs/batch8_train_b26a_v12_all.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # 1. V6配置复现 — Z=5 对照基线
+  - name: "v12_v6_repro"
+    description: "B26A V12: V6配置复现 (Z=5, step LR, 对照组)"
+    dataset: "B26A"
+    version: "v12_v6_repro"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      lr_schedule: step
+      warmup_epochs: 5
+
+  # 2. 核心新方案: Z=10 + pitch3 + CosineAnnealing
+  - name: "v12_z10_pitch3_cosine"
+    description: "B26A V12: Z=10+pitch3+Cosine (T0=50, Tmult=2, warmup=10)"
+    dataset: "B26A"
+    version: "v12_z10_pitch3_cosine"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+
+  # 3. 全组合: Z=10 + pitch3 + Cosine + 数据增强
+  - name: "v12_z10_cosine_aug"
+    description: "B26A V12: Z=10+pitch3+Cosine+增强 (全组合)"
+    dataset: "B26A"
+    version: "v12_z10_cosine_aug"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+      augment_pc_jitter: 0.02
+      augment_color_jitter: 0.1

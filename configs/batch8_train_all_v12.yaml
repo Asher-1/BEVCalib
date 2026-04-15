@@ -1,0 +1,168 @@
+# BEVCalib ALL V12 训练配置 — 泛化优化最终版
+#
+# V12 核心洞察 (V9/V10/V11 综合分析):
+#   1. ALL-V6 (0.294 Mean Rot) 仍是泛化冠军 → 多序列训练是关键
+#   2. B26A 单序列训练泛化衰退 4-7x → 数据多样性是泛化的根本
+#   3. Z=10 + pitch3 在 B26A 上泛化不稳定 → 需在 ALL 数据上验证
+#   4. pitch5 过度加权导致其他轴退化 → pitch3 是甜点
+#   5. per_axis_weights 在 B26A 上无增益 → 放弃
+#
+# V12 策略:
+#   - 全部在 ALL 数据集 (11 seq, ~130K frames) 上训练
+#   - 基于 V6 冠军配置, 叠加 V8/V9 的 Z=10 + pitch3
+#   - 新增: cosine annealing (V6 用 step, 可能过早衰减)
+#   - 新增: 轻度数据增强 (point cloud jitter + color jitter)
+#   - 新增: 更长 warmup (10 epochs, 数据量大需更多预热)
+#
+# 实验矩阵 (5组):
+#   1. v12_v6_repro:          V6 冠军精确复现 (对照组, 验证代码变更无负面影响)
+#   2. v12_z10_pitch3:        V6 + Z=10 + pitch3 (核心实验)
+#   3. v12_z10_pitch3_cosine: V6 + Z=10 + pitch3 + CosineAnnealing
+#   4. v12_z10_pitch3_aug:    V6 + Z=10 + pitch3 + 轻度数据增强
+#   5. v12_z10_cosine_aug:    V6 + Z=10 + pitch3 + Cosine + 增强 (全组合)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v12.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50           # 每N个epoch验证一次
+    grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # 1. V6 冠军精确复现 — 验证 V9~V11 代码变更无负面影响
+  - name: "v12_v6_repro"
+    description: "ALL V12: V6冠军精确复现 (Z=5+1,1,1+StepLR, 对照组)"
+    dataset: "ALL"
+    version: "v12_v6_repro"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. 核心实验: Z=10 + pitch3
+  - name: "v12_z10_pitch3"
+    description: "ALL V12: Z=10+pitch3 (V8/V9最佳组合, StepLR)"
+    dataset: "ALL"
+    version: "v12_z10_pitch3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. Cosine Annealing 替代 StepLR
+  - name: "v12_z10_pitch3_cosine"
+    description: "ALL V12: Z=10+pitch3+CosineAnnealingWR (T0=50, Tmult=2)"
+    dataset: "ALL"
+    version: "v12_z10_pitch3_cosine"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      lr_schedule: cosine
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+
+  # 4. 轻度数据增强
+  - name: "v12_z10_pitch3_aug"
+    description: "ALL V12: Z=10+pitch3+轻度增强 (pc_jitter=0.02, color=0.1)"
+    dataset: "ALL"
+    version: "v12_z10_pitch3_aug"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_color_jitter: 0.1
+
+  # 5. 全组合: Z=10 + pitch3 + Cosine + 增强
+  - name: "v12_z10_cosine_aug"
+    description: "ALL V12: Z=10+pitch3+Cosine+增强 (全组合)"
+    dataset: "ALL"
+    version: "v12_z10_cosine_aug"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      lr_schedule: cosine
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+      augment_pc_jitter: 0.02
+      augment_color_jitter: 0.1
+
+# ============================================================================
+# V12 消融矩阵 (5组)
+# ============================================================================
+#
+#   实验                      | Z  | Axis Wt | LR      | Aug   | 对照变量
+#   --------------------------+----+---------+---------+-------+---------
+#   1 v12_v6_repro            | 5  | 1,1,1   | StepLR  | 无    | 基线 (V6复现)
+#   2 v12_z10_pitch3          | 10 | 1,3,1   | StepLR  | 无    | +Z+Pitch
+#   3 v12_z10_pitch3_cosine   | 10 | 1,3,1   | Cosine  | 无    | +Cosine
+#   4 v12_z10_pitch3_aug      | 10 | 1,3,1   | StepLR  | 轻度  | +Aug
+#   5 v12_z10_cosine_aug      | 10 | 1,3,1   | Cosine  | 轻度  | 全组合
+#
+# 关键对比:
+#   1 vs V6-champion: 代码变更是否引入退化 (排除干扰)
+#   2 vs 1: Z=10 + pitch3 在 ALL 数据上是否有效 (B26A 上不稳定)
+#   3 vs 2: CosineAnnealing 是否优于 StepLR (更平滑的LR衰减)
+#   4 vs 2: 数据增强是否改善泛化 (不确定性注入)
+#   5 vs 2,3,4: 全组合是否叠加收益 (或相互干扰)
+#
+# 预期:
+#   - V12_v6_repro 应接近 V6-champion (0.294)
+#   - V12_z10_pitch3 在 ALL 上应优于 B26A 版本
+#   - Cosine + Aug 组合可能超越 V6 基线

@@ -1,0 +1,248 @@
+# BEVCalib B26A v2 - Roll P99/Max 尾部优化 + V2 精细消融 (合并版)
+#
+# 基于 v2 最优配置 (v7-opt-axis05: 0.429°, 0.7x衰退)
+# 目标: 降低 Roll P99 从 1.069° 到 <0.8°, Max 从 2.24° 到 <1.5°
+#
+# v2 三大优化:
+#   A. Roll-biased per-axis: 50% Roll / 30% Pitch / 20% Yaw 采样
+#   B. 提高 Roll 权重: axis_weights 从 (2,1.5,1) 提升到 (3,1.5,1)
+#
+# V2 关键发现:
+#   1. axis_loss=0.5 是最佳权重
+#   2. per-axis扰动是最大贡献者
+#   3. 数据增强无收益甚至有害
+#   4. StepLR 在B26A上略优于 CosineWarmRestarts
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_v2_tail.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_b26a_v2_tail.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数 (v2最优 + v2尾部优化)
+# ============================================================================
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 10.0
+    USE_DRCV_BACKEND: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: null
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    # v2最优: axis_loss=0.5
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # v2新增: Roll权重提升
+    axis_weights: "3.0,1.5,1.0"
+
+    # v2最优: StepLR
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    # 正则化
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # v2最优: truncated_normal + per-axis
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    # v2新增: Roll-biased per-axis sampling
+    per_axis_weights: "0.5,0.3,0.2"
+
+    # v2最优: 无数据增强
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组 - Part 1: v2 尾部优化消融 (z=2)
+# ============================================================================
+experiments:
+  # ---------- v2 全量尾部优化 (A+B+C) ----------
+  - name: "v2_full_tail (z=2)"
+    description: "v2全量: quantile_loss + roll_bias + roll_weight=3.0"
+    dataset: "B26A"
+    version: "v2_full_tail"
+
+  # ---------- 消融: 仅Quantile Loss (A only) ----------
+  - name: "v2_quantile_only (z=2)"
+    description: "消融A: 仅quantile_loss, 无roll_bias, 旧权重(2,1.5,1)"
+    dataset: "B26A"
+    version: "v2_quantile_only"
+    params:
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  # ---------- 消融: 仅Roll-bias (B only) ----------
+  - name: "v2_roll_bias_only (z=2)"
+    description: "消融B: 仅roll_bias采样, 无quantile_loss, 旧权重(2,1.5,1)"
+    dataset: "B26A"
+    version: "v2_roll_bias_only"
+    params:
+      axis_weights: "2.0,1.5,1.0"
+
+  # ---------- 消融: 仅Roll权重提升 (C only) ----------
+  - name: "v2_roll_weight_only (z=2)"
+    description: "消融C: 仅roll_weight=3.0, 无quantile_loss, 无roll_bias"
+    dataset: "B26A"
+    version: "v2_roll_weight_only"
+    params:
+      per_axis_weights: null
+
+  # ---------- 更强Roll权重 (4.0) ----------
+  - name: "v2_roll_weight4 (z=2)"
+    description: "Roll权重=4.0 + quantile + roll_bias (更激进)"
+    dataset: "B26A"
+    version: "v2_roll_weight4"
+    params:
+      axis_weights: "4.0,2.0,1.0"
+
+  # ---------- 更高per_axis_prob ----------
+  - name: "v2_peraxis05 (z=2)"
+    description: "per_axis_prob=0.5 (50%单轴训练)"
+    dataset: "B26A"
+    version: "v2_peraxis05"
+    params:
+      per_axis_prob: 0.5
+
+  # ---------- v2 baseline (无尾部优化对照) ----------
+  - name: "v2_baseline (z=2)"
+    description: "v2对照: 无quantile_loss, 无roll_bias, 旧权重(2,1.5,1)"
+    dataset: "B26A"
+    version: "v2_v2_baseline"
+    params:
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  # ============================================================================
+  # Part 2: V2 精细消融 (z=2, BEV_ZBOUND_STEP=10.0)
+  # ============================================================================
+
+  # ---------- V2 最优配置 (z=2) ----------
+  - name: "v2_base (z=2)"
+    description: "V2最优(z=2): axis05 + StepLR + trunc_normal + per_axis + 无aug"
+    dataset: "B26A"
+    version: "v2_base"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  # ---------- v2全量 on z=2 ----------
+  - name: "v2_full_tail (z=2)"
+    description: "v2全量(z=2): quantile + roll_bias + roll_weight=3.0"
+    dataset: "B26A"
+    version: "v2_full_tail_z2"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+
+  # ---------- per_axis_prob 消融 ----------
+  - name: "v2_peraxis02 (z=2)"
+    description: "per_axis_prob=0.2 (降低单轴概率)"
+    dataset: "B26A"
+    version: "v2_peraxis02"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      per_axis_prob: 0.2
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  - name: "v2_peraxis04 (z=2)"
+    description: "per_axis_prob=0.4 (提高单轴概率)"
+    dataset: "B26A"
+    version: "v2_peraxis04"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      per_axis_prob: 0.4
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  - name: "v2_peraxis05 (z=2)"
+    description: "per_axis_prob=0.5 (50%单轴/50%耦合)"
+    dataset: "B26A"
+    version: "v2_peraxis05"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      per_axis_prob: 0.5
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  # ---------- axis_loss 权重消融 ----------
+  - name: "v2_axis03 (z=2)"
+    description: "axis_loss=0.3 (在0.3和0.5之间)"
+    dataset: "B26A"
+    version: "v2_axis03"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      weight_axis_rotation: 0.3
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  - name: "v2_axis06 (z=2)"
+    description: "axis_loss=0.6 (略高于最优0.5)"
+    dataset: "B26A"
+    version: "v2_axis06"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      weight_axis_rotation: 0.6
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  # ---------- 轻量增强 ----------
+  - name: "v2_light_aug (z=2)"
+    description: "轻量增强: jitter=0.005, dropout=0.03, color=0.1"
+    dataset: "B26A"
+    version: "v2_light_aug"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      augment_pc_jitter: 0.005
+      augment_pc_dropout: 0.03
+      augment_color_jitter: 0.1
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null
+
+  # ---------- 更强正则化 ----------
+  - name: "v2_strong_reg (z=2)"
+    description: "更强正则化: drop_path=0.2, head_dropout=0.2"
+    dataset: "B26A"
+    version: "v2_strong_reg"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+      axis_weights: "2.0,1.5,1.0"
+      per_axis_weights: null

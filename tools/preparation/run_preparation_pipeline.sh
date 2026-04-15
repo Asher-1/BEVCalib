@@ -25,6 +25,7 @@
 #   --force-config: 强制使用lidars.cfg外参（可出现在任意位置）
 #   -j N: 并行处理trip数量（可出现在任意位置，默认1=串行）
 #   --sequence-id N: 单trip模式的sequence编号（可选，默认0）
+#   --start-sequence N: 批量模式的起始sequence编号（可选，默认0）
 # 
 # 作者: AI Assistant
 # 日期: 2026-02-28
@@ -36,6 +37,7 @@ set -e  # 遇到错误立即退出
 FORCE_CONFIG=""
 PARALLEL_JOBS=""
 SEQUENCE_ID="0"
+START_SEQUENCE=""
 POSITIONAL_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -49,6 +51,10 @@ while [ $# -gt 0 ]; do
             ;;
         --sequence-id)
             SEQUENCE_ID="$2"
+            shift 2
+            ;;
+        --start-sequence)
+            START_SEQUENCE="$2"
             shift 2
             ;;
         *)
@@ -164,6 +170,9 @@ if [ "$SINGLE_TRIP_MODE" = true ]; then
 else
     echo "  处理模式:      批量"
     echo "  Trips 目录:    ${TRIPS_DIR}"
+    if [ -n "$START_SEQUENCE" ]; then
+        echo -e "  起始Sequence:  ${YELLOW}${START_SEQUENCE}${NC}"
+    fi
 fi
 echo "  输出目录:      ${OUTPUT_DIR}"
 echo "  相机名称:      ${CAMERA_NAME}"
@@ -205,13 +214,18 @@ if [ "$SINGLE_TRIP_MODE" = true ]; then
         --target_fps "${TARGET_FPS}" \
         ${FORCE_CONFIG_SINGLE}
 else
+    START_SEQ_ARG=""
+    if [ -n "$START_SEQUENCE" ]; then
+        START_SEQ_ARG="--start_sequence ${START_SEQUENCE}"
+    fi
     python3 "${BATCH_PREPARE_SCRIPT}" \
         --trips_dir "${TRIPS_DIR}" \
         --output_dir "${OUTPUT_DIR}" \
         --camera_name "${CAMERA_NAME}" \
         --target_fps "${TARGET_FPS}" \
         ${FORCE_CONFIG} \
-        ${PARALLEL_JOBS}
+        ${PARALLEL_JOBS} \
+        ${START_SEQ_ARG}
 fi
 
 if [ $? -ne 0 ]; then

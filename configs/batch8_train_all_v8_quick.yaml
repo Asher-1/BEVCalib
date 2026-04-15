@@ -1,0 +1,191 @@
+# BEVCalib ALL V8 训练配置 — Pitch 定向优化 (32节点集群)
+#
+# V8 设计哲学:
+#   基于 V6/V7 完整评估共识:
+#     - Linear + quaternion + StepLR + 无aug = 最优基座
+#     - Pitch 占泛化误差 67-89%, Seq 03 是 ALL 模型最大瓶颈
+#     - ALL 冠军 all-v6-linear-baseline 泛化 0.494° (历史最佳)
+#
+# V8 策略: 在 ALL 冠军基座上做 Pitch 定向消融
+#   P0: 增加 Z 分辨率 (5→10 Z-voxel)
+#   P1: 加强 Pitch axis loss 权重 (1→3)
+#   P2: 训练扰动偏向 Pitch (per_axis_weights=1,2,1)
+#
+# 实验设计 (7组, seed=42, 全部 Linear+quaternion+StepLR+无aug):
+#   0. v8_baseline:          ALL冠军精确复现 (0.494°目标)
+#   1. v8_z10:               Z=10 → 减少 pitch-depth 混淆
+#   2. v8_pitch_wt3:         axis_weights=1,3,1 → Pitch梯度3x
+#   3. v8_z10_pitch_wt3:     Z=10 + Pitch权重3
+#   4. v8_per_axis_pitch:    per_axis_weights=1,2,1 → Pitch扰动2x
+#   5. v8_z10_per_axis_pitch: Z=10 + Pitch扰动偏向
+#   6. v8_z10_pitch_all:     Z=10 + Pitch权重3 + Pitch扰动偏向
+#
+# 用法 (32节点集群):
+#   bash batch_train.sh configs/batch8_train_all_v8.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5         # 训练时旋转扰动范围 (±5°)
+    trans_range: 0.15          # 训练时平移扰动范围 (±0.15m)
+
+    # === 训练基础配置 ===
+    batch_size: 16             # 每GPU的batch size
+    learning_rate: 1e-4        # 初始学习率 (AdamW)
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    # === 模型配置 ===
+    use_compile: false         # torch.compile (实验性)
+    rotation_only: true        # 仅预测旋转 (3-DOF)
+
+    # === 损失函数 ===
+    enable_axis_loss: true     # 启用逐轴旋转损失 (R/P/Y)
+    weight_axis_rotation: 0.5  # 逐轴损失权重系数
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0            # 0=Linear, 1=MLP三层
+    use_geodesic_loss: 0       # 0=L1旋转损失, 1=geodesic
+
+    # === 学习率调度 ===
+    lr_schedule: step          # StepLR (每step_size epoch衰减0.5)
+    warmup_epochs: 5           # 线性warmup epoch数
+    backbone_lr_scale: 0.1     # backbone学习率缩放 (lr × 0.1)
+
+    # === 正则化 ===
+    drop_path_rate: 0.1        # SwinT drop path率
+    head_dropout: 0.1          # 回归头dropout
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3         # 单轴扰动概率
+    per_axis_weights: null     # R/P/Y采样权重
+
+    # === 数据增强 ===
+    augment_pc_jitter: 0.0     # 点云高斯噪声σ (米)
+    augment_pc_dropout: 0.0    # 点云随机丢弃比例
+    augment_color_jitter: 0.0  # 图像颜色抖动强度
+
+    # === 训练控制 ===
+    early_stopping_patience: 30  # 早停patience (0=关闭)
+    seed: 42                   # 全局随机种子
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500   # 每序列最大帧数 (均匀采样)
+    eval_epoches: 50           # 每N个epoch验证一次
+    grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
+
+    # === 运行模式 ===
+    foreground: true           # 前台运行 (batch模式必须)
+    no_tensorboard: true       # 关闭TensorBoard
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V8 Pitch定向优化: 7组消融 (全部 Linear+quaternion+StepLR+无aug)
+  # =========================================================================
+
+  # 0. ALL冠军精确复现 (预期泛化 ~0.494°)
+  - name: "v8_baseline"
+    description: "ALL V8: ALL冠军复现 Linear+quat+StepLR+无aug (0.494° baseline)"
+    dataset: "all"
+    version: "v8_baseline_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 1. Z=10: 更细Z分层 → 减少 pitch-depth 混淆
+  - name: "v8_z10"
+    description: "ALL V8: Z=10 (zbound 2.0, 10 Z-voxel)"
+    dataset: "all"
+    version: "v8_z10_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. Pitch axis权重=3: loss层面引导关注Pitch
+  - name: "v8_pitch_wt3"
+    description: "ALL V8: axis_weights=1,3,1 (Pitch梯度3x)"
+    dataset: "all"
+    version: "v8_pitch_wt3_quick"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. Z=10 + Pitch权重=3: 双重Pitch优化
+  - name: "v8_z10_pitch_wt3"
+    description: "ALL V8: Z=10 + axis_weights=1,3,1 (双重Pitch优化)"
+    dataset: "all"
+    version: "v8_z10_pitch_wt3_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 4. 训练扰动偏向Pitch: 数据层面强化
+  - name: "v8_per_axis_pitch"
+    description: "ALL V8: per_axis_weights=1,2,1 (Pitch扰动2x概率)"
+    dataset: "all"
+    version: "v8_per_axis_pitch_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      per_axis_weights: "1.0,2.0,1.0"
+
+  # 5. Z=10 + Pitch扰动偏向
+  - name: "v8_z10_per_axis_pitch"
+    description: "ALL V8: Z=10 + per_axis_weights=1,2,1"
+    dataset: "all"
+    version: "v8_z10_per_axis_pitch_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      per_axis_weights: "1.0,2.0,1.0"
+
+  # 6. 全部Pitch优化叠加
+  - name: "v8_z10_pitch_all"
+    description: "ALL V8: Z=10 + axis_weights=1,3,1 + per_axis_weights=1,2,1 (全Pitch优化)"
+    dataset: "all"
+    version: "v8_z10_pitch_all_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      per_axis_weights: "1.0,2.0,1.0"
+
+# ============================================================================
+# V8 消融矩阵 (8组, 全部 Linear+quaternion+StepLR+无aug)
+# ============================================================================
+#
+#   实验                    | Z-voxel | axis_wt    | per_axis_wt | drcv | 对照
+#   ------------------------+---------+------------+-------------+------+-----------
+#   0 v8_baseline           | 5 (4.0) | 1,1,1      | null        | no   | 控制基线
+#   1 v8_z10                | 10(2.0) | 1,1,1      | null        | no   | Z效果 (vs 0)
+#   2 v8_pitch_wt3          | 5 (4.0) | 1,3,1      | null        | no   | 权重效果 (vs 0)
+#   3 v8_z10_pitch_wt3      | 10(2.0) | 1,3,1      | null        | no   | Z+权重 (vs 1,2)
+#   4 v8_per_axis_pitch     | 5 (4.0) | 1,1,1      | 1,2,1       | no   | 扰动效果 (vs 0)
+#   5 v8_z10_per_axis_pitch | 10(2.0) | 1,1,1      | 1,2,1       | no   | Z+扰动 (vs 1,4)
+#   6 v8_z10_pitch_all      | 10(2.0) | 1,3,1      | 1,2,1       | no   | 全叠加 (vs 3,5)
+#
+# 预期 ALL 泛化目标 (对比 all-v6-linear-baseline 0.494°):
+#   v8_baseline:           ~0.494° (复现)
+#   v8_z10:                <0.45°  (Z分辨率降Pitch混淆)
+#   v8_pitch_wt3:          <0.47°  (Pitch梯度增强)
+#   v8_z10_pitch_wt3:      <0.40°  (叠加效果)
+#   v8_per_axis_pitch:     <0.47°  (Pitch数据增强)
+#   v8_z10_per_axis_pitch: <0.42°  (叠加效果)
+#   v8_z10_pitch_all:      <0.38°  (全优化目标)

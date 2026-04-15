@@ -1,0 +1,166 @@
+# BEVCalib all_training_data_v2 (去畸变) — v5 最优配置 StepLR 全部实验
+#
+# ===== 设计思路 =====
+#
+#   数据集: all_training_data_v2 (去畸变后的全量数据, D=0, pinhole模型)
+#   LR策略: 全部使用 StepLR — 无论小数据还是大数据, StepLR 更稳定
+#     - ALL v2冠军 0.560° 用的 StepLR
+#     - ALL v4最优 0.651° 用的 StepLR
+#     - CosineWR 在大数据集上有 2.8x 泛化衰退风险 (v3验证)
+#
+#   4 个实验:
+#     1. 最佳配置: StepLR+z5+strong_aug+no_roll3+seed=42 (±5°基线)
+#     2. 10°扰动训练: ±10°训练→±5°评估 (验证中等扰动泛化增益)
+#     3. 20°扰动训练: ±20°训练→±5°评估 (验证大扰动泛化极限)
+#     4. Refine v1冠军: 加载v1-champion ckpt_400 + 低LR微调200ep
+#
+#   核心假设:
+#     去畸变后几何一致性提升, 预期比 all_training_data 原始数据有提升
+#     大扰动在去畸变数据上可能更有效 (几何噪声更小, 模型能专注学习旋转)
+#
+# 用法:
+#   bash batch_train.sh configs/batch16_train_32nodes_all_undistort_v5.yaml
+#   bash batch_train.sh --dry-run configs/batch16_train_32nodes_all_undistort_v5.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数 (v5: StepLR统一策略 + 去畸变全量数据)
+# ============================================================================
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0  # z=5 (跨版本跨数据集验证有效)
+    USE_DRCV_BACKEND: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    learning_rate: 1e-4
+
+    # 32 节点 DDP
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    # axis_loss=0.5 (跨版本验证有效)
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # 等权 1:1:1 (B26A v5: no_roll3 0.502° > roll3 0.584°, v2冠军也无roll3)
+    axis_weights: "1.0,1.0,1.0"
+
+    # StepLR — 大数据集最稳定的LR策略
+    # ALL上: StepLR 0.747° vs CosineWR 1.237° (v3验证差66%)
+    # 即便B26A上CosineWR略优, 大数据集StepLR更可靠
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    # 正则化
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # truncated_normal + per_axis_prob=0.3 (通用配置)
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # strong_aug (B26A v5: aug 0.502° > no_aug 0.612°, ALL v4 也有效)
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.1
+    augment_color_jitter: 0.3
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: 6007
+    node_ip: "10.16.9.60"
+
+# ============================================================================
+# 实验组 (4 个实验 — 3组扰动梯度 + 1组refine, 全部 StepLR)
+# ============================================================================
+experiments:
+  # ===== 实验1: 最佳配置 ±5° 基线 =====
+  # StepLR+z5+strong_aug+no_roll3+seed=42
+  # 去畸变数据 + StepLR稳定训练, 预期优于原始数据的 v5_step_z5_aug
+  - name: "v5_undist_step_z5_aug"
+    description: "去畸变ALL最佳: StepLR+z5+strong_aug+no_roll3 (±5°基线, seed=42)"
+    dataset: "all"
+    version: "v5_undist_step_z5_aug"
+
+  # ===== 实验2: ±10° 中等扰动训练 =====
+  # 训练±10°, 评估±5° — 验证中等扰动对去畸变数据的泛化增益
+  # 假说: 去畸变后几何更干净, 中等扰动足以增强鲁棒性且不过度增加训练难度
+  - name: "v5_undist_step_angle10"
+    description: "去畸变ALL: ±10°扰动训练→±5°评估 (StepLR, 验证中等扰动泛化)"
+    dataset: "all"
+    version: "v5_undist_step_angle10"
+    params:
+      angle_range_deg: 10
+      eval_angle_range_deg: 5
+
+  # ===== 实验3: ±20° 大扰动训练 =====
+  # 训练±20°, 评估±5° — 验证大扰动极限
+  # 假说: 去畸变后大扰动可能更有效(几何噪声更小), 但训练难度仍可能影响收敛
+  - name: "v5_undist_step_angle20"
+    description: "去畸变ALL: ±20°扰动训练→±5°评估 (StepLR, 验证大扰动极限)"
+    dataset: "all"
+    version: "v5_undist_step_angle20"
+    params:
+      angle_range_deg: 20
+      eval_angle_range_deg: 5
+
+  # ===== 实验4: Refine v1冠军 ckpt_400 =====
+  # 加载B26A v1冠军(泛化0.431°)在去畸变ALL数据上低LR微调
+  # lr=5e-6, StepLR, 200ep, step_size=80 (每80ep衰减一次)
+  # 假说: v1冠军已学到B26A上优秀的旋转特征, 在更大更干净的数据上微调可进一步提升泛化
+  - name: "v5_undist_refine_v1champ"
+    description: "去畸变ALL: refine v1-champion ckpt_400 lr=5e-6 200ep"
+    dataset: "all"
+    version: "v5_undist_refine_v1champ"
+    params:
+      pretrain_ckpt: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/B26A/v1/model_small_5deg_v7_opt_axis05/B26A_scratch/checkpoint/ckpt_400.pth"
+      learning_rate: 5e-6
+      warmup_epochs: 0
+      step_size: 80
+      num_epochs: 200
+
+# ============================================================================
+# 实验设计: 扰动梯度 + Refine (全部 StepLR)
+# ============================================================================
+#
+#   实验  | 训练扰动 | 评估扰动 | LR策略 | 预训练     | 目的
+#   ------+----------+----------+--------+------------+-------------------
+#   1     | ±5°      | ±5°      | Step   | 无(scratch) | 最佳配置基线
+#   2     | ±10°     | ±5°      | Step   | 无(scratch) | 中等扰动泛化增益
+#   3     | ±20°     | ±5°      | Step   | 无(scratch) | 大扰动泛化极限
+#   4     | ±5°      | ±5°      | Step   | v1 ckpt_400 | Refine v1冠军
+#
+# ============================================================================
+# 使用说明
+# ============================================================================
+#
+# 1. 确保去畸变数据集已准备:
+#    数据路径: /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_v2
+#    注意: start_training.sh 中 dataset="all" 映射到 all_training_data 目录
+#    若 all_training_data_v2 已替换 all_training_data, 直接使用即可
+#
+# 2. SLURM集群（推荐）:
+#    sbatch --nodes=32 configs/run_batch_train.slurm
+#    nnodes/node_rank/master_addr 自动从环境变量检测
+#
+# 3. 评估 (必须用 bevcalib310 环境):
+#    /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#        --config configs/eval_generalization_all_v5.yaml

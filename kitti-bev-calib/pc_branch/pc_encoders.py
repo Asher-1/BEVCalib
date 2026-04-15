@@ -2,8 +2,8 @@ import os
 import torch
 import torch.nn as nn
 
-# Backend switch: set USE_DRCV_BACKEND=1 to use drcv.ops.spconv instead of spconv.pytorch
-USE_DRCV = os.environ.get("USE_DRCV_BACKEND", "0") == "1"
+# Backend switch: set USE_DRCV_BACKEND=1 to use drcv ops instead of spconv
+USE_DRCV = os.environ.get("USE_DRCV_BACKEND", "1") == "1"
 
 if USE_DRCV:
     import drcv.ops.spconv as spconv

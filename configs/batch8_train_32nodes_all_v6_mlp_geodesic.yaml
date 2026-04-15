@@ -45,6 +45,7 @@ global:
 defaults:
   env:
     BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
 
   params:
     angle_range_deg: 5

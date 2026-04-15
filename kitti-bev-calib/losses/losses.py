@@ -209,6 +209,7 @@ class PC_reproj_loss(nn.Module):
         """
         B, N, _ = pcs.shape
         loss = torch.tensor(0.0, device = pcs.device)
+        valid_samples = 0
         for i in range(B):
             RT_gt = gt_T_to_camera[i]
             T_pred = torch.eye(4, device = pcs.device, dtype=pcs.dtype)
@@ -221,17 +222,22 @@ class PC_reproj_loss(nn.Module):
             pc = pcs[i]
             if mask is not None:
                 pc = pc[mask[i] == 1]
+            if pc.shape[0] == 0:
+                continue
             ones = torch.ones(pc.shape[0], 1, device=pc.device, dtype=pc.dtype)
             points_h = torch.cat([pc, ones], dim = 1) # (N, 4)
             points_transformed = torch.matmul(points_h, RT_total.t())[:, :3] # (N, 3)
             error = (points_transformed - pc).norm(dim = 1)
             loss += error.mean()
+            valid_samples += 1
         
-        return loss / B
+        if valid_samples == 0:
+            return loss
+        return loss / valid_samples
             
 class realworld_loss(nn.Module):
     def __init__(self, weight_translation = 1.0, weight_quat_norm = 0.5, weight_rotation = 0.5, weight_PCreproj = 0.5, 
-                 weight_bev_reproj = 0.5, weight_feat_align = 1.0, l1 = False, rotation_only = False,
+                 l1 = False, rotation_only = False,
                  enable_axis_loss = False, weight_axis_rotation = 0.3,
                  axis_weights = (3.0, 1.5, 1.0),
                  use_geodesic_loss = False):
@@ -250,8 +256,6 @@ class realworld_loss(nn.Module):
             self.weight_PCreproj = weight_PCreproj
             self.weight_quat_norm = weight_quat_norm
         self.weight_axis_rotation = weight_axis_rotation if enable_axis_loss else 0.0
-        self.weight_bev_reproj = weight_bev_reproj
-        self.weight_feat_align = weight_feat_align
         if not rotation_only:
             self.translation_loss = translation_loss(l1 = True)
             self.real_translation_loss = translation_loss(l1 = False)

@@ -1,0 +1,113 @@
+# BEVCalib B26A V13 Depth Optimization
+#
+# 4 approaches to fix depth estimation for generalization:
+#   A. v13_fd_replace_v2:  Fixed FD (SpatialAligner, no min-max)
+#   B. v13_fd_dual_path:   FD depth as extra input to standard depth_net
+#   C. v13_fd_supervision: Standard LSS + auxiliary FD depth supervision
+#   D. v13_baseline_z10:   Standard LSS Z=10+pitch3 baseline (no FD, control)
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 bash batch_train.sh configs/batch8_train_b26a_v13_depth.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 7
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 50
+    cosine_Tmult: 2
+    warmup_epochs: 10
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # A. Fixed FD replace (SpatialAligner, no per-image min-max)
+  - name: "v13_fd_replace_v2"
+    description: "V13A: Fixed FD (replace_v2, SpatialAligner)"
+    dataset: "B26A"
+    version: "v13_fd_replace_v2"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      fd_mode: replace_v2
+      batch_size: 4
+
+  # B. Dual-path: FD depth as extra input channel
+  - name: "v13_fd_dual_path"
+    description: "V13B: Dual-path (FD depth + img feats -> depth_net)"
+    dataset: "B26A"
+    version: "v13_fd_dual_path"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      fd_mode: dual_path
+      batch_size: 4
+
+  # C. Depth supervision: standard LSS + auxiliary FD loss
+  - name: "v13_fd_supervision"
+    description: "V13C: Standard LSS + FD depth supervision (alpha=0.5)"
+    dataset: "B26A"
+    version: "v13_fd_supervision"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      fd_mode: supervision
+      depth_sup_alpha: 0.5
+      batch_size: 4
+
+  # D. Control: standard LSS Z=10+pitch3+cosine (no FD)
+  - name: "v13_baseline_z10"
+    description: "V13D: Standard LSS Z=10+pitch3+Cosine (对照组)"
+    dataset: "B26A"
+    version: "v13_baseline_z10"
+    params:
+      axis_weights: "1.0,3.0,1.0"

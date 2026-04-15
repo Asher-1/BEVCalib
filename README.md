@@ -77,8 +77,8 @@
 ### Prerequisites
 First create a conda environment:
 ```bash
-conda create -n bevcalib python=3.11
-conda activate bevcalib
+conda create -n bevcalib310 python=3.10
+conda activate bevcalib310
 pip3 install -r requirements.txt
 ```
 
@@ -110,8 +110,8 @@ cd ./kitti-bev-calib/img_branch/bev_pool && python setup.py build_ext --inplace
 
 We also provide a [Dockerfile](Dockerfile/Dockerfile) for easy setup:
 ```bash
-docker build -f Dockerfile/Dockerfile -t bevcalib .
-docker run --gpus all -it -v$(pwd):/workspace bevcalib
+docker build -f Dockerfile/Dockerfile -t bevcalib310 .
+docker run --gpus all -it -v$(pwd):/workspace bevcalib310
 ### In the docker, run the following command to install cuda extensions
 cd ./kitti-bev-calib/img_branch/bev_pool && python setup.py build_ext --inplace
 ```
@@ -610,7 +610,7 @@ BEVCalib appreciates the following great open-source projects: [BEVFusion](https
 ## Citation
 
 ```bibtex
-@inproceedings{bevcalib,
+@inproceedings{bevcalib310,
       title={BEVCALIB: LiDAR-Camera Calibration via Geometry-Guided Bird's-Eye View Representations}, 
       author={Weiduo Yuan and Jerry Li and Justin Yue and Divyank Shah and Konstantinos Karydis and Hang Qiu},
       booktitle={9th Annual Conference on Robot Learning},

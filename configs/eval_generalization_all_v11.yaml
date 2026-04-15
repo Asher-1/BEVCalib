@@ -1,0 +1,135 @@
+# BEVCalib ALL V11 泛化性能评估
+#
+# V11 ALL (5组实验, 对应 batch8_train_all_v11.yaml):
+#   1. v11-baseline:          V6冠军复现 (Z=5+1,1,1, 13seq 124K帧)
+#   2. v11-z10-pitch3:        Z=10+pitch3 (V8/V9最佳组合)
+#   3. v11-z10:               Z=10 only (隔离Z分辨率增益)
+#   4. v11-z10-pitch3-warm:   Z=10+pitch3+warmup10 (大数据集warmup)
+#   5. v11-z10-pitch5:        Z=10+pitch5 (Pitch极限测试)
+#
+# 注: ALL v11 尚未训练, B26A v11 已有3组模型可先评估
+#
+# + B26A V11 已训练模型 + ALL-V6 冠军对照
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_all_v11.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v11"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v11"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V11 ALL (5组, 训练后启用) ====================
+
+  - label: "v11-baseline"
+    dir_name: "model_small_5deg_v11_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v11-baseline"
+    mode_desc: "ALL V11 V6复现 (Z=5+1,1,1, 13seq 124K帧)"
+
+  - label: "v11-z10-pitch3"
+    dir_name: "model_small_5deg_v11_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10-pitch3"
+    mode_desc: "ALL V11 Z=10+pitch3 (V8/V9最佳组合)"
+
+  - label: "v11-z10"
+    dir_name: "model_small_5deg_v11_z10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10"
+    mode_desc: "ALL V11 Z=10 only (隔离Z分辨率增益)"
+
+  - label: "v11-z10-pitch3-warm"
+    dir_name: "model_small_5deg_v11_z10_pitch3_warm"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10-pitch3-warm"
+    mode_desc: "ALL V11 Z=10+pitch3+warmup10 (大数据集warmup)"
+
+  - label: "v11-z10-pitch5"
+    dir_name: "model_small_5deg_v11_z10_pitch5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10-pitch5"
+    mode_desc: "ALL V11 Z=10+pitch5 (Pitch极限测试)"
+
+  # ==================== B26A V11 已训练模型 (对照) ====================
+
+  - label: "b26a-v11-baseline"
+    dir_name: "../../B26A/v11/model_small_5deg_v11_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "b26a-v11-baseline"
+    mode_desc: "B26A V11 baseline (val 0.25, 已训练)"
+
+  - label: "b26a-v11-z10-pitch3"
+    dir_name: "../../B26A/v11/model_small_5deg_v11_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "b26a-v11-z10-pitch3"
+    mode_desc: "B26A V11 Z=10+pitch3 (val 0.25, 已训练)"
+
+  - label: "b26a-v11-z10-pitch5"
+    dir_name: "../../B26A/v11/model_small_5deg_v11_z10_pitch5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "b26a-v11-z10-pitch5"
+    mode_desc: "B26A V11 Z=10+pitch5 (val 0.20, V11最佳, 已训练)"
+
+  # ==================== 基线 ====================
+
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291"

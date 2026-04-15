@@ -1,0 +1,119 @@
+# BEVCalib B26A V9/V10 泛化性能评估
+#
+# V9 (3组, stratified split + drcv):
+#   1. v9_baseline:       StepLR+无aug+Z=5 (stratified split验证)
+#   2. v9_z10_pitch3:     Z=10 + axis_wt=1,3,1 (V8最佳组合)
+#   3. v9_z10_pitch3_pa:  Z=10 + pitch3 + per_axis=1,2,1 (双重pitch)
+#
+# V10 (1组, Foundation Depth实验失败, 仅对照组):
+#   4. v10_std_baseline:  标准LSS对照 (同V9 baseline配置)
+#
+# + V7/V8 历史基线对照
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_v9v10.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v9"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v9v10"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V9 Stratified Split + drcv (3组) ====================
+
+  # 1. V9 baseline — StepLR+无aug+Z=5, stratified split
+  - label: "v9-baseline"
+    dir_name: "model_small_5deg_v9_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v9-baseline"
+    mode_desc: "B26A V9 StepLR+无aug+Z=5 (stratified split, drcv)"
+
+  # 2. V9 Z=10 + Pitch×3 — V8最佳组合 + stratified split
+  - label: "v9-z10-pitch3"
+    dir_name: "model_small_5deg_v9_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v9-z10-pitch3"
+    mode_desc: "B26A V9 Z=10 + axis_wt=1,3,1 (stratified split, drcv)"
+
+  # 3. V9 Z=10 + Pitch×3 + per_axis — 双重Pitch优化
+  - label: "v9-z10-pitch3-pa"
+    dir_name: "model_small_5deg_v9_z10_pitch3_pa"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v9-z10-pitch3-pa"
+    mode_desc: "B26A V9 Z=10 + pitch3 + per_axis=1,2,1 (双重Pitch, drcv)"
+
+  # ==================== V10 对照 (Foundation Depth失败) ====================
+
+  # 4. V10 标准LSS对照 — 与V9 baseline同配置
+  - label: "v10-std-baseline"
+    dir_name: "../v10/model_small_5deg_v10_std_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v10-std-baseline"
+    mode_desc: "B26A V10 标准LSS对照组 (Z=5, drcv)"
+
+  # ==================== 历史基线 ====================
+
+  # V8 最佳 — Z=10+pitch3 (上一轮冠军)
+  - label: "v8-z10-pitch-wt3"
+    dir_name: "../v8/model_small_5deg_v8_z10_pitch_wt3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v8-z10-pitch-wt3"
+    mode_desc: "B26A V8 Z=10+pitch3 (上轮最佳)"
+
+  # V7 最佳
+  - label: "b26a-v7-champion"
+    dir_name: "../v7/model_small_5deg_v7_pitch_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "b26a-v7-champion"
+    mode_desc: "B26A V7 CosineWR+aug+pitch=1,2,1 (泛化 0.978)"
+
+  # ALL V6 冠军 (历史最佳泛化)
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 Linear+quat+StepLR (泛化冠军 0.494)"

@@ -135,7 +135,14 @@ class KittiDataset(Dataset):
             import sys; print(f'[KittiDataset] File not exist: img={img_path}, pcd={pcd_path}', file=sys.stderr)
             assert False
         img = Image.open(img_path)
-        pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)
+        raw = np.fromfile(pcd_path, dtype=np.float32)
+        if raw.size % 4 == 0:
+            pcd = raw.reshape(-1, 4)
+        elif raw.size % 3 == 0:
+            pcd = raw.reshape(-1, 3)
+        else:
+            raise ValueError(f"Point cloud {pcd_path}: {raw.size} floats, not divisible by 3 or 4")
+
         
         # 记录原始点云数量
         original_points = len(pcd)
@@ -168,7 +175,8 @@ class KittiDataset(Dataset):
             if track_stats:
                 self.utilization_stats['low_point_frames'] += 1
             # 如果点太少，扩大范围重新过滤
-            pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)
+            raw2 = np.fromfile(pcd_path, dtype=np.float32)
+            pcd = raw2.reshape(-1, 4) if raw2.size % 4 == 0 else raw2.reshape(-1, 3)
             ego_filter = (np.abs(pcd[:, 0]) > 2.) | (np.abs(pcd[:, 1]) > 2.)
             pcd = pcd[ego_filter, :]
             # 放宽 Z 轴限制
@@ -291,9 +299,9 @@ class KittiDataset(Dataset):
         
 if __name__ == "__main__":
     dataset_root = './data/kitti-odemetry'
-    train_dataset = KittiDataset(data_folder=dataset_root, split='train')
+    train_dataset = KittiDataset(data_folder=dataset_root)
     print(len(train_dataset))
-    val_dataset = KittiDataset(data_folder=dataset_root, split='val')
+    val_dataset = KittiDataset(data_folder=dataset_root)
     print(len(val_dataset))
     print(train_dataset.all_files[-2])
     all_size = []

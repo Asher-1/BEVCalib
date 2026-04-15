@@ -48,7 +48,7 @@ def _build_prepare_cmd(trip_dir, sequence_id, output_base_dir, camera_name, targ
     prepare_script = script_dir / 'prepare_custom_dataset.py'
 
     cmd = [
-        'python', str(prepare_script),
+        sys.executable, str(prepare_script),
         '--bag_dir', str(bag_dir),
         '--config_dir', str(config_dir),
         '--output_dir', str(output_base_dir),
@@ -408,11 +408,22 @@ def main():
 
         failed_names = {t[0] for t in failed}
         summary += f"\nTrip 名称与 Sequence ID 对应关系:\n"
-        summary += f"{'─'*60}\n"
+        summary += f"{'─'*72}\n"
+        summary += f"  {'Seq':<6}{'Trip Name':<40}{'Samples':>8}  {'Status':<8}\n"
+        summary += f"  {'─'*4}  {'─'*38}  {'─'*6}  {'─'*6}\n"
+        total_samples = 0
         for td, seq_id in trip_plan:
             status = "FAILED" if td.name in failed_names else "OK"
-            summary += f"  seq {seq_id}  <->  {td.name}  [{status}]\n"
-        summary += f"{'─'*60}\n"
+            seq_img_dir = output_dir / 'sequences' / seq_id / 'image_2'
+            if seq_img_dir.exists():
+                sample_count = len(list(seq_img_dir.glob('*.png')))
+            else:
+                sample_count = 0
+            total_samples += sample_count
+            summary += f"  {seq_id:<6}{td.name:<40}{sample_count:>8}  {status:<8}\n"
+        summary += f"  {'─'*4}  {'─'*38}  {'─'*6}  {'─'*6}\n"
+        summary += f"  {'':6}{'Total':<40}{total_samples:>8}\n"
+        summary += f"{'─'*72}\n"
         summary += f"\n输出目录: {output_dir}\n"
         summary += f"日志文件: {log_file_path}\n"
 

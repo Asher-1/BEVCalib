@@ -1,0 +1,96 @@
+# BEVCalib B26A V12 泛化性能评估
+#
+# V12 (3组已完成实验):
+#   1. v12-v6-repro:          V6配置复现 (Z=5, step LR, 对照组, val 0.22)
+#   2. v12-z10-pitch3-cosine: Z=10+pitch3+CosineWR (val 0.25)
+#   3. v12-z10-cosine-aug:    Z=10+pitch3+Cosine+增强 (全组合, val 0.23)
+#
+# + V11/V10 最佳 + ALL-V6 冠军对照
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_v12.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v12"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v12"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V12 B26A (3组) ====================
+
+  - label: "v12-v6-repro"
+    dir_name: "model_small_5deg_v12_v6_repro"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v12-v6-repro"
+    mode_desc: "V12 V6配置复现 (B26A, Z=5+StepLR, val 0.22)"
+
+  - label: "v12-z10-pitch3-cosine"
+    dir_name: "model_small_5deg_v12_z10_pitch3_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v12-z10-pitch3-cosine"
+    mode_desc: "V12 Z=10+pitch3+CosineWR (B26A, val 0.25)"
+
+  - label: "v12-z10-cosine-aug"
+    dir_name: "model_small_5deg_v12_z10_cosine_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v12-z10-cosine-aug"
+    mode_desc: "V12 Z=10+pitch3+Cosine+增强 (B26A, val 0.23)"
+
+  # ==================== 历史最佳基线 ====================
+
+  - label: "v11-z10-pitch5"
+    dir_name: "../v11/model_small_5deg_v11_z10_pitch5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10-pitch5"
+    mode_desc: "B26A V11 Z=10+pitch5 (val 0.20, V11最佳)"
+
+  - label: "v10-std-baseline"
+    dir_name: "../v10/model_small_5deg_v10_std_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v10-std-baseline"
+    mode_desc: "B26A V10 标准LSS (val 0.29, V10最佳)"
+
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291"

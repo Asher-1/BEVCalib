@@ -87,15 +87,18 @@ class LSS(nn.Module):
 
         return points 
 
-    def get_cam_feature(self, img_feats):
+    def get_cam_feature(self, img_feats, return_depth_logits=False):
         B, N, C, H, W = img_feats.shape
         img_feats = img_feats.view(B * N, C, H, W) 
         img_feats = self.depth_net(img_feats) # (B * N, out_channels + D, H, W)
-        depth = img_feats[:, :self.D].softmax(dim = 1) # (B * N, D, H, W)
-        img_feats = depth.unsqueeze(1) * img_feats[:, self.D : self.D + self.out_channels].unsqueeze(2) # (BN, 1, D, H, W) * (BN, out_channels, 1, H, W) => (BN, out_channels, D, H, W)
+        depth_logits = img_feats[:, :self.D]
+        depth = depth_logits.softmax(dim = 1) # (B * N, D, H, W)
+        img_feats = depth.unsqueeze(1) * img_feats[:, self.D : self.D + self.out_channels].unsqueeze(2)
         img_feats = img_feats.view(B, N, self.out_channels, self.D, H, W)
         img_feats = img_feats.permute(0, 1, 3, 4, 5, 2)
         
+        if return_depth_logits:
+            return img_feats, depth_logits
         return img_feats
 
     def forward(self, 
@@ -104,9 +107,13 @@ class LSS(nn.Module):
                 cam_intrins,
                 post_cam2ego_rot,
                 post_cam2ego_trans,
-                img_feats
+                img_feats,
+                return_depth_logits=False,
                 ):
         geometry = self.get_geometry(cam2ego_rot=cam2ego_rot, cam2ego_trans=cam2ego_trans, cam_intrins=cam_intrins, post_cam2ego_rot=post_cam2ego_rot, post_cam2ego_trans=post_cam2ego_trans)
+        if return_depth_logits:
+            img_depth_feature, d_logits = self.get_cam_feature(img_feats, return_depth_logits=True)
+            return geometry, img_depth_feature, d_logits
         img_depth_feature = self.get_cam_feature(img_feats)
         return geometry, img_depth_feature
 
@@ -205,19 +212,68 @@ class Cam2BEV(nn.Module):
                  encoder_out_channels = 256,
                  FPN_in_channels = [192, 384, 768], 
                  FPN_out_channels = 256,
+                 use_foundation_depth = False,
+                 depth_model_type = "midas_small",
+                 fd_mode = "replace",
                  ):
         super(Cam2BEV, self).__init__()
-        # 根据 img_shape 计算 transformedImgShape 和 featureShape
         if img_shape is None:
-            img_shape = (256, 704)  # 默认值保持向后兼容 (H, W)
+            img_shape = (256, 704)
         
+        self.use_foundation_depth = use_foundation_depth
+        self.fd_mode = fd_mode
         img_H, img_W = img_shape
-        transformedImgShape = (3, img_H, img_W) # (3, 640, 360)
-        featureShape = (encoder_out_channels, img_H // 8, img_W // 8) # (256, 80, 45)
+        transformedImgShape = (3, img_H, img_W)
+        featureShape = (encoder_out_channels, img_H // 8, img_W // 8)
         
         print(f"[Cam2BEV] 输入图像尺寸: {img_W}x{img_H}, 特征尺寸: {featureShape[2]}x{featureShape[1]}")
         
-        self.lss = LSS(transformedImgShape=transformedImgShape, featureShape=featureShape)
+        self.depth_supervision = None
+        
+        if use_foundation_depth:
+            if fd_mode == "replace_v1":
+                from .foundation_depth import FoundationDepthLSS
+                self.lss = FoundationDepthLSS(
+                    transformedImgShape=transformedImgShape,
+                    featureShape=featureShape,
+                    depth_model_type=depth_model_type,
+                )
+                print(f"[Cam2BEV] FD mode=replace_v1 (原始FD, depth_model={depth_model_type})")
+            elif fd_mode == "replace_v2":
+                from .foundation_depth_v2 import FoundationDepthLSSv2
+                self.lss = FoundationDepthLSSv2(
+                    transformedImgShape=transformedImgShape,
+                    featureShape=featureShape,
+                    depth_model_type=depth_model_type,
+                )
+                print(f"[Cam2BEV] FD mode=replace_v2 (修复版FD, depth_model={depth_model_type})")
+            elif fd_mode == "dual_path":
+                from .foundation_depth_v2 import DualPathLSS
+                self.lss = DualPathLSS(
+                    transformedImgShape=transformedImgShape,
+                    featureShape=featureShape,
+                    depth_model_type=depth_model_type,
+                )
+                print(f"[Cam2BEV] FD mode=dual_path (双路融合, depth_model={depth_model_type})")
+            elif fd_mode == "supervision":
+                self.lss = LSS(transformedImgShape=transformedImgShape, featureShape=featureShape)
+                from .foundation_depth_v2 import DepthSupervisionHelper
+                self.depth_supervision = DepthSupervisionHelper(
+                    depth_model_type=depth_model_type,
+                )
+                print(f"[Cam2BEV] FD mode=supervision (标准LSS + 辅助深度监督)")
+            elif fd_mode == "replace":
+                from .foundation_depth import FoundationDepthLSS
+                self.lss = FoundationDepthLSS(
+                    transformedImgShape=transformedImgShape,
+                    featureShape=featureShape,
+                    depth_model_type=depth_model_type,
+                )
+                print(f"[Cam2BEV] FD mode=replace (兼容旧版, depth_model={depth_model_type})")
+            else:
+                raise ValueError(f"Unknown fd_mode: {fd_mode}")
+        else:
+            self.lss = LSS(transformedImgShape=transformedImgShape, featureShape=featureShape)
         self.CamEncode = SwinT_tiny_Encoder(output_indices, featureShape, encoder_out_channels, FPN_in_channels, FPN_out_channels)
         dx, bx, nx = gen_dx_bx(xbound=xbound, ybound=ybound, zbound=zbound)
         self.dx = nn.Parameter(dx, requires_grad = False)
@@ -276,7 +332,13 @@ class Cam2BEV(nn.Module):
         try:
             # (B, out_channels, nx[2], nx[0], nx[1])
             cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) 
-        except:
+        except Exception as e:
+            print(
+                f"[ERROR] bev_pool CUDA failed: {e}. "
+                f"Returning zeros — image branch gradient will be zero this step. "
+                f"Input: img_pc={img_pc.shape}, geom_feats={geom_feats.shape}, B={B}",
+                file=sys.stderr, flush=True
+            )
             cam_bev = torch.zeros(B, C, nx2_int, nx0_int, nx1_int, device=img_pc.device, dtype=img_pc.dtype)
 
         cam_bev = torch.cat(cam_bev.unbind(dim=2), 1)
@@ -317,8 +379,14 @@ class Cam2BEV(nn.Module):
             try:
                 # (B, out_channels, nx[2], nx[0], nx[1])
                 cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) 
-            except:
-                cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device = img_pc.device, dtype = img_pc.dtype)
+            except Exception as e:
+                print(
+                    f"[ERROR] ref_bev_pool CUDA failed: {e}. "
+                    f"Returning zeros — mask will be empty. "
+                    f"Input: img_pc={img_pc.shape}, geom_feats={geom_feats.shape}, B={B}",
+                    file=sys.stderr, flush=True
+                )
+                cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device=img_pc.device, dtype=img_pc.dtype)
 
             binary_bev = torch.max(cam_bev, dim=2)[0]
             
@@ -347,9 +415,34 @@ class Cam2BEV(nn.Module):
         post_cam2ego_rot = post_cam2ego_T[:, :, :3, :3]
         post_cam2ego_trans = post_cam2ego_T[:, :, :3, 3]
 
-        imgs = (imgs - self.mean) / self.std
-        img_feats = self.CamEncode(imgs) 
-        geometry, img_depth_feature = self.lss(cam2ego_rot=cam2ego_rot, cam2ego_trans=cam2ego_trans, cam_intrins=cam_intrins, post_cam2ego_rot=post_cam2ego_rot, post_cam2ego_trans=post_cam2ego_trans, img_feats=img_feats)
+        imgs_norm = (imgs - self.mean) / self.std
+        img_feats = self.CamEncode(imgs_norm) 
+        needs_raw = self.use_foundation_depth and self.fd_mode != "supervision"
+        self._cached_depth_logits = None
+        self._cached_imgs_norm = None
+        
+        if needs_raw:
+            geometry, img_depth_feature = self.lss(
+                cam2ego_rot=cam2ego_rot, cam2ego_trans=cam2ego_trans,
+                cam_intrins=cam_intrins, post_cam2ego_rot=post_cam2ego_rot,
+                post_cam2ego_trans=post_cam2ego_trans, img_feats=img_feats,
+                raw_imgs=imgs_norm,
+            )
+        elif self.depth_supervision is not None and self.training:
+            geometry, img_depth_feature, depth_logits = self.lss(
+                cam2ego_rot=cam2ego_rot, cam2ego_trans=cam2ego_trans,
+                cam_intrins=cam_intrins, post_cam2ego_rot=post_cam2ego_rot,
+                post_cam2ego_trans=post_cam2ego_trans, img_feats=img_feats,
+                return_depth_logits=True,
+            )
+            self._cached_depth_logits = depth_logits
+            self._cached_imgs_norm = imgs_norm
+        else:
+            geometry, img_depth_feature = self.lss(
+                cam2ego_rot=cam2ego_rot, cam2ego_trans=cam2ego_trans,
+                cam_intrins=cam_intrins, post_cam2ego_rot=post_cam2ego_rot,
+                post_cam2ego_trans=post_cam2ego_trans, img_feats=img_feats,
+            )
         bev_feats = self.bev_pool(geometry=geometry, img_depth_feature=img_depth_feature)
         with torch.no_grad():
             geom_detach = geometry.detach()
@@ -371,6 +464,15 @@ class Cam2BEV(nn.Module):
         bev_feats = self.proj_head(bev_feats)
         bev_feats = bev_feats.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
         return bev_feats, cam_bev_mask[:, 0, :, :]
+    
+    def get_depth_supervision_loss(self, alpha=0.5):
+        """Compute auxiliary depth supervision loss (only for fd_mode=supervision)."""
+        if self.depth_supervision is None or self._cached_depth_logits is None:
+            return torch.tensor(0.0, requires_grad=False)
+        fH, fW = self._cached_depth_logits.shape[2], self._cached_depth_logits.shape[3]
+        return self.depth_supervision.compute_loss(
+            self._cached_depth_logits, self._cached_imgs_norm, fH, fW, alpha=alpha
+        )
     
 def generate_random_rt_matrix(batch_size=1, r_range=(-torch.pi, torch.pi), t_range=(-1, 1)):
     rx = torch.rand(batch_size, 1) * (r_range[1] - r_range[0]) + r_range[0]

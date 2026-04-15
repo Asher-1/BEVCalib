@@ -213,6 +213,59 @@ def make_collate_fn(target_size):
     return collate_fn
 
 
+def _auto_permute_spconv_weights(state_dict, model):
+    """Auto-detect and permute sparse conv weights between spconv v2 and drcv/v1 layouts.
+    
+    spconv v2: (out_channels, k, k, k, in_channels)  — dim0 is largest (out)
+    drcv/v1:   (k, k, k, in_channels, out_channels)  — dim-1 is largest (out)
+    
+    Detection: find an asymmetric 5D weight (in != out) to determine if ckpt
+    uses a different layout than the model. Then permute ALL 5D sparse conv weights.
+    """
+    model_sd = model.state_dict()
+    
+    needs_v2_to_v1 = False
+    for key in state_dict:
+        if key not in model_sd:
+            continue
+        cs, ms = state_dict[key].shape, model_sd[key].shape
+        if len(cs) != 5 or len(ms) != 5:
+            continue
+        if cs == ms:
+            continue
+        if sorted(cs) == sorted(ms):
+            needs_v2_to_v1 = True
+            break
+    
+    if not needs_v2_to_v1:
+        return state_dict
+    
+    permuted = 0
+    for key in list(state_dict.keys()):
+        if key not in model_sd:
+            continue
+        if len(state_dict[key].shape) != 5 or len(model_sd[key].shape) != 5:
+            continue
+        w = state_dict[key]
+        target = model_sd[key].shape
+        if w.shape == target:
+            pass
+        else:
+            w_perm = w.permute(1, 2, 3, 4, 0).contiguous()
+            if w_perm.shape == target:
+                state_dict[key] = w_perm
+                permuted += 1
+            else:
+                w_perm2 = w.permute(4, 0, 1, 2, 3).contiguous()
+                if w_perm2.shape == target:
+                    state_dict[key] = w_perm2
+                    permuted += 1
+    
+    if permuted > 0:
+        print(f"   Auto-permuted {permuted} sparse conv weights (v2↔v1 layout)")
+    return state_dict
+
+
 def _resolve_perturbation_from_ckpt(args, checkpoint):
     """Auto-resolve perturbation params from checkpoint if not set via CLI.
     
@@ -330,8 +383,11 @@ def evaluate_checkpoint(args):
         rotation_only=rotation_only,
         use_mlp_head=use_mlp_head,
         bev_pool_factor=args.bev_pool_factor,
+        use_foundation_depth=getattr(args, 'use_foundation_depth', 0) > 0,
+        depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
     ).to(device)
     
+    state_dict = _auto_permute_spconv_weights(state_dict, model)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         print(f"   Missing keys: {missing}")
@@ -377,9 +433,14 @@ def evaluate_checkpoint(args):
         eval_dir = os.path.join(ckpt_dir, f"{ckpt_name}_eval")
     os.makedirs(eval_dir, exist_ok=True)
     
+    eval_seed = getattr(args, 'eval_seed', 42)
+    np.random.seed(eval_seed)
+    torch.manual_seed(eval_seed)
+    
     print(f"\n4. 开始评估...")
     print(f"   输出目录: {eval_dir}")
     print(f"   扰动参数: {args.angle_range_deg}°, {args.trans_range}m")
+    print(f"   评估seed: {eval_seed} (固定perturbation保证可复现)")
     
     # 创建外参结果文件
     extrinsics_file = os.path.join(eval_dir, "extrinsics_and_errors.txt")
@@ -806,7 +867,10 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
         rotation_only=rotation_only,
         use_mlp_head=use_mlp_head,
         bev_pool_factor=args.bev_pool_factor,
+        use_foundation_depth=getattr(args, 'use_foundation_depth', 0) > 0,
+        depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
     ).to(device)
+    state_dict = _auto_permute_spconv_weights(state_dict, model)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
@@ -885,9 +949,14 @@ def compare_checkpoints(args):
     eval_dir = args.output_dir or f"logs/comparison_{label_a}_vs_{label_b}"
     os.makedirs(eval_dir, exist_ok=True)
 
+    eval_seed = getattr(args, 'eval_seed', 42)
+    np.random.seed(eval_seed)
+    torch.manual_seed(eval_seed)
+    
     print(f"\n3. 开始对比评估...")
     print(f"   输出目录: {eval_dir}")
     print(f"   扰动: {args.angle_range_deg}°")
+    print(f"   评估seed: {eval_seed} (固定perturbation保证可复现)")
 
     _empty_errors = lambda: {
         'trans_error': [], 'fwd_error': [], 'lat_error': [], 'ht_error': [],
@@ -1682,6 +1751,12 @@ def main():
                        help="BEV spatial avg-pool factor (0=disabled, 2=2x2 pool)")
     parser.add_argument("--use_drcv", action='store_true', default=False,
                        help="Use drcv sparse conv backend (env var handled before import)")
+    parser.add_argument("--eval_seed", type=int, default=42,
+                       help="Fixed seed for perturbation generation, ensuring reproducible evaluation (default: 42)")
+    parser.add_argument("--use_foundation_depth", type=int, default=0,
+                       help="Use Foundation Depth (MiDaS) for LSS (1=enable, 0=disable)")
+    parser.add_argument("--depth_model_type", type=str, default="midas_small",
+                       help="Depth model type for Foundation Depth (default: midas_small)")
     
     args = parser.parse_args()
 

@@ -252,6 +252,8 @@ EARLY_STOPPING_PATIENCE=""
 SEED=""
 PRETRAIN_CKPT=""
 NUM_EPOCHS=""
+EVAL_EPOCHES=""
+GRAD_ACCUM_STEPS=""
 ENABLE_TB=1
 TB_PORT=""
 NNODES=""
@@ -359,6 +361,20 @@ while [[ $# -gt 0 ]]; do
             USE_DEFORMABLE="$2"; shift 2 ;;
         --bev_pool_factor)
             BEV_POOL_FACTOR="$2"; shift 2 ;;
+        --use_foundation_depth)
+            USE_FOUNDATION_DEPTH="$2"; shift 2 ;;
+        --fd_mode)
+            FD_MODE="$2"; shift 2 ;;
+        --depth_sup_alpha)
+            DEPTH_SUP_ALPHA="$2"; shift 2 ;;
+        --depth_model_type)
+            DEPTH_MODEL_TYPE="$2"; shift 2 ;;
+        --max_frames_per_seq)
+            MAX_FRAMES_PER_SEQ="$2"; shift 2 ;;
+        --eval_epoches)
+            EVAL_EPOCHES="$2"; shift 2 ;;
+        --grad_accum_steps)
+            GRAD_ACCUM_STEPS="$2"; shift 2 ;;
         --no-tb|--no-tensorboard)
             ENABLE_TB=0
             shift
@@ -422,7 +438,7 @@ while [[ $# -gt 0 ]]; do
             echo "          --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
             echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
             echo "          --rdzv_timeout SECONDS, --use_geodesic_loss 0/1, --use_mlp_head 0/1,"
-            echo "          --use_deformable 0/1, --bev_pool_factor N"
+            echo "          --use_deformable 0/1, --bev_pool_factor N --use_foundation_depth 0/1"
             exit 1
             ;;
     esac
@@ -692,7 +708,9 @@ fi
 RUNNING=$(ps aux | grep -E "train_kitti.py" | grep -v grep | wc -l)
 if [ "$RUNNING" -gt 0 ]; then
     echo "⚠️  警告: 检测到 $RUNNING 个正在运行的训练进程"
-    if [ "$FOREGROUND" -eq 1 ]; then
+    if [ "${BATCH_MODE:-0}" -eq 1 ]; then
+        echo "BATCH_MODE: 自动继续"
+    elif [ "$FOREGROUND" -eq 1 ]; then
         echo "是否继续启动新训练? (y/n)"
         read -t 10 -p "> " CONFIRM || CONFIRM="n"
         if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
@@ -877,6 +895,13 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
     [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
     [ -n "$BEV_POOL_FACTOR" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_pool_factor $BEV_POOL_FACTOR"
+    [ -n "$USE_FOUNDATION_DEPTH" ] && OPTIM_ARGS="$OPTIM_ARGS --use_foundation_depth $USE_FOUNDATION_DEPTH"
+    [ -n "$DEPTH_MODEL_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_model_type $DEPTH_MODEL_TYPE"
+    [ -n "$FD_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --fd_mode $FD_MODE"
+    [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
+    [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
+    [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
+    [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
@@ -969,6 +994,13 @@ else
     [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
     [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
     [ -n "$BEV_POOL_FACTOR" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_pool_factor $BEV_POOL_FACTOR"
+    [ -n "$USE_FOUNDATION_DEPTH" ] && OPTIM_ARGS="$OPTIM_ARGS --use_foundation_depth $USE_FOUNDATION_DEPTH"
+    [ -n "$DEPTH_MODEL_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_model_type $DEPTH_MODEL_TYPE"
+    [ -n "$FD_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --fd_mode $FD_MODE"
+    [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
+    [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
+    [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
+    [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"

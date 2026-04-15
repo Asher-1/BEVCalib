@@ -1,0 +1,118 @@
+# BEVCalib B26A V7 泛化性能评估
+# 6个V7模型 (Linear + quaternion, 不同LR/aug/axis_weights组合)
+# 在test_data上评估泛化性能
+#
+# V7设计结论 (基于V6分析):
+#   - Linear + quaternion 是最优组合
+#   - MLP头过参数化, 泛化差 — 不再测试
+#   - Geodesic loss对Linear有害 — 不再测试
+#   - Pitch占误差67-89%, 是最大优化空间
+#
+# 训练时最佳 val_rot:
+#   v7_baseline:      0.2974° (Epoch 381)
+#   v7_aug:           0.2873° (Epoch 361)
+#   v7_pitch_wt:      0.2870° (Epoch 361)
+#   v7_cosine:        0.2784° (Epoch 321)
+#   v7_aug_cosine:    0.3472° (Epoch 321)
+#   v7_pitch_cosine:  0.3891° (Epoch 321)
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_v7.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v7"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v7"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== 组A: StepLR 系列 ====================
+
+  - label: "v7-baseline"
+    dir_name: "model_small_5deg_v7_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-baseline"
+    mode_desc: "B26A V7 Linear+quat+StepLR+无aug (val=0.2974°)"
+
+  - label: "v7-aug"
+    dir_name: "model_small_5deg_v7_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-aug"
+    mode_desc: "B26A V7 Linear+quat+StepLR+有aug (val=0.2873°)"
+
+  - label: "v7-pitch-wt"
+    dir_name: "model_small_5deg_v7_pitch_wt"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-pitch-wt"
+    mode_desc: "B26A V7 Linear+quat+StepLR+aug+pitch_wt=1,2,1 (val=0.2870°)"
+
+  # ==================== 组B: CosineWR 系列 ====================
+
+  - label: "v7-cosine"
+    dir_name: "model_small_5deg_v7_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-cosine"
+    mode_desc: "B26A V7 Linear+quat+CosineWR+无aug (val=0.2784°)"
+
+  - label: "v7-aug-cosine"
+    dir_name: "model_small_5deg_v7_aug_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-aug-cosine"
+    mode_desc: "B26A V7 Linear+quat+CosineWR+有aug (val=0.3472°)"
+
+  - label: "v7-pitch-cosine"
+    dir_name: "model_small_5deg_v7_pitch_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v7-pitch-cosine"
+    mode_desc: "B26A V7 Linear+quat+CosineWR+aug+pitch_wt=1,2,1 (val=0.3891°)"
+
+  # ==================== V6 基线对照 ====================
+
+  - label: "v6-linear-baseline"
+    dir_name: "../v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v6-linear-baseline"
+    mode_desc: "B26A V6 Linear+quat+StepLR (泛化=1.194°, V6最佳)"

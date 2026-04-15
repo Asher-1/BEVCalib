@@ -1,0 +1,159 @@
+# BEVCalib ALL V13 Depth Optimization
+#
+# V13 深度估计优化方案 — ALL 数据集 (13seq, ~124K帧)
+#
+# 在 B26A 快速验证后，用 ALL 全量数据训练，验证深度优化方案的泛化增益。
+# ALL 数据集是泛化冠军 V6 (0.29°) 的训练数据基础，数据量+深度优化应当超越 V6。
+#
+# 实验矩阵:
+#   A. v13_fd_replace_v2:  修复版 FD (SpatialAligner, 去 min-max)
+#   B. v13_fd_dual_path:   双路融合 (FD depth + img feats -> depth_net)
+#   C. v13_fd_supervision: 标准 LSS + FD 辅助深度监督 (推理无开销)
+#   D. v13_baseline:       标准 LSS Z=10+pitch3+Cosine (对照组)
+#
+# 用法 (本地单机8卡):
+#   bash batch_train.sh configs/batch8_train_all_v13_depth.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5         # 训练时旋转扰动范围 (±5°)
+    trans_range: 0.15          # 训练时平移扰动范围 (±0.15m)
+
+    # === 训练基础配置 ===
+    batch_size: 16             # 每GPU的batch size
+    learning_rate: 1e-4        # 初始学习率 (AdamW)
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    # === 模型配置 ===
+    use_compile: false         # torch.compile (实验性)
+    rotation_only: true        # 仅预测旋转 (3-DOF)
+
+    # === 损失函数 ===
+    enable_axis_loss: true     # 启用逐轴旋转损失 (R/P/Y)
+    weight_axis_rotation: 0.5  # 逐轴损失权重系数
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0            # 0=Linear, 1=MLP三层
+    use_geodesic_loss: 0       # 0=L1旋转损失, 1=geodesic
+
+    # === 正则化 ===
+    drop_path_rate: 0.1        # SwinT drop path率
+    head_dropout: 0.1          # 回归头dropout
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3         # 单轴扰动概率
+    per_axis_weights: null     # R/P/Y采样权重
+
+    # === 学习率调度 (V13用CosineWarmRestarts) ===
+    lr_schedule: cosine_warm_restarts  # 余弦退火+热重启
+    cosine_T0: 50              # 第一个余弦周期长度 (epoch)
+    cosine_Tmult: 2            # 周期倍增因子 (T1=100, T2=200, ...)
+    warmup_epochs: 10          # 线性warmup epoch数
+    backbone_lr_scale: 0.1     # backbone学习率缩放 (lr × 0.1)
+
+    # === 数据增强 ===
+    augment_pc_jitter: 0.0     # 点云高斯噪声σ (米)
+    augment_pc_dropout: 0.0    # 点云随机丢弃比例
+    augment_color_jitter: 0.0  # 图像颜色抖动强度
+
+    # === 训练控制 ===
+    early_stopping_patience: 30  # 早停patience (0=关闭)
+    seed: 42                   # 全局随机种子
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500   # 每序列最大帧数 (均匀采样)
+    eval_epoches: 50           # 每N个epoch验证一次
+    grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
+
+    # === 运行模式 ===
+    foreground: true           # 前台运行 (batch模式必须)
+    no_tensorboard: true       # 关闭TensorBoard
+    tensorboard_port: null
+
+experiments:
+  # A. 修复版 FD 替换 (SpatialAligner, 去 per-image min-max)
+  - name: "v13_fd_replace_v2"
+    description: "ALL V13A: Fixed FD (replace_v2, SpatialAligner, 去min-max)"
+    dataset: "all"
+    version: "v13_fd_replace_v2_quick"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      fd_mode: replace_v2
+      batch_size: 16
+
+  # B. 双路融合: FD depth 作为额外输入通道
+  - name: "v13_fd_dual_path"
+    description: "ALL V13B: Dual-path (FD depth + features -> depth_net)"
+    dataset: "all"
+    version: "v13_fd_dual_path_quick"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      fd_mode: dual_path
+      batch_size: 16
+
+  # C. 辅助深度监督: 标准 LSS + FD KL散度监督 (推理无开销)
+  - name: "v13_fd_supervision"
+    description: "ALL V13C: Standard LSS + FD depth supervision (alpha=0.5)"
+    dataset: "all"
+    version: "v13_fd_supervision_quick"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      fd_mode: supervision
+      depth_sup_alpha: 0.5
+      batch_size: 16
+
+  # D. 对照组: 标准 LSS Z=10+pitch3+Cosine (无 FD)
+  - name: "v13_baseline"
+    description: "ALL V13D: Standard LSS Z=10+pitch3+Cosine (对照组, 无FD)"
+    dataset: "all"
+    version: "v13_baseline_quick"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+# ============================================================================
+# V13 ALL 消融矩阵 (4组)
+# ============================================================================
+#
+#   实验                    | FD Mode      | Depth Model | BS | 对照变量
+#   ------------------------+--------------+-------------+----+---------
+#   A v13_fd_replace_v2     | replace_v2   | MiDaS small | 4  | 修复版FD替换
+#   B v13_fd_dual_path      | dual_path    | MiDaS small | 4  | FD作为额外输入
+#   C v13_fd_supervision    | supervision  | MiDaS small | 4  | FD辅助监督
+#   D v13_baseline          | N/A (无FD)   | N/A         | 8  | 标准LSS对照
+#
+# 关键对比:
+#   A vs D: 修复版FD能否超越标准LSS?
+#   B vs D: 双路融合是否优于纯LSS?
+#   C vs D: 辅助监督能否在不改推理的前提下提升泛化?
+#   A vs B: FD替换 vs FD融合，哪个更好?
+#   C vs A/B: 零推理开销的方案C能否接近A/B?
+#
+# 与 V6 冠军对比基线:
+#   all-v6-champion: 泛化 Rot Mean = 0.29°
+#   V13D baseline 预期: <0.25° (Z=10+pitch3+cosine 在 ALL 上的增益)
+#   V13 A/B/C 目标: <0.20° (深度优化+数据量双重增益)

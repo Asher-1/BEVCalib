@@ -1,0 +1,191 @@
+# BEVCalib ALL V9 训练配置
+#
+# V9 设计依据 (V7/V8 数据驱动):
+#
+#   1. 数据覆盖 > 模型tricks: ALL训练 (0.494°) >> B26A (0.98°+), 差距2x
+#      → V9 全部在ALL (8seq, 78K帧) 上训练
+#
+#   2. V8 B26A验证结论:
+#      - Z=10 (zbound=2.0): Val Pitch 降0.02°, 泛化Pitch降0.2°, 值得上ALL验证
+#      - axis_weights=1,3,1: 有效压Pitch (1.198→1.098°), 但roll涨, 需balance
+#      - per_axis_weights=1,2,1: 效果类似axis_weights, 可叠加
+#      - StepLR + 无aug: B26A上稳定, ALL上aug可能有增益(数据够大)
+#
+#   3. V7 ALL验证结论:
+#      - v7-baseline (StepLR+无aug): 0.986° (V7 B26A最佳)
+#      - v7-pitch-cosine (CosineWR+aug+pitch_wt=2): 0.978° (V7最佳, 仅微超)
+#      - 在ALL上aug有无差异不大, LR schedule差异也小
+#
+#   4. 新增改进:
+#      - 分层训练/验证划分: 每个sequence独立80/20, 防止某些seq被欠采样
+#      - drcv默认开启
+#      - 更长训练epoch (ALL数据量大, 需要更多epoch)
+#
+# V9 实验矩阵 (6组, 在ALL数据上):
+#   1. v9_baseline:      复现V6冠军 (StepLR+无aug+1,1,1+Z=5)
+#   2. v9_z10:           Z=10单一变量 (验证Z分辨率在ALL上的增益)
+#   3. v9_z10_pitch3:    Z=10 + axis_weights=1,3,1 (V8最佳B26A组合上ALL)
+#   4. v9_z10_pitch3_aug: Z=10 + pitch3 + 轻aug (ALL数据够大, aug可能有增益)
+#   5. v9_cosine_z10_pitch3: CosineWR + Z=10 + pitch3 (探索LR+Z+pitch最优组合)
+#   6. v9_z10_pitch3_pa: Z=10 + axis=1,3,1 + per_axis=1,2,1 (V8双重pitch优化)
+#
+# 用法 (本地8卡):
+#   bash batch_train.sh configs/batch8_train_all_v9.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50           # 每N个epoch验证一次
+    grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # ALL V9: 6组 Pitch优化 + Z分辨率消融
+  # =========================================================================
+
+  # 1. V6冠军复现 — 确认分层split后0.494°可复现
+  #    对照组: 验证新的stratified split是否影响基线
+  - name: "v9_baseline"
+    description: "ALL V9: 复现V6冠军 (StepLR+无aug+Z=5, stratified split)"
+    dataset: "all"
+    version: "v9_baseline"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. Z=10 单一变量 — V8在B26A上Z=10降低pitch 0.2°, ALL上验证
+  #    预期: 对Pitch有正向增益, 可能增加少量计算量
+  - name: "v9_z10"
+    description: "ALL V9: Z=10 (zbound 2.0, 验证Z分辨率增益)"
+    dataset: "all"
+    version: "v9_z10"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 3. Z=10 + Pitch加权=3 — V8 B26A最佳泛化组合 (v8_z10_pitch_all: 1.214°)
+  #    上ALL验证, 预期进入0.4°以内
+  - name: "v9_z10_pitch3"
+    description: "ALL V9: Z=10 + axis_wt=1,3,1 (V8最佳B26A组合)"
+    dataset: "all"
+    version: "v9_z10_pitch3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 4. Z=10 + Pitch=3 + 轻量aug — ALL 78K帧够大, aug可能有正则化增益
+  #    V7结果: ALL上aug差异微小, V9加轻量aug验证
+  - name: "v9_z10_pitch3_aug"
+    description: "ALL V9: Z=10 + pitch3 + 轻aug (验证ALL上aug增益)"
+    dataset: "all"
+    version: "v9_z10_pitch3_aug"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_pc_dropout: 0.1
+      augment_color_jitter: 0.3
+
+  # 5. CosineWR + Z=10 + Pitch=3 — 探索LR schedule变化的增益
+  #    V7中CosineWR+aug+pitch=2在B26A上最佳(0.978°), ALL上呢?
+  - name: "v9_cosine_z10_pitch3"
+    description: "ALL V9: CosineWR + Z=10 + pitch3 (LR+Z+pitch最优组合)"
+    dataset: "all"
+    version: "v9_cosine_z10_pitch3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      axis_weights: "1.0,3.0,1.0"
+
+  # 6. Z=10 + axis=1,3,1 + per_axis=1,2,1 — 双重Pitch优化
+  #    V8在B26A: v8_z10_pitch_all最佳泛化(1.214°), ALL上能否进一步压低
+  - name: "v9_z10_pitch3_pa"
+    description: "ALL V9: Z=10 + pitch3 + per_axis_wt=1,2,1 (双重pitch优化)"
+    dataset: "all"
+    version: "v9_z10_pitch3_pa"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      per_axis_weights: "1.0,2.0,1.0"
+
+# ============================================================================
+# V9 ALL 消融矩阵 (6组)
+# ============================================================================
+#
+#   实验                     | Z   | LR       | Aug | Axis Wt | PerAxis | 对照变量
+#   -------------------------+-----+----------+-----+---------+---------+---------
+#   1 v9_baseline            | 5   | StepLR   | 无  | 1,1,1   | null    | V6复现
+#   2 v9_z10                 | 10  | StepLR   | 无  | 1,1,1   | null    | Z分辨率
+#   3 v9_z10_pitch3          | 10  | StepLR   | 无  | 1,3,1   | null    | +Pitch加权
+#   4 v9_z10_pitch3_aug      | 10  | StepLR   | 有  | 1,3,1   | null    | +Aug
+#   5 v9_cosine_z10_pitch3   | 10  | CosineWR | 无  | 1,3,1   | null    | LR变体
+#   6 v9_z10_pitch3_pa       | 10  | StepLR   | 无  | 1,3,1   | 1,2,1  | +PerAxis
+#
+# 关键对比:
+#   2 vs 1: Z=10在ALL上的增益 (V8 B26A上降Pitch 0.2°)
+#   3 vs 2: Pitch加权=3在ALL+Z10上的增益
+#   4 vs 3: Aug在ALL大数据集上的增益 (V7 ALL上aug差异微小)
+#   5 vs 3: CosineWR vs StepLR (V7中CosineWR在B26A+aug上最佳)
+#   6 vs 3: 双重Pitch优化是否叠加有效
+#
+# 预期目标:
+#   V6冠军: 0.494° (Pitch 0.332°)
+#   V9目标: <0.42° (Pitch <0.28°), 即Pitch降>15%
