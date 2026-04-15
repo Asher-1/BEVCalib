@@ -17,6 +17,7 @@ spconv-cu118==2.3.8
 tensorboard
 pandas
 matplotlib
+timm
 
 # Additional dependencies for prepare_custom_dataset.py
 tqdm  # Progress bar for data processing

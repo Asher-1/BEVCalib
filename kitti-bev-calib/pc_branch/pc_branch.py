@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 # Backend switch: set USE_DRCV_BACKEND=1 to use drcv ops instead of spconv
-USE_DRCV = os.environ.get("USE_DRCV_BACKEND", "0") == "1"
+USE_DRCV = os.environ.get("USE_DRCV_BACKEND", "1") == "1"
 
 if USE_DRCV:
     from drcv.ops.voxel import voxelization as _drcv_voxelization
@@ -31,6 +31,7 @@ class Lidar2BEV(nn.Module):
     def __init__(self):
         super(Lidar2BEV, self).__init__()
         if USE_DRCV:
+            print("Use DRCV as Lidar2BEV backend")
             self._voxel_size = vsize_xyz
             self._coors_range = _COORS_RANGE
             self._max_num_points = 10

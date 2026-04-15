@@ -310,8 +310,22 @@ while [[ $# -gt 0 ]]; do
             USE_MLP_HEAD="$2"; shift 2 ;;
         --use_deformable)
             USE_DEFORMABLE="$2"; shift 2 ;;
+        --use_foundation_depth)
+            USE_FOUNDATION_DEPTH="$2"; shift 2 ;;
+        --depth_model_type)
+            DEPTH_MODEL_TYPE="$2"; shift 2 ;;
+        --fd_mode)
+            FD_MODE="$2"; shift 2 ;;
+        --depth_sup_alpha)
+            DEPTH_SUP_ALPHA="$2"; shift 2 ;;
         --bev_pool_factor)
             BEV_POOL_FACTOR="$2"; shift 2 ;;
+        --max_frames_per_seq)
+            MAX_FRAMES_PER_SEQ="$2"; shift 2 ;;
+        --eval_epoches)
+            EVAL_EPOCHES="$2"; shift 2 ;;
+        --grad_accum_steps)
+            GRAD_ACCUM_STEPS="$2"; shift 2 ;;
         *)
             echo "❌ Unknown option: $1"
             exit 1
@@ -642,6 +656,13 @@ OPTIM_FLAGS=""
 [ -n "$PRETRAIN_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --pretrain_ckpt $PRETRAIN_CKPT"
 [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_geodesic_loss $USE_GEODESIC_LOSS"
 [ -n "$USE_MLP_HEAD" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_mlp_head $USE_MLP_HEAD"
+[ -n "$USE_FOUNDATION_DEPTH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_foundation_depth $USE_FOUNDATION_DEPTH"
+[ -n "$DEPTH_MODEL_TYPE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --depth_model_type $DEPTH_MODEL_TYPE"
+[ -n "$FD_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --fd_mode $FD_MODE"
+[ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_FLAGS="$OPTIM_FLAGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
+[ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_FLAGS="$OPTIM_FLAGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
+[ -n "$EVAL_EPOCHES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --eval_epoches $EVAL_EPOCHES"
+[ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --grad_accum_steps $GRAD_ACCUM_STEPS"
 
 DEFORMABLE_VAL=${USE_DEFORMABLE:-0}
 [ -n "$BEV_POOL_FACTOR" ] && OPTIM_FLAGS="$OPTIM_FLAGS --bev_pool_factor $BEV_POOL_FACTOR"

@@ -25,6 +25,7 @@ global:
 defaults:
   env:
     BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
 
   params:
     angle_range_deg: 5
@@ -70,7 +71,7 @@ experiments:
   # 1. V6最佳复现 — 确认0.494°可复现
   - name: "v7_baseline"
     description: "ALL V7: Linear+quat+StepLR+无aug (复现V6最佳0.494°)"
-    dataset: "all_training_data"
+    dataset: "all"
     version: "v7_baseline"
     params:
       lr_schedule: step
@@ -84,7 +85,7 @@ experiments:
   # 2. 加aug — 验证aug在ALL 78K帧上是否有增益
   - name: "v7_aug"
     description: "ALL V7: Linear+quat+StepLR+有aug (验证aug增益)"
-    dataset: "all_training_data"
+    dataset: "all"
     version: "v7_aug"
     params:
       lr_schedule: step
@@ -98,7 +99,7 @@ experiments:
   # 3. aug + CosineWR — 两个维度叠加
   - name: "v7_aug_cosine"
     description: "ALL V7: Linear+quat+CosineWR+有aug (aug+LR叠加)"
-    dataset: "all_training_data"
+    dataset: "all"
     version: "v7_aug_cosine"
     params:
       lr_schedule: cosine_warm_restarts
@@ -114,7 +115,7 @@ experiments:
   # 4. 全配置最优 — aug + CosineWR + Pitch加权
   - name: "v7_pitch_cosine"
     description: "ALL V7: Linear+quat+CosineWR+aug+pitch_wt=1,2,1 (预期最优)"
-    dataset: "all_training_data"
+    dataset: "all"
     version: "v7_pitch_cosine"
     params:
       lr_schedule: cosine_warm_restarts

@@ -1,0 +1,155 @@
+# BEVCalib 批量训练配置模板（优化版）
+# 复制此文件并修改，创建自定义批量训练实验
+
+# ============================================================================
+# 全局配置（所有实验共享）
+# ============================================================================
+global:
+  dry_run: false                 # true: 仅打印命令不执行, false: 实际运行
+  batch_log_dir: "logs"          # 批量训练日志目录
+  wait_between_experiments: 10   # 实验间等待时间（秒，释放GPU资源）
+
+# ============================================================================
+# 默认参数（所有实验继承，除非实验中显式覆盖）
+# ============================================================================
+defaults:
+  # 默认环境变量
+  env:
+    USE_DRCV_BACKEND: 1
+  
+  # 默认训练参数
+  params:
+    # 扰动参数
+    angle_range_deg: 5          # 旋转扰动（度）
+    trans_range: 0.3            # 平移扰动（米）
+    
+    # 训练参数
+    batch_size: 16              # Batch size
+    learning_rate: null         # 学习率（null使用模式默认值）
+    
+    # DDP配置
+    use_ddp: true               # 是否使用DDP多GPU
+    ddp_gpus: null              # DDP GPU数（null=自动检测）
+    
+    # 训练模式
+    use_compile: false          # torch.compile加速（需PyTorch>=2.1）
+    rotation_only: false        # 仅优化旋转参数
+    
+    # 执行模式
+    foreground: true            # 批量模式下此项被忽略（自动强制前台执行）
+    no_tensorboard: true        # 不启动TB（批量训练统一管理）
+    tensorboard_port: null      # TB端口（null=自动检测）
+    
+    # 多机DDP参数（单机可忽略）
+    nnodes: null                # 总机器数（null=1）
+    node_rank: null             # 当前机器编号（null=0）
+    master_addr: null           # master节点IP（null=自动检测）
+    master_port: null           # master端口（null=自动检测）
+
+# ============================================================================
+# 实验组配置（只需指定与defaults不同的参数）
+# ============================================================================
+experiments:
+  # ========== 实验1示例 ==========
+  - name: "实验1名称"
+    description: "实验1描述"      # 可选
+    
+    # 必需参数
+    dataset: "B26A"               # 数据集: B26A / all / custom
+    version: "v1"                 # 版本标签（出现在日志目录名）
+    
+    # 环境变量（可选，合并到defaults.env）
+    env:
+      BEV_ZBOUND_STEP: 2.0        # BEV Z步长 (20.0→z1, 4.0→z5, 2.0→z10)
+    
+    # 训练参数（可选，只需指定与defaults不同的）
+    # params:
+    #   angle_range_deg: 10       # 如需覆盖defaults
+
+  # ========== 实验2示例（覆盖部分参数） ==========
+  - name: "实验2名称"
+    description: "实验2描述"
+    dataset: "B26A"
+    version: "v2"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      angle_range_deg: 10         # 覆盖defaults中的5
+      trans_range: 0.5            # 覆盖defaults中的0.3
+
+
+# ============================================================================
+# 配置说明和常见场景
+# ============================================================================
+
+# 参数继承规则:
+#   1. 实验首先继承 defaults 中的所有 env 和 params
+#   2. 实验中指定的参数会覆盖 defaults 中的同名参数
+#   3. 优先级: experiment.params > defaults.params
+
+# 场景1: Z分辨率消融实验
+#   defaults 中设置所有公共参数
+#   experiments 中只覆盖 BEV_ZBOUND_STEP
+#   参考: batch_train_5deg.yaml
+
+# 场景2: 学习率消融实验
+#   defaults 中设置除learning_rate外的所有参数
+#   experiments 中只覆盖 learning_rate
+#   参考: batch_train_lr_ablation.yaml
+
+# 场景3: Rotation-Only vs 完整标定
+#   defaults 中设置 rotation_only: false
+#   部分实验中覆盖为 rotation_only: true
+#   参考: batch_train_10deg_rotation.yaml
+
+# 场景4: Batch Size消融实验
+#   defaults 中设置除batch_size外的所有参数
+#   experiments 中只覆盖 batch_size
+
+# 场景5: 多机训练
+#   defaults 中设置 nnodes/ddp_gpus/master_addr 等
+#   experiments 中只指定 dataset/version/env
+#   参考: batch16_train_multinode.yaml
+
+# ============================================================================
+# 使用提示
+# ============================================================================
+
+# 1. null值的含义:
+#    null表示不传递该参数，使用start_training.sh的默认值
+
+# 2. 前台vs后台执行:
+#    - batch_train.sh 会自动强制前台执行（忽略 foreground 设置），确保实验串行不抢GPU
+#    - foreground 设置仅在直接运行 start_training.sh 时生效
+
+# 3. 实验命名:
+#    - name字段只用于日志显示
+#    - version字段会出现在日志目录名中
+
+# 4. 资源管理:
+#    - wait_between_experiments控制实验间等待时间
+#    - 建议10-30秒，确保GPU完全释放
+
+# ============================================================================
+# 创建自定义配置的步骤
+# ============================================================================
+
+# 1. 复制模板:
+#    cp configs/batch_train_template.yaml configs/my_experiment.yaml
+
+# 2. 配置defaults（公共参数）:
+#    - 将所有实验的公共参数放在 defaults 中
+
+# 3. 配置experiments（差异化参数）:
+#    - 只指定与 defaults 不同的参数
+#    - 每个实验必须指定: dataset, version
+#    - 通常需要指定: env.BEV_ZBOUND_STEP
+
+# 4. 验证配置:
+#    bash batch_train.sh --dry-run configs/my_experiment.yaml
+
+# 5. 运行:
+#    bash batch_train.sh configs/my_experiment.yaml
+
+# 6. 后台运行（推荐）:
+#    nohup bash batch_train.sh configs/my_experiment.yaml > batch.log 2>&1 &

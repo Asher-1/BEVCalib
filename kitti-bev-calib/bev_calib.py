@@ -97,12 +97,24 @@ class BEVCalib(nn.Module):
                  use_geodesic_loss = False,
                  use_mlp_head = True,
                  bev_pool_factor = 0,
+                 use_foundation_depth = False,
+                 depth_model_type = "midas_small",
+                 fd_mode = "replace",
                 ):
         super(BEVCalib, self).__init__()
         self.use_mlp_head = use_mlp_head
         self.rotation_only = rotation_only
         self.bev_pool_factor = bev_pool_factor
-        self.img_branch = Cam2BEV(img_shape=img_shape)
+        self._profile_modules = False
+        self._profile_events = []
+        self._profile_accum = {}
+        self._profile_count = 0
+        self.img_branch = Cam2BEV(
+            img_shape=img_shape,
+            use_foundation_depth=use_foundation_depth,
+            depth_model_type=depth_model_type,
+            fd_mode=fd_mode,
+        )
         self.pc_branch = Lidar2BEV()
         self.bev_encoder_use = bev_encoder
         if self.bev_encoder_use:
@@ -171,14 +183,34 @@ class BEVCalib(nn.Module):
             nn.Linear(mid_dim, out_dim),
         )
 
+    def get_module_profile(self, reset=True):
+        """Return per-module average forward time (ms). Enable with model._profile_modules = True.
+        Deferred sync: events are recorded without synchronize during forward;
+        synchronize happens here at epoch end (zero overhead during training)."""
+        if not self._profile_events:
+            return {}
+        torch.cuda.synchronize()
+        names = ["img_branch", "pc_branch", "fuser", "transformer", "head", "loss"]
+        accum = {}
+        for ev_list in self._profile_events:
+            for i, name in enumerate(names):
+                ms = ev_list[i].elapsed_time(ev_list[i + 1])
+                accum[name] = accum.get(name, 0.0) + ms
+            accum["total"] = accum.get("total", 0.0) + ev_list[0].elapsed_time(ev_list[6])
+        count = len(self._profile_events)
+        result = {k: v / count for k, v in accum.items()}
+        if reset:
+            self._profile_events = []
+        return result
+
     def make_deformable_transformer(self, num_layers, drop_path_rate=0.1):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
         layers = []
         for i in range(num_layers):
             layers.append(deformable_transformer_layer(
                 dim=self.embed_dim,
-                dim_head=self.num_heads,
-                heads=self.embed_dim // self.num_heads,
+                dim_head=self.embed_dim // self.num_heads,
+                heads=self.num_heads,
                 downsample_factor=15,
                 offset_kernel_size=15,
                 offset_scale=10,
@@ -194,7 +226,8 @@ class BEVCalib(nn.Module):
         Returns:
             R: (B, 3, 3)
         """
-        q = q / q.norm(dim=1, keepdim=True)
+        q_norm = q.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        q = q / q_norm
         B = q.shape[0]
         R = torch.zeros(B, 3, 3).to(q.device)
         R[:, 0, 0] = 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2)
@@ -236,6 +269,11 @@ class BEVCalib(nn.Module):
             cam_intrinsic: (B, 3, 3), camera intrinsic matrix.
             out_init_loss: bool, whether to output the loss between init_T and gt_T.
         """
+        profiling = self._profile_modules and torch.cuda.is_available()
+        if profiling:
+            _ev = [torch.cuda.Event(enable_timing=True) for _ in range(7)]
+            _ev[0].record()
+
         img = img.unsqueeze(1)
         gt_T_to_camera = gt_T_to_camera.unsqueeze(1)
         init_T_to_camera = init_T_to_camera.unsqueeze(1)
@@ -244,13 +282,22 @@ class BEVCalib(nn.Module):
         cam2ego_T = torch.linalg.inv(init_T_to_camera)
         cam_bev_feats, cam_bev_mask = self.img_branch(cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic, post_cam2ego_T=post_cam2ego_T, imgs=img) # B, C, H, W
 
+        if profiling:
+            _ev[1].record()
+
         pc = pc.permute(0, 2, 1).contiguous() # (B, 3, N)
         pc_bev_feats = self.pc_branch(pc) # B, C, H, W
-        # x = torch.cat([cam_bev_feats, pc_bev_feats], dim = 1)
+
+        if profiling:
+            _ev[2].record()
+
         x = self.conv_fuser(cam_bev_feats, pc_bev_feats) # B, C, H, W
         if self.bev_encoder_use:
             x = self.bev_encoder(x) # B, C, H, W
         x = x + self.pose_embed
+
+        if profiling:
+            _ev[3].record()
 
         if self.deformable:
             x = self.deformable_transformer(x) # B, C, H, W
@@ -258,7 +305,8 @@ class BEVCalib(nn.Module):
             x = x.permute(0, 2, 3, 1).reshape(B, H*W, C) # B, H * W, C
             bev_mask = cam_bev_mask.reshape(B, H * W).unsqueeze(-1) # B, H * W, 1
             x = x * bev_mask # B, H * W, C
-            x = x.mean(dim = 1) # B, C
+            valid_count = bev_mask.sum(dim=1).clamp(min=1) # B, 1
+            x = x.sum(dim=1) / valid_count # B, C
         else:
             B, C, H, W = x.shape
             if self.bev_pool_factor > 1:
@@ -270,14 +318,24 @@ class BEVCalib(nn.Module):
             x = x.permute(0, 2, 3, 1).reshape(B, H * W, C) # B, H * W, C
             bev_mask = cam_bev_mask.reshape(B, H * W).bool()
             max_valid_cnt = int(bev_mask.sum(dim=1).max().item()) # int, max number of valid points in a batch
+            valid_counts = torch.zeros(B, dtype=torch.long, device=x.device)
             masked_x = torch.zeros(B, max_valid_cnt, C).to(x.device)
             padding_mask = torch.zeros(B, max_valid_cnt).to(x.device)
             for i in range(B):
                 cnt = int(bev_mask[i].sum().item())
+                valid_counts[i] = cnt
                 masked_x[i, :cnt, :] = x[i, bev_mask[i]]
                 padding_mask[i, cnt:] = 1
-            x = self.transformer(masked_x, src_key_padding_mask=padding_mask) # B, H * W, C
-            x = x.mean(dim = 1)  # B, C
+            x = self.transformer(masked_x, src_key_padding_mask=padding_mask.bool()) # B, max_valid_cnt, C
+            x_pooled = torch.zeros(B, C, device=x.device)
+            for i in range(B):
+                cnt = valid_counts[i].item()
+                if cnt > 0:
+                    x_pooled[i] = x[i, :cnt, :].mean(dim=0)
+            x = x_pooled
+
+        if profiling:
+            _ev[4].record()
 
         x = self.head_drop(x)
         if not self.rotation_only:
@@ -287,13 +345,20 @@ class BEVCalib(nn.Module):
         rotation = self.rotation_pred(x)
 
         pred_T = self.get_T_matrix(translation=translation, rotation=rotation)
-        
+
+        if profiling:
+            _ev[5].record()
+
         gt_T_to_camera = gt_T_to_camera.squeeze(1)
         init_T_to_camera = init_T_to_camera.squeeze(1)
         pc = pc.permute(0, 2, 1).contiguous() # (B, N, 3)
     
         loss, T_gt_expected = self.loss_fn(pred_translation = translation, pred_rotation = rotation,
                             pcs = pc, gt_T_to_camera = gt_T_to_camera, init_T_to_camera = init_T_to_camera, mask = masks)
+
+        if profiling:
+            _ev[6].record()
+            self._profile_events.append(_ev)
 
         if out_init_loss:
             with torch.no_grad():

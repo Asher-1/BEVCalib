@@ -1,0 +1,99 @@
+# BEVCalib B26A v5 Refine — 基于最佳模型的低LR微调
+#
+# 核心思路:
+#   加载已训练好的best_val checkpoint, 用极低LR继续微调
+#   使用StepLR(避免CosineWR restart破坏已学特征)
+#   训练100 epoch, 保存best_val
+#
+# 当前最佳模型:
+#   v1-champion: 0.431° (ckpt_400, CosineWR, 无固定seed)
+#   v5-cosinewr-z5: 0.502° (best_val=0.2876°@~ep341, seed=42)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_refine_v5.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    num_epochs: 100
+
+    use_ddp: true
+    ddp_gpus: null
+    nnodes: null
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+
+    # StepLR + 极低LR (避免CosineWR restart, 1/10原始LR)
+    lr_schedule: step
+    learning_rate: 1e-5
+    warmup_epochs: 0
+    backbone_lr_scale: 0.1
+    step_size: 40
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.1
+    augment_color_jitter: 0.3
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # ===== Refine 1: v5 best_val → 低LR微调 =====
+  # 加载v5-cosinewr-z5的best_val (泛化0.502°, val=0.288°)
+  # 用lr=1e-5继续训练100 epoch, 预期: 0.45-0.50°
+  - name: "v5_refine_bestval"
+    description: "Refine: 加载v5-cosinewr-z5 best_val + lr=1e-5 + StepLR"
+    dataset: "B26A"
+    version: "v5_refine_bestval"
+    params:
+      pretrain_ckpt: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/B26A/v5/model_small_5deg_v5_cosinewr_z5/B26A_scratch/checkpoint/ckpt_best_val.pth"
+
+  # ===== Refine 2: v1 champion → 低LR微调 =====
+  # 加载v1 champion ckpt_400 (泛化0.431°)
+  # 用lr=1e-5 继续微调
+  - name: "v5_refine_v1champ"
+    description: "Refine: 加载v1-champion ckpt_400 + lr=1e-5 + StepLR"
+    dataset: "B26A"
+    version: "v5_refine_v1champ"
+    params:
+      pretrain_ckpt: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/B26A/v1/model_small_5deg_v7_opt_axis05/B26A_scratch/checkpoint/ckpt_400.pth"
+
+  # ===== Refine 3: v5 best_val → 更低LR =====
+  # lr=5e-6 (1/20原始LR), 更保守的微调
+  - name: "v5_refine_bestval_lr5e6"
+    description: "Refine: 加载v5-cosinewr-z5 best_val + lr=5e-6 (超保守)"
+    dataset: "B26A"
+    version: "v5_refine_bestval_lr5e6"
+    params:
+      pretrain_ckpt: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/B26A/v5/model_small_5deg_v5_cosinewr_z5/B26A_scratch/checkpoint/ckpt_best_val.pth"
+      learning_rate: 5e-6

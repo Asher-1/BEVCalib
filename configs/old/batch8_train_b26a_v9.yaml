@@ -1,0 +1,97 @@
+# BEVCalib B26A V9 快速验证配置
+#
+# B26A上快速验证V9的核心假设, 再上ALL做正式训练
+# B26A 1seq ~1.8K帧, 训练快, 可用于排除明显无效的配置
+#
+# 与ALL V9同步的3组核心实验:
+#   1. v9_baseline:    V8最佳复现 (StepLR+无aug+Z=5)
+#   2. v9_z10_pitch3:  Z=10 + pitch3 (V8最佳组合)
+#   3. v9_z10_pitch3_pa: Z=10 + pitch3 + per_axis (双重pitch)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_v9.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # 1. V8最佳复现 — 验证stratified split对B26A基线的影响
+  - name: "v9_baseline"
+    description: "B26A V9: StepLR+无aug+Z=5 (验证stratified split影响)"
+    dataset: "B26A"
+    version: "v9_baseline"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. V8最佳B26A组合 — Z=10 + pitch3
+  - name: "v9_z10_pitch3"
+    description: "B26A V9: Z=10 + axis_wt=1,3,1 (V8最佳组合+stratified split)"
+    dataset: "B26A"
+    version: "v9_z10_pitch3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. 双重pitch优化
+  - name: "v9_z10_pitch3_pa"
+    description: "B26A V9: Z=10 + pitch3 + per_axis_wt=1,2,1 (双重pitch)"
+    dataset: "B26A"
+    version: "v9_z10_pitch3_pa"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      per_axis_weights: "1.0,2.0,1.0"

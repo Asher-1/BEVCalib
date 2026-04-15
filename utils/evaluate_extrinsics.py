@@ -83,7 +83,7 @@ def evaluate_sensor_extrinsic(T_pred, T_gt):
 def decompose_rotation_error(axis_angle_error):
     """
     将轴角误差分解为Roll, Pitch, Yaw (LiDAR坐标系)
-    对于小角度误差，轴角向量的各分量近似等于欧拉角
+    通过旋转矩阵进行严格的 Euler 角分解，适用于任意角度。
     
     参数:
     - axis_angle_error: 轴角误差向量 [rx, ry, rz] in degrees (LiDAR系)
@@ -94,9 +94,9 @@ def decompose_rotation_error(axis_angle_error):
     - pitch: 绕Y轴(左方向)旋转误差 (度)
     - yaw: 绕Z轴(上方向)旋转误差 (度)
     """
-    roll = axis_angle_error[0]   # 绕LiDAR X轴(前进)
-    pitch = axis_angle_error[1]  # 绕LiDAR Y轴(左)
-    yaw = axis_angle_error[2]    # 绕LiDAR Z轴(上)
+    rotvec_rad = np.radians(axis_angle_error)
+    rot = Rotation.from_rotvec(rotvec_rad)
+    roll, pitch, yaw = rot.as_euler('xyz', degrees=True)
     
     return roll, pitch, yaw
 

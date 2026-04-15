@@ -1,0 +1,123 @@
+# BEVCalib B26A V10 — Foundation Depth 训练配置
+#
+# V10 核心假设:
+#   LSS 的 depth_net 学习了训练集特定的深度统计分布，是泛化瓶颈。
+#   用预训练深度模型（MiDaS）替代 depth_net，提供跨场景泛化的深度先验。
+#
+# 架构变化:
+#   原 LSS:     img_feats → depth_net → softmax(D bins) → depth × features
+#   Foundation: raw_imgs → 冻结MiDaS → relative_depth → aligner → bins → depth × features
+#
+# 实验设计 (3组, B26A快速验证):
+#   1. v10_fd_baseline:  Foundation Depth + 标准配置 (Z=5, 1,1,1)
+#   2. v10_fd_z10_pitch3: Foundation Depth + Z=10 + pitch3 (V9最佳组合)
+#   3. v10_std_baseline:  标准 LSS 对照组 (与 v10_fd_baseline 同配置)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_v10.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # 1. Foundation Depth 基线 — batch_size=4 (MiDaS额外显存)
+  - name: "v10_fd_baseline"
+    description: "B26A V10: Foundation Depth + Z=5 + 1,1,1 (MiDaS small, bs=4)"
+    dataset: "B26A"
+    version: "v10_fd_baseline"
+    params:
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      axis_weights: "1.0,1.0,1.0"
+      batch_size: 4
+
+  # 2. Foundation Depth + V9最佳组合 — Z=10 + pitch3
+  - name: "v10_fd_z10_pitch3"
+    description: "B26A V10: Foundation Depth + Z=10 + pitch3 (bs=4)"
+    dataset: "B26A"
+    version: "v10_fd_z10_pitch3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      use_foundation_depth: 1
+      depth_model_type: midas_small
+      axis_weights: "1.0,3.0,1.0"
+      batch_size: 4
+
+  # 3. 标准 LSS 对照组 — 与 v10_fd_baseline 完全相同，仅关闭 foundation depth
+  - name: "v10_std_baseline"
+    description: "B26A V10: 标准LSS + Z=5 + 1,1,1 (对照组, bs=8)"
+    dataset: "B26A"
+    version: "v10_std_baseline"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+# ============================================================================
+# V10 消融矩阵 (3组)
+# ============================================================================
+#
+#   实验                 | Depth模型      | Z  | Axis Wt | 对照变量
+#   ---------------------+----------------+----+---------+---------
+#   1 v10_fd_baseline    | MiDaS (frozen) | 5  | 1,1,1   | Foundation vs LSS
+#   2 v10_fd_z10_pitch3  | MiDaS (frozen) | 10 | 1,3,1   | +Z+Pitch
+#   3 v10_std_baseline   | 标准 LSS       | 5  | 1,1,1   | 对照组
+#
+# 关键对比:
+#   1 vs 3: Foundation Depth 是否提升泛化 (核心假设验证)
+#   2 vs 1: Z=10 + Pitch加权在 Foundation Depth 上的叠加效果
+#
+# 预期:
+#   如果 Foundation Depth 有效，v10_fd_baseline 在泛化评估时应优于 v10_std_baseline
+#   尤其在 cross-vehicle (跨seq) pitch error 上有改善

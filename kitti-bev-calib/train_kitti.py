@@ -12,7 +12,8 @@ from torch.optim.lr_scheduler import StepLR, CosineAnnealingWarmRestarts, Linear
 from torch.utils.tensorboard import SummaryWriter
 import argparse
 from datetime import datetime, timedelta
-from torch.utils.data import random_split
+from torch.utils.data import random_split, Subset
+from collections import defaultdict
 import numpy as np
 import random
 from pathlib import Path
@@ -21,6 +22,7 @@ import shutil
 import cv2
 import os
 import time
+from contextlib import nullcontext
 
 
 def set_seed(seed, rank=0):
@@ -45,6 +47,41 @@ def _worker_init_fn(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+
+def stratified_split_by_sequence(dataset, train_ratio=0.8, seed=114514):
+    """Split dataset into train/val ensuring each sequence contributes proportionally.
+    
+    Unlike random_split which can leave some sequences under-represented in training,
+    this splits within each sequence independently, guaranteeing every sequence has
+    ~train_ratio of its samples in training and ~(1-train_ratio) in validation.
+    
+    Returns (train_subset, val_subset, split_stats) where split_stats is a dict
+    mapping seq_id -> (train_count, val_count, total).
+    """
+    rng = np.random.RandomState(seed)
+    
+    seq_to_indices = defaultdict(list)
+    for idx in range(len(dataset)):
+        entry = dataset.all_files[idx]
+        seq_id = entry.split('/')[0]
+        seq_to_indices[seq_id].append(idx)
+    
+    train_indices = []
+    val_indices = []
+    split_stats = {}
+    
+    for seq_id in sorted(seq_to_indices.keys()):
+        indices = np.array(seq_to_indices[seq_id])
+        rng.shuffle(indices)
+        n_train = int(len(indices) * train_ratio)
+        n_train = max(1, n_train)
+        
+        train_indices.extend(indices[:n_train].tolist())
+        val_indices.extend(indices[n_train:].tolist())
+        split_stats[seq_id] = (n_train, len(indices) - n_train, len(indices))
+    
+    return Subset(dataset, train_indices), Subset(dataset, val_indices), split_stats
 from visualization import (
     compute_batch_pose_errors,
     visualize_batch_projection,
@@ -229,7 +266,7 @@ def parse_args():
     parser.add_argument("--eval_angle_range_deg", type=float, default=None)
     parser.add_argument("--eval_trans_range", type=float, default=None)
     parser.add_argument("--num_epochs", type=int, default=1)
-    parser.add_argument("--eval_epoches", type=int, default=20)
+    parser.add_argument("--eval_epoches", type=int, default=50)
     parser.add_argument("--deformable", type=int, default=-1)
     parser.add_argument("--bev_encoder", type=int, default=1)
     parser.add_argument("--xyz_only", type=int, default=1)
@@ -248,6 +285,7 @@ def parse_args():
     parser.add_argument("--validate_sample_ratio", type=float, default=0.1, help="数据验证采样比例 (0.0-1.0)")
     parser.add_argument("--min_point_utilization", type=float, default=0.5, help="最低点云利用率阈值 (0.0-1.0)")
     parser.add_argument("--min_valid_ratio", type=float, default=0.9, help="最低有效帧比例阈值 (0.0-1.0)")
+    parser.add_argument("--max_frames_per_seq", type=int, default=None, help="每个序列最大帧数 (均匀采样), None=使用全部帧")
     # 可视化参数
     parser.add_argument("--vis_freq", type=int, default=40, help="训练可视化频率 (每多少个batch可视化一次)")
     parser.add_argument("--vis_samples", type=int, default=3, help="每次可视化的样本数")
@@ -274,6 +312,16 @@ def parse_args():
                         help="Dropout rate before prediction heads")
     parser.add_argument("--bev_pool_factor", type=int, default=0,
                         help="Spatial avg-pool factor before transformer (0=disabled, 2=2x2 pool)")
+    parser.add_argument("--use_foundation_depth", type=int, default=0,
+                        help="Replace LSS depth head with frozen foundation depth model (1=enable)")
+    parser.add_argument("--depth_model_type", type=str, default="midas_small",
+                        choices=["midas_small", "dpt_swin2_t", "dpt_beit_l"],
+                        help="Foundation depth model type (default: midas_small)")
+    parser.add_argument("--fd_mode", type=str, default="replace",
+                        choices=["replace", "replace_v1", "replace_v2", "dual_path", "supervision"],
+                        help="Foundation depth mode: replace(v1 compat), replace_v2(fixed), dual_path(fusion), supervision(aux loss)")
+    parser.add_argument("--depth_sup_alpha", type=float, default=0.5,
+                        help="Depth supervision loss weight (only for fd_mode=supervision)")
     parser.add_argument("--lr_schedule", type=str, default="step",
                         choices=["step", "cosine_warm_restarts"],
                         help="LR scheduler type")
@@ -304,6 +352,8 @@ def parse_args():
                         help="Early stopping patience in epochs (0=disabled)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Global random seed for reproducibility (default: 42)")
+    parser.add_argument("--grad_accum_steps", type=int, default=1,
+                        help="Gradient accumulation steps (1=disabled, >1=accumulate N micro-batches per optimizer step)")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True):
@@ -490,7 +540,8 @@ def main():
     # 选择数据集类型 (capture_prints suppresses worker stdout, writes master output to train.log)
     with capture_prints(is_main):
         if args.use_custom_dataset:
-            dataset = CustomDataset(dataset_root, target_size=target_size)
+            dataset = CustomDataset(dataset_root, target_size=target_size,
+                                    max_frames_per_seq=args.max_frames_per_seq)
         else:
             if is_main:
                 print("使用 KittiDataset")
@@ -540,14 +591,31 @@ def main():
         else:
             tprint("   (KITTI数据集模式)")
     
-    generator = torch.Generator().manual_seed(114514)
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(
-        dataset, 
-        [train_size, val_size],
-        generator=generator
-    )
+    if args.use_custom_dataset and hasattr(dataset, 'all_files'):
+        train_dataset, val_dataset, split_stats = stratified_split_by_sequence(
+            dataset, train_ratio=0.8, seed=114514
+        )
+        if is_main:
+            tprint("数据集按Sequence分层划分 (每个Sequence独立80/20):")
+            tprint(f"  {'Seq':<6} {'Train':>7} {'Val':>7} {'Total':>7}  {'Train%':>6}")
+            tprint(f"  {'─'*4}  {'─'*5}  {'─'*5}  {'─'*5}  {'─'*6}")
+            for seq_id, (n_tr, n_va, n_tot) in split_stats.items():
+                pct = n_tr / n_tot * 100 if n_tot > 0 else 0
+                tprint(f"  {seq_id:<6} {n_tr:>7} {n_va:>7} {n_tot:>7}  {pct:>5.1f}%")
+            tprint(f"  {'─'*4}  {'─'*5}  {'─'*5}  {'─'*5}  {'─'*6}")
+            total_tr = sum(s[0] for s in split_stats.values())
+            total_va = sum(s[1] for s in split_stats.values())
+            total_all = sum(s[2] for s in split_stats.values())
+            tprint(f"  {'合计':<5} {total_tr:>7} {total_va:>7} {total_all:>7}  {total_tr/total_all*100:>5.1f}%")
+    else:
+        generator = torch.Generator().manual_seed(114514)
+        train_size = int(0.8 * len(dataset))
+        val_size = len(dataset) - train_size
+        train_dataset, val_dataset = random_split(
+            dataset, 
+            [train_size, val_size],
+            generator=generator
+        )
 
     train_dataset = PreprocessedDataset(train_dataset, target_size, crop=False)
     val_dataset = PreprocessedDataset(val_dataset, target_size, crop=False)
@@ -603,6 +671,10 @@ def main():
     use_geodesic_loss = args.use_geodesic_loss > 0
     use_mlp_head = args.use_mlp_head > 0
     axis_weights_tuple = tuple(float(x) for x in args.axis_weights.split(','))
+    use_foundation_depth = args.use_foundation_depth > 0
+    fd_mode = args.fd_mode if use_foundation_depth else "replace"
+    if is_main and use_foundation_depth:
+        tprint(f"Foundation Depth: 启用 (model={args.depth_model_type}, mode={fd_mode})")
     with capture_prints(is_main):
         model = BEVCalib(
             deformable=deformable_choise,
@@ -617,6 +689,9 @@ def main():
             use_geodesic_loss=use_geodesic_loss,
             use_mlp_head=use_mlp_head,
             bev_pool_factor=args.bev_pool_factor,
+            use_foundation_depth=use_foundation_depth,
+            depth_model_type=args.depth_model_type,
+            fd_mode=fd_mode,
         ).to(device)
 
     if args.pretrain_ckpt is not None:
@@ -639,9 +714,10 @@ def main():
                 tprint(f"torch.compile failed, falling back to eager mode: {e}")
     
     if use_ddp:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
         if is_main:
-            tprint(f"Model wrapped with DistributedDataParallel on {world_size} GPUs")
+            tprint(f"Model wrapped with DistributedDataParallel on {world_size} GPUs "
+                   f"(find_unused_parameters=False)")
     
     raw_model = model.module if use_ddp else model
 
@@ -697,6 +773,12 @@ def main():
     scaler = GradScaler(enabled=use_amp)
     if use_amp and is_main:
         tprint(f"AMP enabled with {amp_dtype}, GradScaler=on")
+
+    grad_accum_steps = max(1, args.grad_accum_steps)
+    if grad_accum_steps > 1 and is_main:
+        effective_bs = args.batch_size * world_size * grad_accum_steps
+        tprint(f"Gradient Accumulation: {grad_accum_steps} steps, "
+               f"effective batch size = {args.batch_size}×{world_size}GPU×{grad_accum_steps}accum = {effective_bs}")
     
     if is_main and args.augment_intrinsic > 0:
         tprint(f"Intrinsic augmentation: ±{args.augment_intrinsic*100:.0f}% (fx/fy coupled, cx/cy ±{args.augment_intrinsic*50:.0f}%)")
@@ -753,6 +835,9 @@ def main():
         tprint("  • Pose Error - Trans: translation error with Forward/Lateral/Height breakdown")
         tprint("=" * 80)
     
+    training_start_time = time.time()
+    epoch_times = []
+
     for epoch in range(num_epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -760,11 +845,21 @@ def main():
         train_loss = {}
         for key in epoch_pose_errors:
             epoch_pose_errors[key] = 0
-        
+
+        if epoch == 0:
+            raw_model._profile_modules = True
+        elif epoch == 1:
+            raw_model._profile_modules = False
+
         epoch_start = time.time()
         out_init_loss_choice = epoch < 5
         t_data_total, t_prep_total, t_compute_total, t_vis_total = 0.0, 0.0, 0.0, 0.0
         vis_count = 0
+        _bwd_profile_events = [] if raw_model._profile_modules else None
+        _do_detailed_profile = raw_model._profile_modules
+        t_h2d_total = 0.0
+        t_cpu_aug_total = 0.0
+        processed_batches = 0
         t_iter_start = time.time()
         for batch_index, batch_data in enumerate(train_loader):
             t_data_end = time.time()
@@ -792,7 +887,6 @@ def main():
             resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float()
             if args.augment_color_jitter > 0:
                 resize_imgs = _apply_color_jitter(resize_imgs, args.augment_color_jitter)
-            resize_imgs = resize_imgs.to(device, non_blocking=True)
             if xyz_only_choise:
                 pcs_np = np.array(pcs)[:, :, :3]
             else:
@@ -801,13 +895,38 @@ def main():
                 pcs_np = pcs_np + np.random.normal(0, args.augment_pc_jitter, pcs_np.shape).astype(np.float32)
             if args.augment_pc_dropout > 0:
                 keep_ratio = 1.0 - np.random.uniform(0, args.augment_pc_dropout)
-                n_pts = pcs_np.shape[1]
-                n_keep = max(1, int(n_pts * keep_ratio))
-                idx = np.random.choice(n_pts, n_keep, replace=False)
-                idx.sort()
-                pcs_np = pcs_np[:, idx, :]
-                if masks is not None:
-                    masks = [np.asarray(masks[b])[idx] for b in range(len(masks))]
+                B_pc = pcs_np.shape[0]
+                new_pcs = []
+                new_masks = []
+                for b in range(B_pc):
+                    mask_b = np.asarray(masks[b])
+                    valid_idx = np.where(mask_b == 1)[0]
+                    n_valid = len(valid_idx)
+                    if n_valid <= 1:
+                        new_pcs.append(pcs_np[b])
+                        new_masks.append(mask_b)
+                        continue
+                    n_keep = max(1, int(n_valid * keep_ratio))
+                    chosen = np.random.choice(n_valid, n_keep, replace=False)
+                    keep_idx = valid_idx[chosen]
+                    keep_idx.sort()
+                    new_pc = pcs_np[b, keep_idx, :]
+                    new_mask = np.ones(n_keep)
+                    new_pcs.append(new_pc)
+                    new_masks.append(new_mask)
+                max_pts = max(pc.shape[0] for pc in new_pcs)
+                padded_pcs = np.full((B_pc, max_pts, pcs_np.shape[2]), 999999, dtype=np.float32)
+                padded_masks = []
+                for b in range(B_pc):
+                    n = new_pcs[b].shape[0]
+                    padded_pcs[b, :n, :] = new_pcs[b]
+                    padded_masks.append(np.concatenate([new_masks[b], np.zeros(max_pts - n)]))
+                pcs_np = padded_pcs
+                masks = padded_masks
+            if _do_detailed_profile:
+                t_cpu_aug_total += time.time() - t_prep_start
+                t_h2d_start = time.time()
+            resize_imgs = resize_imgs.to(device, non_blocking=True)
             pcs_t = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
             masks_t = torch.from_numpy(np.array(masks)).float().to(device, non_blocking=True) if masks is not None else None
             gt_T_to_camera_t = torch.from_numpy(gt_T_to_camera_np).to(device, non_blocking=True)
@@ -817,18 +936,44 @@ def main():
             intrinsic_matrix = torch.from_numpy(np.array(intrinsics, dtype=np.float32)).to(device, non_blocking=True)
             if args.augment_intrinsic > 0:
                 intrinsic_matrix = _augment_intrinsics(intrinsic_matrix, args.augment_intrinsic)
+            if _do_detailed_profile:
+                t_h2d_total += time.time() - t_h2d_start
             t_prep_total += time.time() - t_prep_start
 
             t_compute_start = time.time()
-            optimizer.zero_grad(set_to_none=True)
-            with autocast(enabled=use_amp, dtype=amp_dtype):
-                T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice)
-                total_loss = loss["total_loss"]
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
-            scaler.step(optimizer)
-            scaler.update()
+            is_accum_step = (batch_index + 1) % grad_accum_steps != 0 and (batch_index + 1) < len(train_loader)
+            if batch_index % grad_accum_steps == 0:
+                optimizer.zero_grad(set_to_none=True)
+            sync_ctx = model.no_sync() if (use_ddp and is_accum_step) else nullcontext()
+            _bwd_ev = None
+            if _bwd_profile_events is not None:
+                _bwd_ev = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
+            with sync_ctx:
+                with autocast(enabled=use_amp, dtype=amp_dtype):
+                    T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice)
+                    total_loss = loss["total_loss"]
+                    if fd_mode == "supervision" and use_foundation_depth:
+                        ds_loss = raw_model.img_branch.get_depth_supervision_loss(alpha=args.depth_sup_alpha)
+                        total_loss = total_loss + ds_loss
+                        loss["depth_sup_loss"] = ds_loss.item()
+                    if grad_accum_steps > 1:
+                        total_loss = total_loss / grad_accum_steps
+                if _bwd_ev is not None:
+                    _bwd_ev[0].record()
+                scaler.scale(total_loss).backward()
+                if _bwd_ev is not None:
+                    _bwd_ev[1].record()
+            if not is_accum_step:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+                if _bwd_ev is not None:
+                    _bwd_ev[2].record()
+                scaler.step(optimizer)
+                scaler.update()
+                if _bwd_ev is not None:
+                    _bwd_ev[3].record()
+            if _bwd_ev is not None:
+                _bwd_profile_events.append((_bwd_ev, not is_accum_step))
             t_compute_total += time.time() - t_compute_start
             
             with torch.no_grad():
@@ -902,26 +1047,64 @@ def main():
                 t_vis_total += time.time() - t_vis_start
                 vis_count += 1
             
+            processed_batches += 1
             global_step += 1
             t_iter_start = time.time()
         
         epoch_time = time.time() - epoch_start
+        epoch_times.append(epoch_time)
         if is_main:
             steps_per_sec = len(train_loader) / epoch_time
             t_other = epoch_time - t_data_total - t_prep_total - t_compute_total - t_vis_total
-            tprint(f"Epoch [{epoch+1}/{num_epochs}] completed in {epoch_time:.1f}s ({epoch_time/60:.1f}min), {steps_per_sec:.2f} steps/s, {epoch_time/len(train_loader):.2f}s/step")
+            elapsed_total = time.time() - training_start_time
+            avg_epoch_time = sum(epoch_times) / len(epoch_times)
+            eta_s = avg_epoch_time * (num_epochs - epoch - 1)
+            tprint(f"Epoch [{epoch+1}/{num_epochs}] completed in {epoch_time:.1f}s ({epoch_time/60:.1f}min), {steps_per_sec:.2f} steps/s, {epoch_time/len(train_loader):.2f}s/step"
+                   f"  [elapsed={elapsed_total/3600:.1f}h, avg={avg_epoch_time:.1f}s/ep, ETA={eta_s/3600:.1f}h]")
             tprint(f"  Profiling: data_load={t_data_total:.1f}s({t_data_total/epoch_time*100:.1f}%), "
                    f"prep={t_prep_total:.1f}s({t_prep_total/epoch_time*100:.1f}%), "
                    f"compute={t_compute_total:.1f}s({t_compute_total/epoch_time*100:.1f}%), "
                    f"vis={t_vis_total:.1f}s({t_vis_total/epoch_time*100:.1f}%, {vis_count}calls, {t_vis_total/max(vis_count,1):.1f}s/call), "
                    f"other={t_other:.1f}s({t_other/epoch_time*100:.1f}%)")
+            if _do_detailed_profile:
+                tprint(f"  Prep detail: cpu_aug={t_cpu_aug_total:.1f}s({t_cpu_aug_total/epoch_time*100:.1f}%), "
+                       f"h2d_transfer={t_h2d_total:.1f}s({t_h2d_total/epoch_time*100:.1f}%)")
+            mod_prof = raw_model.get_module_profile(reset=True)
+            if mod_prof:
+                total_ms = mod_prof.get("total", 1)
+                parts = " | ".join(f"{k}={v:.1f}ms({v/total_ms*100:.0f}%)" for k, v in mod_prof.items() if k != "total")
+                tprint(f"  Module forward: {parts} | total={total_ms:.1f}ms")
+            if _bwd_profile_events:
+                torch.cuda.synchronize()
+                bwd_ms_sum, clip_ms_sum, optim_ms_sum = 0.0, 0.0, 0.0
+                bwd_count, optim_count = 0, 0
+                for ev_list, has_optim_step in _bwd_profile_events:
+                    bwd_ms_sum += ev_list[0].elapsed_time(ev_list[1])
+                    bwd_count += 1
+                    if has_optim_step:
+                        clip_ms_sum += ev_list[1].elapsed_time(ev_list[2])
+                        optim_ms_sum += ev_list[2].elapsed_time(ev_list[3])
+                        optim_count += 1
+                bwd_avg = bwd_ms_sum / max(bwd_count, 1)
+                clip_avg = clip_ms_sum / max(optim_count, 1)
+                optim_avg = optim_ms_sum / max(optim_count, 1)
+                fwd_avg = mod_prof.get("total", 0) if mod_prof else 0
+                total_step = fwd_avg + bwd_avg + clip_avg + optim_avg
+                tprint(f"  Module backward: bwd={bwd_avg:.1f}ms | grad_clip={clip_avg:.1f}ms | optim_step={optim_avg:.1f}ms")
+                if total_step > 0:
+                    tprint(f"  Compute breakdown: fwd={fwd_avg:.1f}ms({fwd_avg/total_step*100:.0f}%) | "
+                           f"bwd={bwd_avg:.1f}ms({bwd_avg/total_step*100:.0f}%) | "
+                           f"clip+optim={clip_avg+optim_avg:.1f}ms({(clip_avg+optim_avg)/total_step*100:.0f}%) | "
+                           f"total={total_step:.1f}ms/step")
+                _bwd_profile_events = None
 
         if scheduler_choice:   
             scheduler.step()    
         
         if is_main:
+            effective_batches = max(1, processed_batches)
             for key in train_loss.keys():
-                train_loss[key] /= len(train_loader)
+                train_loss[key] /= effective_batches
                 if rotation_only and 'translation' in key:
                     continue
                 # 为各个损失添加单位说明
@@ -944,7 +1127,7 @@ def main():
                 writer.add_scalar(f"Loss/train/{key}", train_loss[key], epoch)
             
             for key in epoch_pose_errors:
-                epoch_pose_errors[key] /= len(train_loader)
+                epoch_pose_errors[key] /= effective_batches
             last_epoch_train_errors = dict(epoch_pose_errors)
             
             if rotation_only:
@@ -1194,6 +1377,7 @@ def main():
                 'trans_error': 0, 'fwd_error': 0, 'lat_error': 0, 'ht_error': 0,
                 'rot_error': 0, 'roll_error': 0, 'pitch_error': 0, 'yaw_error': 0,
             }
+            val_processed_batches = 0
             
             with torch.no_grad():
                 for batch_index, batch_data in enumerate(val_loader):
@@ -1235,6 +1419,8 @@ def main():
                             else:
                                 val_loss[val_key] += init_loss[key].item()
                     
+                    val_processed_batches += 1
+                    
                     # 验证集可视化 (每个epoch只可视化第一个batch)
                     if args.enable_vis > 0 and batch_index == 0:
                         imgs_np = np.array(imgs)
@@ -1268,8 +1454,9 @@ def main():
             else:
                 val_label = f"Val[±{eval_angle_range}°, ±{eval_trans_range}m]"
             
+            effective_val_batches = max(1, val_processed_batches)
             for key in val_loss.keys():
-                val_loss[key] /= len(val_loader)
+                val_loss[key] /= effective_val_batches
                 if rotation_only and 'translation' in key:
                     continue
                 # 为各个损失添加单位说明
@@ -1292,7 +1479,7 @@ def main():
                 writer.add_scalar(f"Loss/val/{key}", val_loss[key], epoch)
             
             for key in val_pose_errors:
-                val_pose_errors[key] /= len(val_loader)
+                val_pose_errors[key] /= effective_val_batches
             last_epoch_val_errors = dict(val_pose_errors)
             
             if rotation_only:
@@ -1394,6 +1581,13 @@ def main():
         md_lines.append("=" * 80)
         md_lines.append("训练完成总结 / Training Summary")
         md_lines.append("=" * 80)
+        md_lines.append("")
+
+        total_training_time = time.time() - training_start_time
+        completed_epochs = len(epoch_times)
+        avg_ep = sum(epoch_times) / max(completed_epochs, 1)
+        md_lines.append(f"Training Time: {total_training_time/3600:.2f}h ({total_training_time:.0f}s), "
+                        f"{completed_epochs} epochs, avg {avg_ep:.1f}s/epoch ({avg_ep/60:.1f}min/epoch)")
         md_lines.append("")
 
         if best_train['epoch'] > 0 and best_train['errors']:

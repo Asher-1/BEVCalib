@@ -1,0 +1,79 @@
+# BEVCalib B26A V10 泛化性能评估
+#
+# V10 (3组):
+#   1. v10-fd-baseline:     Foundation Depth + Z=5 (MiDaS, val 0.29)
+#   2. v10-fd-z10-pitch3:   Foundation Depth + Z=10 + pitch3 (MiDaS, val 0.27)
+#   3. v10-std-baseline:    标准LSS + Z=5 (对照组, val 0.29)
+#
+# + ALL-V6 冠军对照
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_v10.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v10"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v10"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V10 Foundation Depth (2组) ====================
+  - label: "v10-fd-baseline"
+    dir_name: "model_small_5deg_v10_fd_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_foundation_depth: 1
+    depth_model_type: midas_small
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 5
+    version: "v10-fd-baseline"
+    mode_desc: "V10 FD+Z5 (MiDaS, val 0.29)"
+
+  - label: "v10-fd-z10-pitch3"
+    dir_name: "model_small_5deg_v10_fd_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_foundation_depth: 1
+    depth_model_type: midas_small
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 10
+    version: "v10-fd-z10-pitch3"
+    mode_desc: "V10 FD+Z10+pitch3 (MiDaS, val 0.27)"
+
+  # ==================== V10 标准LSS (1组) ====================
+  - label: "v10-std-baseline"
+    dir_name: "model_small_5deg_v10_std_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v10-std-baseline"
+    mode_desc: "V10 标准LSS Z5 (对照组, val 0.29)"
+
+  # ==================== 基线 ====================
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291"

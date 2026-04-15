@@ -1,0 +1,140 @@
+# V9/V10/V11 全量泛化评估 — 含V10 Foundation Depth新模型
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_v9v10v11_full.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v10"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_v9v10v11_full"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V10 Foundation Depth (2组新模型) ====================
+  - label: "v10-fd-baseline"
+    dir_name: "model_small_5deg_v10_fd_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_foundation_depth: 1
+    depth_model_type: midas_small
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 5
+    version: "v10-fd-baseline"
+    mode_desc: "V10 FD+Z5 (MiDaS, val 0.29)"
+
+  - label: "v10-fd-z10-pitch3"
+    dir_name: "model_small_5deg_v10_fd_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_foundation_depth: 1
+    depth_model_type: midas_small
+    batch_size: 4
+    angle_deg: 5
+    z_voxels: 10
+    version: "v10-fd-z10-pitch3"
+    mode_desc: "V10 FD+Z10+pitch3 (MiDaS, val 0.27)"
+
+  # ==================== V10 标准LSS ====================
+  - label: "v10-std"
+    dir_name: "model_small_5deg_v10_std_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v10-std"
+    mode_desc: "V10 标准LSS Z5 (val 0.29)"
+
+  # ==================== V9 (3组) ====================
+  - label: "v9-baseline"
+    dir_name: "../v9/model_small_5deg_v9_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v9-baseline"
+    mode_desc: "V9 baseline Z5"
+
+  - label: "v9-z10-pitch3"
+    dir_name: "../v9/model_small_5deg_v9_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v9-z10-pitch3"
+    mode_desc: "V9 Z10+pitch3"
+
+  - label: "v9-z10-pitch3-pa"
+    dir_name: "../v9/model_small_5deg_v9_z10_pitch3_pa"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v9-z10-pitch3-pa"
+    mode_desc: "V9 Z10+pitch3+pa"
+
+  # ==================== V11 (3组) ====================
+  - label: "v11-baseline"
+    dir_name: "../v11/model_small_5deg_v11_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v11-baseline"
+    mode_desc: "V11 baseline Z5"
+
+  - label: "v11-z10-pitch3"
+    dir_name: "../v11/model_small_5deg_v11_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10-pitch3"
+    mode_desc: "V11 Z10+pitch3"
+
+  - label: "v11-z10-pitch5"
+    dir_name: "../v11/model_small_5deg_v11_z10_pitch5"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v11-z10-pitch5"
+    mode_desc: "V11 Z10+pitch5"
+
+  # ==================== 基线 ====================
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291"

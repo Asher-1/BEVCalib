@@ -325,7 +325,241 @@ B26A 快速验证 (5组实验, 全部 StepLR, seed=42):
 | 100m范围丢失远距离信息 | 低 | 远距离精度降低 | 仅丢失2.1%稀疏点, 影响可忽略 |
 
 ================================================================================
-八、总结
+八、Pitch 误差过大根因分析 (2026-03-30 更新)
+================================================================================
+
+V6 泛化评估中发现 Pitch (LiDAR-Y) 是所有模型最大误差来源, 占总误差 70-85%。
+
+8.1 各模型 Pitch 占比
+
+| 模型 | Roll(°) | Pitch(°) | Yaw(°) | Total(°) | Pitch占比 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| v6-linear-baseline | 0.414 | 0.981 | 0.348 | 1.194 | 82.1% |
+| v6-mlp-geodesic | 0.512 | 1.151 | 0.140 | 1.330 | 86.5% |
+| v1-champion | 0.326 | 1.103 | 0.365 | 1.253 | 88.0% |
+
+v6-linear-baseline 的 Pitch 详细分布:
+  Mean=0.981°, Std=0.768°, Median=0.840°, P95=2.943°, P99=3.316°, Max=3.828°
+
+8.2 根因分析
+
+原因1: BEV 俯视图对 Pitch 的几何约束天然不足
+
+BEV 是 XY 平面的俯视图。三个旋转轴在 BEV 中的可观测性:
+- Yaw (绕Z轴): 在 BEV 平面内旋转, 最直观可观测 → Yaw 误差最小 (0.12-0.41°)
+- Roll (绕X轴): 会导致左右两侧高度变化, 通过 BEV 横向不对称性可部分观测 → Roll 中等 (0.33-0.59°)
+- Pitch (绕Y轴): 前后俯仰, 在 BEV 中表现为距离-高度耦合, 最难观测 → Pitch 最大 (0.98-1.29°)
+
+本质上, BEV 表示将 3D 场景投影到水平面, 垂直方向信息被大幅压缩。Pitch 恰好是改变垂直角度的自由度。
+
+原因2: 图像分支 Z 离散化过粗
+
+图像 BEV 分支:
+  Z 范围: [-10m, 10m], 步长: BEV_ZBOUND_STEP=4.0m → 仅 5 个 Z bins
+  相当于把 20m 高度范围用 5 层离散化, 每层 4m
+  Pitch 微小变化 (<1°) 导致的高度偏移远小于 4m, 无法在粗糙的 Z bins 中区分
+
+LiDAR BEV 分支:
+  sparse_shape Z 维度为 41 (细粒度)
+  但跨模态融合时, 图像侧的粗糙 Z 信息成为瓶颈
+
+原因3: 相机-LiDAR 安装几何
+
+典型安装: 相机向前下方看, LiDAR 近水平。
+Pitch 是改变两者垂直夹角的自由度, 需要精确的 "图像行 → 3D深度" 对应关系。
+BEV 优先的架构对这种垂直对应关系的建模能力有限。
+
+原因4: 训练扰动不是原因
+
+代码验证: generate_single_perturbation_from_T 中扰动在三轴均匀分布。
+per_axis_prob=0.3, 权重默认 (1.0, 1.0, 1.0), 对 Pitch 没有偏向。
+Pitch 误差大是模型能力问题, 不是训练数据偏差。
+
+8.3 优化方案
+
+方案1: Pitch 轴权重加强 (已在 V6-aug A4 实验中验证):
+  axis_weights: "1.0,2.0,1.0"  # Roll:1, Pitch:2, Yaw:1
+  预期: 牺牲少量 Roll/Yaw 精度, 换取 Pitch 改善
+
+方案2: 更细 Z 分辨率 (未来实验):
+  BEV_ZBOUND_STEP=2.0 → 10 个 Z bins (当前 5 个)
+  代价: 图像分支计算量增加, 显存占用增加
+  预期: 改善图像侧垂直信息, 对 Pitch 约束更强
+
+方案3: 重投影/像素空间 loss (架构层面):
+  添加直接惩罚垂直对齐误差的 loss 项
+  比如: 地面点在图像上的行位置误差
+  代价: 需要额外的地面分割或平面拟合模块
+
+================================================================================
+九、V6 泛化性能评估 (2026-03-30 更新)
+================================================================================
+
+8.1 评估概况
+
+测试数据: test_data (9852 samples, 5 sequences 00-04, ±5.0°/±0.15m)
+评估模型: 9个 (MLP×5 + Linear×3 + v1-champion 基准)
+训练数据: B26A (序列0, 1810帧)
+评估脚本: evaluate_checkpoint.py + run_generalization_eval.py
+配置文件: configs/eval_generalization_b26a_v6.yaml
+
+8.2 泛化性能排名 (Total Rotation Error)
+
+| 排名 | 模型 | 回归头 | Loss | Mean(°) | Median(°) | P95(°) | Max(°) |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | v6-linear-baseline | Linear | Quaternion | 1.194 | 1.029 | 3.082 | 4.286 |
+| 2 | v6-linear-geodesic | Linear | Geodesic | 1.232 | 1.077 | 3.024 | 4.050 |
+| 3 | v1-champion (基准) | Linear | Quaternion | 1.253 | 1.068 | 3.210 | 5.030 |
+| 4 | v6-mlp-geodesic | MLP | Geodesic | 1.330 | 1.192 | 3.025 | 4.045 |
+| 5 | v6-mlp-hires-pool2x | MLP | Geodesic | 1.357 | 1.180 | 3.178 | 3.622 |
+| 6 | v6-mlp-geodesic-drcv | MLP | Geodesic | 1.390 | 1.216 | 3.065 | 4.007 |
+| 7 | v6-mlp-baseline | MLP | Quaternion | 1.427 | 1.259 | 3.300 | 4.175 |
+| 8 | v6-mlp-hires-bs4 | MLP | Geodesic | 1.455 | 1.303 | 3.413 | 4.184 |
+| 9 | v6-linear-hires | Linear | Geodesic | 1.671 | 1.484 | 3.394 | 4.419 |
+
+8.3 旋转分量分析
+
+| 模型 | Roll(°) | Pitch(°) | Yaw(°) | Total(°) |
+| --- | ---: | ---: | ---: | ---: |
+| v6-linear-baseline | 0.414 | 0.981 | 0.348 | 1.194 |
+| v6-linear-geodesic | 0.436 | 0.976 | 0.414 | 1.232 |
+| v1-champion | 0.326 | 1.103 | 0.365 | 1.253 |
+| v6-mlp-geodesic | 0.512 | 1.151 | 0.140 | 1.330 |
+| v6-mlp-hires-pool2x | 0.565 | 1.135 | 0.160 | 1.357 |
+| v6-mlp-geodesic-drcv | 0.594 | 1.135 | 0.223 | 1.390 |
+| v6-mlp-baseline | 0.524 | 1.256 | 0.180 | 1.427 |
+| v6-mlp-hires-bs4 | 0.479 | 1.287 | 0.275 | 1.455 |
+| v6-linear-hires | 0.962 | 1.196 | 0.120 | 1.671 |
+
+关键发现: Pitch (LiDAR-Y) 是所有模型最大误差源 (占 70-85%); MLP头 Yaw 更低 (0.12-0.28° vs Linear 0.35-0.41°)。
+
+8.4 训练精度 vs 泛化性能对比
+
+| 模型 | 回归头 | Val Rot(°) | 泛化 Rot(°) | 衰退倍数 |
+| --- | --- | ---: | ---: | ---: |
+| v6-linear-baseline | Linear | 0.290 | 1.194 | 4.1x |
+| v6-linear-geodesic | Linear | 0.273 | 1.232 | 4.5x |
+| v1-champion | Linear | ~0.29 | 1.253 | ~4.3x |
+| v6-mlp-geodesic | MLP | 0.171 | 1.330 | 7.8x |
+| v6-mlp-hires-pool2x | MLP | 0.194 | 1.357 | 7.0x |
+| v6-mlp-geodesic-drcv | MLP | 0.187 | 1.390 | 7.4x |
+| v6-mlp-baseline | MLP | 0.171 | 1.427 | 8.3x |
+| v6-mlp-hires-bs4 | MLP | 0.177 | 1.455 | 8.2x |
+| v6-linear-hires | Linear | 0.916 | 1.671 | 1.8x |
+
+8.5 消融实验结论
+
+回归头: MLP vs Linear:
+- 标准配置下 Linear 泛化优于 MLP (1.194° vs 1.427°)
+- MLP 训练精度极高 (0.17°) 但过拟合严重, 衰退 7-8x
+- Linear 训练精度适中 (0.27-0.29°) 但衰退仅 4x
+
+Loss函数: Geodesic vs Quaternion:
+- MLP头: Geodesic 改善 0.097° (1.330° vs 1.427°)
+- Linear头: Quaternion 略优 0.038° (1.194° vs 1.232°)
+
+BEV Pool Factor:
+- pool 对泛化有害, 尤其 Linear头 (+0.439°)
+
+drcv 后端:
+- drcv (1.390°) vs spconv (1.330°), 差 0.060°, 差异较小
+
+8.6 V6 vs V5 泛化对比及根因分析
+
+| 模型 | 泛化 Mean Rot(°) | 关键配置差异 |
+| --- | ---: | --- |
+| V5 undist-best-5deg | 1.047 | CosineWR + 开启aug (jitter=0.02, dropout=0.1, color=0.3) |
+| V6 linear-baseline | 1.194 | StepLR + 关闭所有aug |
+| 差距 | +0.147 (+14%) | |
+
+根因定位:
+V6 泛化性能相比 V5 undist-best 下降 0.147° 的根本原因:
+
+1. 关闭数据增强 (主因):
+   - V5 undist-best 开启: augment_pc_jitter=0.02, augment_pc_dropout=0.1, augment_color_jitter=0.3
+   - V6 所有实验均关闭: augment_pc_jitter=0.0, augment_pc_dropout=0.0, augment_color_jitter=0.0
+   - 数据增强是防止过拟合的关键正则化手段, 尤其在小数据集 (1810帧) 上
+
+2. LR Schedule 从 CosineWR 换为 StepLR (次因):
+   - ALL v5 实验已验证 CosineWR 泛化优于 StepLR (0.927° vs 1.145°, 差 0.218°)
+   - 周期性重启有助于跳出局部最优, 提升泛化能力
+
+3. 评估代码版本差异 (微因):
+   - v1-champion 基准在 V5 评估 (1.229°) vs V6 评估 (1.253°) 有 0.024° 差异
+   - 因 evaluate_checkpoint.py 代码更新导致, 影响较小
+
+结论: V6 的架构改进 (MLP, Geodesic, BEV) 对训练精度有效, 但关闭 aug 导致泛化退化。
+建议: 下一轮实验应在 V6 最佳配置基础上重新开启数据增强和 CosineWR, 组合验证。
+
+8.7 对比 v1-champion 基准
+
+| 指标 | v1-champion | V6最佳(linear-baseline) | 改善 |
+| --- | ---: | ---: | --- |
+| Mean Rot | 1.253° | 1.194° | -0.059° (4.7%) |
+| Median | 1.068° | 1.029° | -0.039° |
+| P95 | 3.210° | 3.082° | -0.128° |
+| Max | 5.030° | 4.286° | -0.744° (14.8%) |
+
+V6 linear-baseline 全面超越 v1-champion, 是目前 B26A 模型中泛化最佳的 V6 版本。
+
+================================================================================
+十、V6-aug 实验设计 (2026-03-30 启动)
+================================================================================
+
+基于 V6 泛化评估和 Pitch 分析结论, 设计了 V6-aug 消融实验:
+配置文件: configs/batch8_train_b26a_v6_aug.yaml
+
+10.1 实验动机
+
+V6 泛化不如 V5 的根因:
+1. 关闭数据增强 → 过拟合加剧
+2. StepLR 替代 CosineWR → 泛化退化
+3. Pitch 误差过大 → 需要轴权重优化
+
+10.2 实验矩阵 (8组)
+
+组A — Linear头消融 (分离 aug 和 LR 的独立贡献):
+
+| 编号 | 实验名 | 回归头 | Loss | LR | Aug | Axis Weights | 验证目标 |
+| ---: | --- | --- | --- | --- | --- | --- | --- |
+| A1 | v6a_linear_aug_step | Linear | quat | StepLR | 开启 | 1,1,1 | 分离 aug 效果 |
+| A2 | v6a_linear_noaug_cosine | Linear | quat | CosineWR | 关闭 | 1,1,1 | 分离 LR 效果 |
+| A3 | v6a_linear_aug_cosine | Linear | quat | CosineWR | 开启 | 1,1,1 | V5最佳配置复现 |
+| A4 | v6a_linear_aug_cosine_pw | Linear | quat | CosineWR | 开启 | 1,2,1 | Pitch权重加强 |
+
+组B — MLP头消融 (验证 aug 能否缓解 MLP 过拟合):
+
+| 编号 | 实验名 | 回归头 | Loss | LR | Aug | Axis Weights | 验证目标 |
+| ---: | --- | --- | --- | --- | --- | --- | --- |
+| B1 | v6a_mlp_aug_step | MLP | quat | StepLR | 开启 | 1,1,1 | MLP+aug |
+| B2 | v6a_mlp_aug_cosine | MLP | quat | CosineWR | 开启 | 1,1,1 | MLP+aug+CosineWR |
+| B3 | v6a_mlp_geo_aug_step | MLP | geodesic | StepLR | 开启 | 1,1,1 | MLP+geo+aug |
+| B4 | v6a_mlp_geo_aug_cosine | MLP | geodesic | CosineWR | 开启 | 1,1,1 | 全改进组合 |
+
+aug 参数: augment_pc_jitter=0.02, augment_pc_dropout=0.1, augment_color_jitter=0.3
+CosineWR 参数: T0=50, Tmult=2, warmup=5ep
+
+10.3 关键对比
+
+| 对比 | 实验组 | 验证问题 |
+| --- | --- | --- |
+| A1 vs V6-linear-baseline | +aug, 同LR | aug 单独带来多少泛化增益? |
+| A2 vs V6-linear-baseline | +CosineWR, 同aug=0 | CosineWR 单独带来多少泛化增益? |
+| A3 vs A1, A3 vs A2 | +aug+CosineWR | aug 和 CosineWR 是否有协同效应? |
+| A3 vs V5-undist-best | V6配置 vs V5最佳 | V6 的代码改进 (如 use_mlp_head=0 开关) 能否复现 V5 最佳? |
+| A4 vs A3 | +pitch_weight=2 | Pitch 权重加强是否降低 Pitch 误差? |
+| B1 vs V6-mlp-baseline | +aug | aug 能否缓解 MLP 7-8x 过拟合? |
+| B4 vs A3 | MLP+geo+aug+CosineWR vs Linear+aug+CosineWR | 最终: MLP 全改进 vs Linear 全改进 |
+
+10.4 预期结果
+
+- A3 应接近或超越 V5 undist-best (1.047°), 因为配置几乎相同
+- A4 的 Pitch 分量应显著低于 A3 (预期从 0.98° 降至 0.7-0.8°)
+- B组 MLP 衰退倍数应从 7-8x 降低到 3-5x (aug 缓解过拟合)
+- B4 (全改进组合) 是否能同时获得 MLP 的训练精度优势和 aug 的泛化优势
+
+================================================================================
+十一、总结
 ================================================================================
 
 V6 改进的核心理念: 对齐论文实现 + 挖掘 BEV 物理极限
@@ -334,10 +568,16 @@ V6 改进的核心理念: 对齐论文实现 + 挖掘 BEV 物理极限
 2. Geodesic Loss: 提供更好的 sub-degree 优化梯度
 3. BEV 高分辨率: 聚焦有效 LiDAR 范围 (0-100m), 体素分辨率翻倍
 
-预期最终效果:
-- B26A 数据集: best val 从 0.29° 提升至 <0.20°, 泛化从 1.05° (undist-best-5deg) 进一步降低
-- ALL 数据集: train rot 突破 0.6° 瓶颈, best val 从 0.28° 降至 <0.20°
-- 以上泛化数据均基于 test_data (9852 samples, 5 sequences) 评估
+V6 实际泛化评估结论 (2026-03-30):
+- MLP 头训练精度极高 (val 0.17°) 但泛化衰退严重 (7-8x), Linear 头反而泛化更优
+- V6 linear-baseline (1.194°) 已超越 v1-champion (1.253°), 但未超越 V5 undist-best (1.047°)
+- 泛化差距根因: V6 关闭了数据增强 + 使用 StepLR (V5 用 CosineWR + 开启 aug)
+- Geodesic loss 对 MLP 头有效 (-0.097°), 对 Linear 头无明显帮助
+- BEV pool 对泛化有害, 不推荐使用
 
-下一步: 启动 B26A 快速验证实验, 确认改进方向后再在 ALL 数据集上规模训练。
+下一步实验建议:
+1. 在 V6 最佳配置 (Linear 头) 基础上重新开启数据增强 (jitter=0.02, dropout=0.1, color=0.3)
+2. 对比 StepLR vs CosineWR 在 V6 配置下的泛化效果
+3. 尝试 MLP 头 + 更强正则化 (更大 dropout, weight_decay) 缓解过拟合
+4. 在 ALL 数据集上验证上述发现的可迁移性
 

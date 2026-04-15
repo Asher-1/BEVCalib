@@ -714,12 +714,18 @@ class ConfigParser:
         }
     
     @staticmethod
-    def parse_lidars_cfg(filepath: str) -> Dict:
+    def parse_lidars_cfg(filepath: str, main_lidar_suffix: str = "_202") -> Dict:
         """解析 lidars.cfg 文件
         
         cfg字段名 → 内部key名 → 含义:
         - vehicle_to_sensing → 'sensing_to_vehicle' → Sensing→Vehicle
         - sensor_to_lidar   → 'lidar_to_sensing'   → LiDAR→Sensing
+        
+        Args:
+            filepath: lidars.cfg 文件路径
+            main_lidar_suffix: 主 LiDAR 的 frame_id 后缀（默认 "_202"）。
+                当 lidars.cfg 包含多个 LiDAR config 块时，
+                优先选择 frame_id 以此后缀结尾的 config 块的外参。
         """
         with open(filepath, 'r') as f:
             content = f.read()
@@ -740,10 +746,57 @@ class ConfigParser:
                 i += 1
             return None
         
+        def find_all_blocks(text, name):
+            """找到文本中所有同名块"""
+            blocks = []
+            search_start = 0
+            while True:
+                m = re.search(rf'{name}\s*\{{', text[search_start:])
+                if not m:
+                    break
+                abs_start = search_start + m.end() - 1
+                depth, i = 0, abs_start
+                while i < len(text):
+                    if text[i] == '{':
+                        depth += 1
+                    elif text[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            blocks.append(text[abs_start + 1 : i])
+                            break
+                    i += 1
+                search_start = i + 1 if i < len(text) else len(text)
+            return blocks
+        
+        def parse_transform_block(blk):
+            """从 sensor_to_lidar 块中提取 position + orientation"""
+            pos_blk = find_block(blk, 'position')
+            position = None
+            if pos_blk:
+                x = re.search(r'x:\s*([-\d.e]+)', pos_blk)
+                y = re.search(r'y:\s*([-\d.e]+)', pos_blk)
+                z = re.search(r'z:\s*([-\d.e]+)', pos_blk)
+                if x and y and z:
+                    position = np.array([float(x.group(1)), float(y.group(1)), float(z.group(1))])
+            
+            ori_blk = find_block(blk, 'orientation')
+            orientation = None
+            if ori_blk:
+                qx = re.search(r'qx:\s*([-\d.e]+)', ori_blk)
+                qy = re.search(r'qy:\s*([-\d.e]+)', ori_blk)
+                qz = re.search(r'qz:\s*([-\d.e]+)', ori_blk)
+                qw = re.search(r'qw:\s*([-\d.e]+)', ori_blk)
+                if qx and qy and qz and qw:
+                    orientation = np.array([
+                        float(qx.group(1)), float(qy.group(1)),
+                        float(qz.group(1)), float(qw.group(1))
+                    ])
+            return position, orientation
+        
         result = {}
         
         # 1. 解析vehicle_to_sensing (Sensing→Vehicle)
-        s2v_blk = find_block(content, 'vehicle_to_sensing')  # config file field name
+        s2v_blk = find_block(content, 'vehicle_to_sensing')
         if s2v_blk:
             pos = find_block(s2v_blk, 'position')
             s2v_position = None
@@ -767,44 +820,63 @@ class ConfigParser:
             if s2v_position is not None and s2v_orientation is not None:
                 result['sensing_to_vehicle'] = {
                     'position': s2v_position,
-                    'orientation': s2v_orientation  # [qx, qy, qz, qw]
+                    'orientation': s2v_orientation
                 }
         
         # 2. 解析sensor_to_lidar (LiDAR→Sensing)
-        blk = find_block(content, 'sensor_to_lidar')  # config file field name
-        if not blk:
-            config_blk = find_block(content, 'config')
-            if config_blk:
-                blk = find_block(config_blk, 'sensor_to_lidar')  # config file field name
-            if not blk:
+        #    遍历所有 config 块，优先选择主 LiDAR（frame_id 以 main_lidar_suffix 结尾）
+        config_blocks = find_all_blocks(content, 'config')
+        
+        main_lidar_transform = None
+        first_lidar_transform = None
+        main_frame_id = None
+        first_frame_id = None
+        
+        for cfg_blk in config_blocks:
+            fid_match = re.search(r'frame_id:\s*"([^"]+)"', cfg_blk)
+            frame_id = fid_match.group(1) if fid_match else None
+            
+            s2l_blk = find_block(cfg_blk, 'sensor_to_lidar')
+            if not s2l_blk:
+                continue
+            
+            pos, ori = parse_transform_block(s2l_blk)
+            if pos is None or ori is None:
+                continue
+            
+            if first_lidar_transform is None:
+                first_lidar_transform = (pos, ori)
+                first_frame_id = frame_id
+            
+            if frame_id and frame_id.endswith(main_lidar_suffix):
+                main_lidar_transform = (pos, ori)
+                main_frame_id = frame_id
+                break
+        
+        position, orientation = None, None
+        chosen_frame_id = None
+        
+        if main_lidar_transform:
+            position, orientation = main_lidar_transform
+            chosen_frame_id = main_frame_id
+        elif first_lidar_transform:
+            position, orientation = first_lidar_transform
+            chosen_frame_id = first_frame_id
+            print(f"  ⚠️  未找到主LiDAR (suffix='{main_lidar_suffix}')，"
+                  f"使用第一个LiDAR: {chosen_frame_id}")
+        else:
+            blk = find_block(content, 'sensor_to_lidar')
+            if blk:
+                position, orientation = parse_transform_block(blk)
+            if position is None or orientation is None:
                 raise ValueError(f'在 {filepath} 中未找到 sensor_to_lidar')
-        
-        pos = find_block(blk, 'position')
-        position = None
-        if pos:
-            x = re.search(r'x:\s*([-\d.e]+)', pos)
-            y = re.search(r'y:\s*([-\d.e]+)', pos)
-            z = re.search(r'z:\s*([-\d.e]+)', pos)
-            if x and y and z:
-                position = np.array([float(x.group(1)), float(y.group(1)), float(z.group(1))])
-        
-        ori = find_block(blk, 'orientation')
-        orientation = None
-        if ori:
-            qx = re.search(r'qx:\s*([-\d.e]+)', ori)
-            qy = re.search(r'qy:\s*([-\d.e]+)', ori)
-            qz = re.search(r'qz:\s*([-\d.e]+)', ori)
-            qw = re.search(r'qw:\s*([-\d.e]+)', ori)
-            if qx and qy and qz and qw:
-                orientation = np.array([
-                    float(qx.group(1)), float(qy.group(1)),
-                    float(qz.group(1)), float(qw.group(1))
-                ])
         
         if position is None or orientation is None:
             raise ValueError(f'sensor_to_lidar 的 position 或 orientation 不完整: {filepath}')
         
-        # 将LiDAR→Sensing的position和orientation添加到result中
+        if chosen_frame_id:
+            print(f"  ✓ LiDAR外参来源: {chosen_frame_id} (from {os.path.basename(filepath)})")
+        
         result['position'] = position
         result['orientation'] = orientation
         
@@ -4218,6 +4290,9 @@ class BEVCalibDatasetPreparer:
         print(f"\n{'='*80}")
         print(f"数据集生成完成！")
         print(f"{'='*80}")
+        print(f"\n📋 Sequence信息:")
+        print(f"  Sequence ID: {sequence_id}")
+        print(f"  输出样本数: {success_count}")
         print(f"\n📁 输出位置:")
         print(f"  数据集: {seq_dir}")
         if self.save_debug_samples > 0:
@@ -4525,11 +4600,14 @@ def main():
                             '加此选项后，所有环节强制使用lidars.cfg中的参数。')
     args = parser.parse_args()
     
-    # 打印配置信息
+    trip_name = Path(args.bag_dir).parent.parent.name if '/bags/' in args.bag_dir else Path(args.bag_dir).name
+    
     print(f"\n{'='*80}")
     print(f"BEVCalib 数据集生成工具")
     print(f"{'='*80}")
     print(f"\n⚙️  配置:")
+    print(f"  Sequence ID: {args.sequence_id}")
+    print(f"  Trip名称: {trip_name}")
     print(f"  Bag目录: {args.bag_dir}")
     print(f"  配置目录: {args.config_dir}")
     print(f"  输出目录: {args.output_dir}")

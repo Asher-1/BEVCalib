@@ -1,0 +1,109 @@
+# BEVCalib ALL V12 泛化性能评估
+#
+# V12 ALL (5组实验, 对应 batch8_train_all_v12.yaml):
+#   1. v12-v6-repro:          V6冠军精确复现 (Z=5+1,1,1+StepLR)
+#   2. v12-z10-pitch3:        Z=10+pitch3 (核心实验)
+#   3. v12-z10-pitch3-cosine: Z=10+pitch3+CosineAnnealing
+#   4. v12-z10-pitch3-aug:    Z=10+pitch3+轻度数据增强
+#   5. v12-z10-cosine-aug:    Z=10+pitch3+Cosine+增强 (全组合)
+#
+# + ALL-V6 冠军 + ALL-V8 最佳 对照
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_all_v12.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v12"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v12"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V12 ALL (5组) ====================
+
+  - label: "v12-v6-repro"
+    dir_name: "model_small_5deg_v12_v6_repro"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v12-v6-repro"
+    mode_desc: "ALL V12 V6冠军复现 (Z=5+1,1,1+StepLR)"
+
+  - label: "v12-z10-pitch3"
+    dir_name: "model_small_5deg_v12_z10_pitch3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v12-z10-pitch3"
+    mode_desc: "ALL V12 Z=10+pitch3 (核心实验, StepLR)"
+
+  - label: "v12-z10-pitch3-cosine"
+    dir_name: "model_small_5deg_v12_z10_pitch3_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v12-z10-pitch3-cosine"
+    mode_desc: "ALL V12 Z=10+pitch3+CosineAnnealing"
+
+  - label: "v12-z10-pitch3-aug"
+    dir_name: "model_small_5deg_v12_z10_pitch3_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v12-z10-pitch3-aug"
+    mode_desc: "ALL V12 Z=10+pitch3+轻度增强 (pc_jitter=0.02, color=0.1)"
+
+  - label: "v12-z10-cosine-aug"
+    dir_name: "model_small_5deg_v12_z10_cosine_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v12-z10-cosine-aug"
+    mode_desc: "ALL V12 Z=10+pitch3+Cosine+增强 (全组合)"
+
+  # ==================== 基线 ====================
+
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291"
+
+  - label: "all-v8-z10-pitch3"
+    dir_name: "../../all_training_data/v8/model_small_5deg_v8_z10_pitch_wt3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "all-v8-z10-pitch3"
+    mode_desc: "ALL V8 Z=10+pitch3 (V8最佳)"

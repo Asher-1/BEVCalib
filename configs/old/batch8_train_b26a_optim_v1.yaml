@@ -1,0 +1,137 @@
+# BEVCalib 泛化优化消融实验 - B26A数据集
+# 基于 Generalization Optimization Plan 的全部优化手段
+#
+# 用法:
+#   bash batch_train.sh configs/batch16_train_b26a_optim.yaml
+#   bash batch_train.sh --dry-run configs/batch16_train_b26a_optim.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数（所有实验继承）
+# ============================================================================
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+
+  params:
+    # 扰动参数
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # 训练参数
+    batch_size: 8
+    learning_rate: 1e-4
+
+    # DDP配置
+    use_ddp: true
+    ddp_gpus: null
+
+    nnodes: null                # 自动台机器
+    node_rank: null             # 自动检测（SLURM）或手动指定
+    master_addr: null           # 自动检测（SLURM）或手动指定
+    master_port: null           # 自动检测端口
+
+    # 训练模式
+    use_compile: false
+    rotation_only: true
+
+    # 轴向损失
+    enable_axis_loss: true
+    weight_axis_rotation: 0.3
+
+    # 泛化优化参数（全部启用）
+    lr_schedule: cosine_warm_restarts
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+    cosine_T0: 50
+    cosine_Tmult: 2
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.1
+    augment_color_jitter: 0.3
+    early_stopping_patience: 30
+
+    # 执行模式
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组配置
+# ============================================================================
+# 实验设计思路:
+#   实验1: 全量优化基线 (所有优化手段全开)
+#   实验2: 消融 - 不用cosine LR (验证LR schedule的贡献)
+#   实验3: 消融 - 不用数据增强 (验证augmentation的贡献)
+#   实验4: 消融 - 不用per-axis扰动 (验证扰动策略的贡献)
+#   实验5: 消融 - axis_loss权重对比 (0.5 vs 0.3)
+#   实验6: 消融 - 无优化基线 (对照组，与v4配置一致)
+# ============================================================================
+experiments:
+  # ============ 实验1: 全量优化基线 ============
+  - name: "full_optim (z=5)"
+    description: "全部优化手段: cosine_LR + axis_loss + trunc_normal + per_axis + augment + early_stop"
+    dataset: "B26A"
+    version: "v7_opt_full"
+
+  # ============ 实验2: 消融 - StepLR (不用cosine) ============
+  - name: "ablation_step_lr (z=5)"
+    description: "消融: 使用StepLR代替CosineWarmRestarts"
+    dataset: "B26A"
+    version: "v7_opt_step_lr"
+    params:
+      lr_schedule: step
+
+  # ============ 实验3: 消融 - 无数据增强 ============
+  - name: "ablation_no_augment (z=5)"
+    description: "消融: 关闭所有数据增强"
+    dataset: "B26A"
+    version: "v7_opt_no_aug"
+    params:
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_color_jitter: 0.0
+
+  # ============ 实验4: 消融 - 无per-axis扰动 ============
+  - name: "ablation_no_peraxis (z=5)"
+    description: "消融: 关闭per-axis扰动和truncated_normal"
+    dataset: "B26A"
+    version: "v7_opt_no_peraxis"
+    params:
+      perturb_distribution: uniform
+      per_axis_prob: 0.0
+
+  # ============ 实验5: axis_loss权重=0.5 ============
+  - name: "axis_loss_0.5 (z=5)"
+    description: "axis_loss权重提高到0.5"
+    dataset: "B26A"
+    version: "v7_opt_axis05"
+    params:
+      weight_axis_rotation: 0.5
+
+  # ============ 实验6: 无优化对照组 ============
+  - name: "baseline_no_optim (z=5)"
+    description: "对照组: 关闭所有新优化，与v4配置一致"
+    dataset: "B26A"
+    version: "v7_baseline"
+    params:
+      lr_schedule: step
+      warmup_epochs: 0
+      backbone_lr_scale: 1.0
+      drop_path_rate: 0.0
+      head_dropout: 0.0
+      perturb_distribution: uniform
+      per_axis_prob: 0.0
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_color_jitter: 0.0
+      enable_axis_loss: false
+      early_stopping_patience: 0

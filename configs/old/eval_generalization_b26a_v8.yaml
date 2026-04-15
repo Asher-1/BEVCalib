@@ -1,0 +1,155 @@
+# BEVCalib B26A V8 泛化性能评估 — Pitch定向优化
+#
+# V8 实验: 7组 Pitch 定向消融 (全部 Linear+quaternion+StepLR+无aug)
+#   0. v8_baseline:           ALL冠军复现 (Z=5, axis_wt=1,1,1)
+#   1. v8_z10:                Z=10 (zbound 2.0)
+#   2. v8_pitch_wt3:          axis_weights=1,3,1
+#   3. v8_z10_pitch_wt3:      Z=10 + axis_weights=1,3,1
+#   4. v8_per_axis_pitch:     per_axis_weights=1,2,1
+#   5. v8_z10_per_axis_pitch: Z=10 + per_axis_weights=1,2,1
+#   6. v8_z10_pitch_all:      Z=10 + 1,3,1 + 1,2,1
+#
+# + ALL冠军 all-v6-linear-baseline 作为对照基线
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_b26a_v8.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/B26A/v8"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_b26a_v8"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V8 Pitch定向优化 (7组) ====================
+
+  # 0. 控制基线 — ALL冠军精确复现
+  - label: "v8-baseline"
+    dir_name: "model_small_5deg_v8_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-baseline"
+    mode_desc: "B26A V8 ALL冠军复现 Linear+quat+StepLR+无aug (Z=5)"
+
+  # 1. Z=10: 更细Z分层
+  - label: "v8-z10"
+    dir_name: "model_small_5deg_v8_z10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v8-z10"
+    mode_desc: "B26A V8 Z=10 (zbound 2.0, 10 Z-voxel)"
+
+  # 2. Pitch权重=3
+  - label: "v8-pitch-wt3"
+    dir_name: "model_small_5deg_v8_pitch_wt3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-pitch-wt3"
+    mode_desc: "B26A V8 axis_weights=1,3,1 (Pitch梯度3x)"
+
+  # 3. Z=10 + Pitch权重=3
+  - label: "v8-z10-pitch-wt3"
+    dir_name: "model_small_5deg_v8_z10_pitch_wt3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v8-z10-pitch-wt3"
+    mode_desc: "B26A V8 Z=10 + axis_weights=1,3,1 (双重Pitch优化)"
+
+  # 4. Pitch扰动偏向
+  - label: "v8-per-axis-pitch"
+    dir_name: "model_small_5deg_v8_per_axis_pitch"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-per-axis-pitch"
+    mode_desc: "B26A V8 per_axis_weights=1,2,1 (Pitch扰动2x概率)"
+
+  # 5. Z=10 + Pitch扰动偏向
+  - label: "v8-z10-per-axis-pitch"
+    dir_name: "model_small_5deg_v8_z10_per_axis_pitch"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v8-z10-per-axis-pitch"
+    mode_desc: "B26A V8 Z=10 + per_axis_weights=1,2,1"
+
+  # 6. 全部Pitch优化叠加
+  - label: "v8-z10-pitch-all"
+    dir_name: "model_small_5deg_v8_z10_pitch_all"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    version: "v8-z10-pitch-all"
+    mode_desc: "B26A V8 Z=10 + axis_wt=1,3,1 + per_axis_wt=1,2,1 (全Pitch优化)"
+
+  # 7. drcv后端A/B对照
+  - label: "v8-baseline-drcv"
+    dir_name: "model_small_5deg_v8_baseline_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    use_drcv: 1
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-baseline-drcv"
+    mode_desc: "B26A V8 drcv后端A/B (Linear+quat, vs v8-baseline)"
+
+  # ==================== 基线对照 ====================
+
+  # ALL V6 冠军 (泛化 0.494°, 历史最佳)
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 Linear+quat+StepLR (泛化冠军 0.494°)"
+
+  # B26A V7 最佳 (泛化 0.978°)
+  - label: "b26a-v7-champion"
+    dir_name: "../v7/model_small_5deg_v7_pitch_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "b26a-v7-champion"
+    mode_desc: "B26A V7 CosineWR+aug+pitch_wt=1,2,1 (泛化 0.978°)"

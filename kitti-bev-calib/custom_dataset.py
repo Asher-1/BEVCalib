@@ -44,7 +44,7 @@ class CustomDataset(Dataset):
     KITTI_SEQUENCES = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', 
                        '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']
     
-    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None):
+    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None, max_frames_per_seq=None):
         # 使用 bev_settings 的体素化范围配置
         self.x_min, self.x_max = xbound[0], xbound[1]
         self.y_min, self.y_max = ybound[0], ybound[1]
@@ -78,6 +78,7 @@ class CustomDataset(Dataset):
         self.T_cam2sensing = {}  # Camera→Sensing (系统已知相机外参)
         
         self.target_size = target_size  # (width, height) for pre-resized lookup
+        self.max_frames_per_seq = max_frames_per_seq
         self._resized_dir_name = None
         self._resized_K = {}  # pre-computed intrinsics for resized images
         if target_size is not None:
@@ -119,7 +120,7 @@ class CustomDataset(Dataset):
                 image_list = os.listdir(os.path.join(self.dataset_root, 'sequences', seq, 'image_2'))
                 image_list.sort()
 
-                frame_count = 0
+                seq_files = []
                 for image_name in image_list:
                     base_name = image_name.split('.')[0]
                     if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'velodyne',
@@ -128,13 +129,22 @@ class CustomDataset(Dataset):
                     if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'image_2',
                                                        base_name + suf)):
                         continue
-
-                    self.all_files.append(os.path.join(seq, base_name))
-                    frame_count += 1
+                    seq_files.append(os.path.join(seq, base_name))
+                
+                full_count = len(seq_files)
+                if self.max_frames_per_seq and full_count > self.max_frames_per_seq:
+                    stride = full_count / self.max_frames_per_seq
+                    seq_files = [seq_files[int(i * stride)] for i in range(self.max_frames_per_seq)]
+                
+                self.all_files.extend(seq_files)
+                frame_count = len(seq_files)
                 
                 if frame_count > 0:
                     loaded_sequences.append(seq)
-                    print(f"  ✓ 序列 {seq}: {frame_count} 帧")
+                    if self.max_frames_per_seq and full_count > self.max_frames_per_seq:
+                        print(f"  ✓ 序列 {seq}: {frame_count} 帧 (均匀采样自 {full_count} 帧)")
+                    else:
+                        print(f"  ✓ 序列 {seq}: {frame_count} 帧")
             except Exception as e:
                 # 序列不存在或加载失败，跳过
                 continue
@@ -241,7 +251,13 @@ class CustomDataset(Dataset):
             assert False
         img = Image.open(img_path)
         # 注意: 不在这里resize图像，resize在collate_fn中进行，同时调整内参K
-        pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)
+        raw = np.fromfile(pcd_path, dtype=np.float32)
+        if raw.size % 4 == 0:
+            pcd = raw.reshape(-1, 4)
+        elif raw.size % 3 == 0:
+            pcd = raw.reshape(-1, 3)
+        else:
+            raise ValueError(f"Point cloud {pcd_path}: {raw.size} floats, not divisible by 3 or 4")
         
         # 记录原始点云数量
         original_points = len(pcd)
@@ -274,7 +290,8 @@ class CustomDataset(Dataset):
             if track_stats:
                 self.utilization_stats['low_point_frames'] += 1
             # 如果点太少，扩大范围重新过滤
-            pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4)
+            raw2 = np.fromfile(pcd_path, dtype=np.float32)
+            pcd = raw2.reshape(-1, 4) if raw2.size % 4 == 0 else raw2.reshape(-1, 3)
             ego_filter = (np.abs(pcd[:, 0]) > 2.) | (np.abs(pcd[:, 1]) > 2.)
             pcd = pcd[ego_filter, :]
             # 放宽 Z 轴限制

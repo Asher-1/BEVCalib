@@ -477,6 +477,13 @@ OPTIM_PARAMS = [
     ('use_mlp_head', '--use_mlp_head'),
     ('use_deformable', '--use_deformable'),
     ('bev_pool_factor', '--bev_pool_factor'),
+    ('use_foundation_depth', '--use_foundation_depth'),
+    ('depth_model_type', '--depth_model_type'),
+    ('fd_mode', '--fd_mode'),
+    ('depth_sup_alpha', '--depth_sup_alpha'),
+    ('max_frames_per_seq', '--max_frames_per_seq'),
+    ('eval_epoches', '--eval_epoches'),
+    ('grad_accum_steps', '--grad_accum_steps'),
 ]
 for yaml_key, cli_flag in OPTIM_PARAMS:
     val = params.get(yaml_key)
@@ -511,8 +518,8 @@ if params.get('master_addr') is not None:
 if params.get('master_port') is not None:
     args.append(f"--master_port {params['master_port']}")
 
-# 组合完整命令
-cmd = f"{env_cmd}bash start_training.sh {dataset} {version} {' '.join(args)}"
+# 组合完整命令（BATCH_MODE=1 跳过交互式确认）
+cmd = f"BATCH_MODE=1 {env_cmd}bash start_training.sh {dataset} {version} {' '.join(args)}"
 print(cmd)
 PYTHON_EOF
 }

@@ -320,6 +320,11 @@ def run_evaluations():
         if mcfg.get("use_drcv"):
             cmd.append("--use_drcv")
             env["USE_DRCV_BACKEND"] = "1"
+        if mcfg.get("use_foundation_depth"):
+            cmd.extend(["--use_foundation_depth", str(mcfg["use_foundation_depth"])])
+            env["HF_HUB_OFFLINE"] = "1"
+        if mcfg.get("depth_model_type"):
+            cmd.extend(["--depth_model_type", str(mcfg["depth_model_type"])])
 
         log_path = os.path.join(per_model_dir, "eval_run.log")
         os.makedirs(per_model_dir, exist_ok=True)

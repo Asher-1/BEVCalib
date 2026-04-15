@@ -1,0 +1,96 @@
+# BEVCalib 批量训练配置文件 - 多机DDP训练示例（优化版）
+# 使用 defaults 区域消除重复配置
+
+# 全局配置
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+# ============================================================================
+# 默认参数（所有实验继承）
+# ============================================================================
+# 多机训练公共配置：所有实验都使用2台机器，每台8个GPU
+defaults:
+  env: {
+    BEV_ZBOUND_STEP: 4.0,
+    USE_DRCV_BACKEND: 1,
+    }
+  
+  params:
+    # 扰动参数
+    angle_range_deg: 5         # 5度扰动
+    trans_range: 0.3
+
+    # 轴向损失
+    enable_axis_loss: true
+    weight_axis_rotation: 0.3
+    
+    # 训练参数
+    batch_size: 16              # 多机训练可以用更大的batch
+    learning_rate: 1e-4         # 大batch适当增大学习率
+    
+    # DDP配置（多机必须配置）
+    use_ddp: true
+    ddp_gpus: 8                 # 每台机器8个GPU
+    
+    # 多机DDP配置（所有实验共享）
+    nnodes: 32                  # 32台机器
+    node_rank: null             # 自动检测（SLURM）或手动指定
+    master_addr: null           # 自动检测（SLURM）或手动指定
+    master_port: null           # 自动检测端口
+    
+    # 训练模式
+    use_compile: false
+    rotation_only: true
+    
+    # 执行模式
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+# ============================================================================
+# 实验组配置（只需指定dataset/version/env差异）
+# ============================================================================
+experiments:
+  # ============ 实验1 ============
+  - name: "axis_loss0.1 (z=2)"
+    description: "(5deg rotation z=2)"
+    dataset: "all"
+    version: "v5_z2_rotation_axis_loss0.1"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: True
+      weight_axis_rotation: 0.1
+
+  # ============ 实验2 ============
+  - name: "axis_loss0.3 (z=2)"
+    description: "(5deg rotation z=2)"
+    dataset: "all"
+    version: "v5_z2_rotation_axis_loss0.3"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: True
+      weight_axis_rotation: 0.3
+
+  # ============ 实验3 ============
+  - name: "axis_loss0.5 (z=2)"
+    description: "(5deg rotation z=2)"
+    dataset: "all"
+    version: "v5_z2_rotation_axis_loss0.5"
+    env:
+      BEV_ZBOUND_STEP: 10.0
+    params:
+      enable_axis_loss: True
+      weight_axis_rotation: 0.5
+
+  # ============ 实验4: enable_axis_loss=True (5deg rotation) ============
+  - name: "enable_axis_loss=True (5deg rotation)"
+    description: "(5deg rotation)"
+    dataset: "all"
+    version: "v5_z5_rotation_axis_loss1.0"
+    params:
+      enable_axis_loss: True
+      weight_axis_rotation: 1.0

@@ -1,0 +1,175 @@
+# BEVCalib ALL V11 训练配置
+#
+# V11 设计依据 (V9/V10 数据驱动):
+#
+#   1. 数据覆盖仍是决定性因素:
+#      ALL-V6 (0.291) >> B26A全系列 (>1.1), 差距4x
+#      → V11 使用扩充后 all_training_data (13seq, 124K帧, vs V6 8seq 78K帧)
+#
+#   2. V9 B26A 验证结论:
+#      - Z=10+pitch3: 有效 (1.247 vs 1.325), 但 per_axis 有害 (1.297)
+#      - stratified split 在B26A单seq上无增益, 在ALL多seq上应有正向影响
+#      - v10-std-baseline意外最佳 (1.148) 可能是随机波动
+#
+#   3. V9/V10 失败教训:
+#      - per_axis_weights=1,2,1: Pitch反而更差, 已排除
+#      - Foundation Depth: MiDaS离线下载失败, 需预缓存模型
+#      - B26A单车型数据天花板~1.1, 不值得继续投入
+#
+#   4. V11 新增优势:
+#      - 数据量: 124K帧 (vs V6 78K) — 5个新trip, +59%数据量
+#      - 更多车型覆盖: 13个seq来自不同车型/安装配置
+#      - stratified split 对13seq更有意义
+#
+# V11 实验矩阵 (5组, 全量ALL数据):
+#   1. v11_baseline:        V6冠军复现 (Z=5, 1,1,1) — 验证更大数据集增益
+#   2. v11_z10_pitch3:      Z=10+pitch3 — 合并V8/V9最佳配置
+#   3. v11_z10:             Z=10 only — 隔离Z分辨率增益
+#   4. v11_z10_pitch3_warm: Z=10+pitch3+warmup10 — 更大数据需更多warmup
+#   5. v11_z10_pitch5:      Z=10+pitch5 — 测试更强Pitch加权极限
+#
+# 用法 (本地8卡):
+#   bash batch_train.sh configs/batch8_train_all_v11.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50           # 每N个epoch验证一次
+    grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # ALL V11: 5组实验 — 数据扩充 + V8/V9最佳组合验证
+  # =========================================================================
+
+  # 1. V6冠军复现 — 13seq 124K帧数据集, 验证数据扩充增益
+  #    V6在8seq 78K帧上: 0.494° → 预期13seq 124K帧: <0.4°
+  - name: "v11_baseline"
+    description: "ALL V11: 复现V6配置 (Z=5+1,1,1), 13seq 124K帧"
+    dataset: "all"
+    version: "v11_baseline"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. Z=10 + Pitch×3 — 跨V8/V9验证的最佳组合
+  #    V9 B26A: z10+pitch3 最佳 (1.247), V8: 1.182
+  #    在13seq ALL上, 预期: <0.35° (数据+Z+pitch三重增益)
+  - name: "v11_z10_pitch3"
+    description: "ALL V11: Z=10+pitch3 (V8/V9最佳组合+13seq数据)"
+    dataset: "all"
+    version: "v11_z10_pitch3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. Z=10 only — 隔离Z分辨率增益
+  #    对照: v11_baseline vs v11_z10 → Z=10的纯增益
+  - name: "v11_z10"
+    description: "ALL V11: Z=10 only (隔离Z分辨率增益)"
+    dataset: "all"
+    version: "v11_z10"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 4. Z=10 + Pitch×3 + warmup=10 — 更大数据集可能需要更多warmup
+  #    13seq 124K帧, batch=8, 8GPU → ~1950 steps/epoch
+  #    warmup=10: 19500 steps warmup vs 默认warmup=5: 9750 steps
+  - name: "v11_z10_pitch3_warm"
+    description: "ALL V11: Z=10+pitch3+warmup10 (大数据集warmup探索)"
+    dataset: "all"
+    version: "v11_z10_pitch3_warm"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      warmup_epochs: 10
+
+  # 5. Z=10 + Pitch×5 — Pitch加权极限探索
+  #    V9证明per_axis双重pitch有害, 但单axis_weight=5尚未测试
+  #    如果pitch=3有效, pitch=5是否更好?
+  - name: "v11_z10_pitch5"
+    description: "ALL V11: Z=10+pitch5 (Pitch加权极限测试)"
+    dataset: "all"
+    version: "v11_z10_pitch5"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,5.0,1.0"
+
+# ============================================================================
+# V11 ALL 消融矩阵 (5组)
+# ============================================================================
+#
+#   实验                    | Z  | Pitch Wt | Warmup | 对照变量
+#   ------------------------+----+----------+--------+---------
+#   1 v11_baseline          | 5  | 1,1,1    | 5      | V6复现(13seq数据)
+#   2 v11_z10_pitch3        | 10 | 1,3,1    | 5      | V8/V9最佳组合
+#   3 v11_z10               | 10 | 1,1,1    | 5      | 隔离Z增益
+#   4 v11_z10_pitch3_warm   | 10 | 1,3,1    | 10     | warmup影响
+#   5 v11_z10_pitch5        | 10 | 1,5,1    | 5      | pitch极限
+#
+# 关键对比:
+#   1 vs V6冠军: 数据扩充 (13seq vs 8seq) 的纯增益
+#   2 vs 1: Z=10+pitch3 在大数据集上的增益
+#   3 vs 1: Z=10 单一变量在大数据集上的增益
+#   4 vs 2: warmup epoch对大数据集训练的影响
+#   5 vs 2: pitch=5 vs pitch=3 的收益/风险
+#
+# 预期目标:
+#   V6冠军 (8seq): 0.494° → V11 (13seq): <0.35° (降>30%)
+#   V11 Pitch: <0.20° (V6 Pitch=0.170°)

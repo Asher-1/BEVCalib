@@ -1,0 +1,96 @@
+# BEVCalib B26A V11 快速验证配置
+#
+# B26A 1seq ~1.8K帧, 训练快, 用于排除无效配置
+# 仅保留3组核心实验, 跑完再上ALL做正式训练
+#
+# V11 B26A 实验 (3组, 快速验证):
+#   1. v11_baseline:    V6配置复现 (Z=5, 1,1,1) — 训练时间基线
+#   2. v11_z10_pitch3:  Z=10+pitch3 (V8/V9最佳) — 验证稳定性
+#   3. v11_z10_pitch5:  Z=10+pitch5 — 验证极限加权
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_b26a_v11.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # 1. V6配置复现 — 训练时间基线
+  - name: "v11_baseline"
+    description: "B26A V11: V6配置复现 (Z=5+1,1,1)"
+    dataset: "B26A"
+    version: "v11_baseline"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. Z=10 + Pitch×3 — V8/V9最佳组合稳定性验证
+  - name: "v11_z10_pitch3"
+    description: "B26A V11: Z=10+pitch3 (V8/V9最佳组合)"
+    dataset: "B26A"
+    version: "v11_z10_pitch3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. Z=10 + Pitch×5 — 极限加权验证
+  - name: "v11_z10_pitch5"
+    description: "B26A V11: Z=10+pitch5 (Pitch极限加权)"
+    dataset: "B26A"
+    version: "v11_z10_pitch5"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,5.0,1.0"
