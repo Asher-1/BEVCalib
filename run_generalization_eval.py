@@ -325,6 +325,8 @@ def run_evaluations():
             env["HF_HUB_OFFLINE"] = "1"
         if mcfg.get("depth_model_type"):
             cmd.extend(["--depth_model_type", str(mcfg["depth_model_type"])])
+        if mcfg.get("fd_mode"):
+            cmd.extend(["--fd_mode", str(mcfg["fd_mode"])])
 
         log_path = os.path.join(per_model_dir, "eval_run.log")
         os.makedirs(per_model_dir, exist_ok=True)

@@ -4,11 +4,14 @@
 #
 # 功能: 依次运行多组消融实验，每组完成后自动启动下一组
 #       通过YAML配置文件定义实验参数，支持所有start_training.sh选项
+#       自动跳过已完成的实验（输出目录已存在train.log）
 #
 # 用法:
-#   bash batch_train.sh [config_file]
+#   bash batch_train.sh [options] [config_file]
 #   bash batch_train.sh configs/batch_train_5deg.yaml
 #   bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
+#   bash batch_train.sh --force configs/batch_train_5deg.yaml
+#   bash batch_train.sh --skip-pattern "baseline" configs/batch_train_5deg.yaml
 #
 # 配置文件:
 #   configs/batch_train_5deg.yaml           - 5度扰动Z分辨率对比
@@ -30,6 +33,8 @@ cd "$SCRIPT_DIR"
 # =============================================================================
 
 DRY_RUN=0
+FORCE_RERUN=0
+SKIP_PATTERN=""
 CONFIG_FILE=""
 
 show_help() {
@@ -41,6 +46,8 @@ BEVCalib 批量训练脚本 (配置文件驱动)
 
 选项:
     --dry-run           仅打印命令，不实际执行
+    --force             强制重新训练，即使输出目录已存在
+    --skip-pattern RE   跳过名称匹配正则表达式的实验 (grep -E 语法)
     -h, --help          显示此帮助信息
 
 配置文件:
@@ -55,6 +62,12 @@ BEVCalib 批量训练脚本 (配置文件驱动)
 
     # 仅查看会执行的命令
     bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
+
+    # 强制重新训练（忽略已存在的实验目录）
+    bash batch_train.sh --force configs/batch_train_5deg.yaml
+
+    # 跳过名称中包含 baseline 的实验
+    bash batch_train.sh --skip-pattern "baseline" configs/batch_train_5deg.yaml
 
     # 后台运行
     nohup bash batch_train.sh configs/batch_train_5deg.yaml > batch.log 2>&1 &
@@ -71,6 +84,14 @@ while [[ $# -gt 0 ]]; do
         --dry-run)
             DRY_RUN=1
             shift
+            ;;
+        --force)
+            FORCE_RERUN=1
+            shift
+            ;;
+        --skip-pattern)
+            SKIP_PATTERN="$2"
+            shift 2
             ;;
         -h|--help)
             show_help
@@ -149,6 +170,7 @@ fi
 GLOBAL_DRY_RUN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('dry_run', False))" 2>/dev/null)
 BATCH_LOG_DIR=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('batch_log_dir', 'logs'))" 2>/dev/null)
 WAIT_TIME=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('wait_between_experiments', 10))" 2>/dev/null)
+GLOBAL_FORCE_RERUN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('force_rerun', False))" 2>/dev/null)
 
 # TensorBoard 端口 (从 defaults.params.tensorboard_port 读取)
 TB_PORT=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); p=c.get('defaults',{}).get('params',{}) or {}; v=p.get('tensorboard_port'); print(v if v is not None else 6006)" 2>/dev/null)
@@ -163,6 +185,10 @@ fi
 # 命令行 --dry-run 覆盖配置文件
 [ "$DRY_RUN" -eq 1 ] && GLOBAL_DRY_RUN="True"
 [ "$GLOBAL_DRY_RUN" == "True" ] && DRY_RUN=1
+# 命令行 --force 覆盖配置文件 force_rerun
+[ "$FORCE_RERUN" -eq 1 ] && GLOBAL_FORCE_RERUN="True"
+[ "$GLOBAL_FORCE_RERUN" == "True" ] && FORCE_RERUN=1
+[ "$FORCE_RERUN" -eq 1 ] && export FORCE_RERUN=1
 
 # 提取实验数量
 TOTAL=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(len(c.get('experiments',[])))" 2>/dev/null)
@@ -532,12 +558,16 @@ log "================================================================"
 log "BEVCalib 批量训练启动"
 log "配置文件: $CONFIG_FILE"
 log "实验总数: $TOTAL"
+[ "$FORCE_RERUN" -eq 1 ] && log "强制模式: 已启用 (--force / YAML force_rerun)"
+[ -n "$SKIP_PATTERN" ] && log "跳过模式: '$SKIP_PATTERN' (匹配的实验将被跳过)"
 [ -n "$_NODE_RANK" ] && log "节点: node_rank=$_NODE_RANK $([ "$_IS_MASTER" -eq 1 ] && echo '(master)' || echo '(worker)')"
 log "日志: 每个实验输出到 logs/<dataset>/model_*/train.log"
 if [ "$DRY_RUN" -eq 1 ]; then
     log "模式: DRY-RUN（仅打印命令）"
 fi
 log "================================================================"
+
+SKIPPED=0
 
 for ((i=0; i<TOTAL; i++)); do
     EXP_NUM=$((i + 1))
@@ -563,6 +593,8 @@ params.update(exp.get('params') or {})
 # 提取信息（处理None值）
 name = exp.get('name', f'exp{exp_idx}')
 desc = exp.get('description', '')
+skip = bool(exp.get('skip', False))
+skip_reason = exp.get('skip_reason', '')
 dataset = exp.get('dataset', 'B26A')
 version = exp.get('version', 'v1')
 default_env = defaults.get('env') or {}
@@ -579,6 +611,8 @@ dataset_dir = DATASET_DIR_MAP.get(dataset, dataset)
 print(json.dumps({
     'name': name,
     'description': desc,
+    'skip': skip,
+    'skip_reason': skip_reason,
     'dataset': dataset,
     'dataset_dir': dataset_dir,
     'version': version,
@@ -590,6 +624,8 @@ PYTHON_INFO
     
     EXP_NAME=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
     EXP_DESC=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['description'])")
+    EXP_SKIP=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print('1' if json.load(sys.stdin).get('skip') else '0')")
+    EXP_SKIP_REASON=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('skip_reason',''))")
     DATASET=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['dataset'])")
     DATASET_DIR=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['dataset_dir'])")
     VERSION=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
@@ -610,6 +646,18 @@ PYTHON_INFO
     fi
     log "================================================================"
     
+    # 检查实验级别的 skip 标志
+    if [ "$EXP_SKIP" = "1" ]; then
+        SKIPPED=$((SKIPPED + 1))
+        log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
+        if [ -n "$EXP_SKIP_REASON" ]; then
+            log "  原因: $EXP_SKIP_REASON"
+        else
+            log "  原因: YAML 配置中 skip: true"
+        fi
+        continue
+    fi
+    
     # 构建训练命令
     CMD=$(build_train_command "$i" "$CONFIG_JSON")
     log "命令: $CMD"
@@ -624,6 +672,24 @@ PYTHON_INFO
     # DATASET_DIR 已做名称映射（如 all -> all_training_data）
     ANGLE_INT=$(python3 -c "print(int(float('$ANGLE')))" 2>/dev/null || echo "5")
     EXPERIMENT_LOG_DIR="$SCRIPT_DIR/logs/$DATASET_DIR/model_small_${ANGLE_INT}deg_${VERSION}"
+    
+    # 检查是否匹配跳过模式
+    if [ -n "$SKIP_PATTERN" ] && echo "$EXP_NAME" | grep -qE "$SKIP_PATTERN"; then
+        SKIPPED=$((SKIPPED + 1))
+        log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
+        log "  原因: 名称匹配跳过模式 '$SKIP_PATTERN'"
+        continue
+    fi
+    
+    # 检查实验输出目录是否已存在（跳过已完成的实验）
+    if [ "$FORCE_RERUN" -eq 0 ] && [ -d "$EXPERIMENT_LOG_DIR" ] && [ -f "$EXPERIMENT_LOG_DIR/train.log" ]; then
+        SKIPPED=$((SKIPPED + 1))
+        log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
+        log "  原因: 输出目录已存在且包含训练日志"
+        log "  路径: $EXPERIMENT_LOG_DIR"
+        log "  如需重新训练，请删除该目录或使用 --force 参数"
+        continue
+    fi
     
     log "  TensorBoard日志目录: $EXPERIMENT_LOG_DIR"
     
@@ -666,6 +732,10 @@ log ""
 log "================================================================"
 log "批量训练全部完成"
 log "  总实验数: $TOTAL"
+if [ "$SKIPPED" -gt 0 ]; then
+    log "  已跳过: $SKIPPED (输出目录已存在)"
+    log "  实际执行: $((TOTAL - SKIPPED))"
+fi
 log "  配置文件: $CONFIG_FILE"
 log "  日志位置: logs/<dataset>/model_*/train.log"
 log "================================================================"

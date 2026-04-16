@@ -1,0 +1,49 @@
+# BEVCalib DrInfer 转换配置 — v11_z10_quick 模型
+#
+# 模型来源: logs/all_training_data/v11/model_small_5deg_v11_z10_quick
+# 训练配置: batch8_train_all_v11_quick.yaml (v11_z10)
+#   - rotation_only: true, deformable: false, bev_encoder: true
+#   - BEV_ZBOUND_STEP: 2.0 (Z=10 voxel)
+#   - img: 640x360, Linear head, quaternion loss
+
+# === 模型 Checkpoint ===
+ckpt_path: "logs/all_training_data/v11/model_small_5deg_v11_z10_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+export_dir: "logs/all_training_data/v11/model_small_5deg_v11_z10_quick/drinfer"
+
+# === 模型架构参数 ===
+rotation_only: true
+deformable: false
+bev_encoder: true
+use_mlp_head: false
+
+# === BEV 参数 ===
+bev_zbound_step: 2.0
+
+# === 输入尺寸 (固定, 必须与训练一致) ===
+img_height: 360
+img_width: 640
+max_num_points: 150000
+
+# === DrInfer 模型标识 ===
+model_name: "bevcalib_fusion_head"
+model_version: "v11_z10"
+
+# === 数据集 (用于 drinfer_infer.py 评估) ===
+dataset_root: "/mnt/drtraining/user/dahailu/data/bevcalib/all_training_data"
+validate_sample_ratio: 0.1
+batch_size: 1
+num_workers: 4
+
+# === 评估参数 ===
+angle_range_deg: 5.0
+trans_range: 0.15
+max_batches: 50
+vis_points: 8000
+vis_point_radius: 2
+
+# === 导出控制 ===
+verify_export_graph: false
+
+# === 推理后端 ===
+inference_backend: "pytorch"
+device: "cuda"

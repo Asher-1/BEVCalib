@@ -205,6 +205,12 @@ bash batch_train.sh configs/batch_train_lr_ablation.yaml
 # 查看会执行的命令（不实际运行）
 bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
 
+# 强制重新训练（忽略已存在的实验目录）
+bash batch_train.sh --force configs/batch_train_5deg.yaml
+
+# 跳过名称匹配的实验
+bash batch_train.sh --skip-pattern "baseline" configs/batch_train_5deg.yaml
+
 # 后台运行
 nohup bash batch_train.sh configs/batch_train_5deg.yaml > batch.log 2>&1 &
 ```
@@ -222,6 +228,9 @@ nohup bash batch_train.sh configs/batch_train_5deg.yaml > batch.log 2>&1 &
 - ✅ 支持 `start_training.sh` 的所有参数
 - ✅ 串行执行，自动管理GPU资源
 - ✅ **智能TensorBoard管理**（监控当前实验具体目录，v2.1+）
+- ✅ **自动跳过已完成实验**（检测输出目录是否存在 `train.log`）
+- ✅ **实验级 skip 标志**（YAML 中 `skip: true` 跳过单个实验）
+- ✅ **`--force` 强制重跑** / **`--skip-pattern` 按名称正则过滤**
 - ✅ 实验间自动等待释放资源
 - ✅ 详细的日志记录
 
@@ -299,6 +308,7 @@ bash batch_train.sh configs/my_experiments.yaml
 # 全局配置
 global:
   dry_run: false                 # 仅打印命令不执行
+  force_rerun: false             # 强制重新训练（忽略已存在的实验目录）
   wait_between_experiments: 10   # 实验间等待时间（秒）
 
 # 实验组配置
@@ -327,6 +337,12 @@ experiments:
     version: "v2"
     params:
       angle_range_deg: 10
+
+  - name: "已完成的实验"
+    skip: true                   # 跳过此实验
+    skip_reason: "结果已归档"     # 可选：跳过原因
+    dataset: "B26A"
+    version: "v3"
       use_ddp: true
 ```
 
@@ -916,8 +932,11 @@ experiments:
 
 | 参数路径 | 类型 | 默认值 | 对应命令行 | 说明 |
 | --- | --- | --- | --- | --- |
-| `global.dry_run` | bool | false | - | 仅打印命令 |
+| `global.dry_run` | bool | false | `--dry-run` | 仅打印命令 |
+| `global.force_rerun` | bool | false | `--force` | 强制重跑（忽略已存在目录） |
 | `global.wait_between_experiments` | int | 10 | - | 实验间等待 |
+| `skip` | bool | false | - | 跳过此实验 |
+| `skip_reason` | str | "" | - | 跳过原因（日志中显示） |
 | `dataset` | str | - | 位置参数1 | 数据集名称 |
 | `version` | str | - | 位置参数2 | 版本标签 |
 | `env.BEV_ZBOUND_STEP` | float | - | 环境变量 | BEV Z步长 |
@@ -1056,11 +1075,30 @@ experiments:
 ```bash
 # 使用 --dry-run 查看会执行的命令
 bash batch_train.sh --dry-run configs/my_config.yaml
-
-# 检查输出的命令是否符合预期
 ```
 
-#### 2. 参数省略
+#### 2. 跳过已完成的实验
+
+批量训练会自动检测输出目录，若已存在 `train.log` 则跳过该实验：
+
+```
+⏭️  跳过实验 [2/7]: v8_z10
+  原因: 输出目录已存在且包含训练日志
+  路径: /path/to/logs/all_training_data/model_small_5deg_v8_z10_quick
+  如需重新训练，请删除该目录或使用 --force 参数
+```
+
+**跳过控制方式：**
+
+| 方式 | 用法 | 场景 |
+| --- | --- | --- |
+| 自动跳过 | 默认行为 | 断点续跑批量实验 |
+| `--force` | `bash batch_train.sh --force config.yaml` | 强制全部重跑 |
+| `force_rerun: true` | YAML `global` 中设置 | 配置文件级别强制重跑 |
+| `skip: true` | YAML 单个实验中设置 | 永久标记某实验不运行 |
+| `--skip-pattern` | `bash batch_train.sh --skip-pattern "baseline\|v8" config.yaml` | 按名称正则跳过 |
+
+#### 3. 参数省略
 
 只指定需要修改的参数，其他使用默认值：
 

@@ -141,45 +141,35 @@ def project_points_to_image(
     if len(points) == 0:
         return np.array([]), np.array([]), np.array([], dtype=bool)
     
-    # 提取xyz
-    pts_3d = points[:, :3]
-    
-    if debug:
-        print(f"[DEBUG] Input points: {len(pts_3d)}, range X:[{pts_3d[:,0].min():.2f},{pts_3d[:,0].max():.2f}], "
-              f"Y:[{pts_3d[:,1].min():.2f},{pts_3d[:,1].max():.2f}], Z:[{pts_3d[:,2].min():.2f},{pts_3d[:,2].max():.2f}]")
-    
-    # 转换为齐次坐标
+    pts_3d = points[:, :3].astype(np.float64)
+    T = T.astype(np.float64)
+    K = K.astype(np.float64)
+
     pts_3d_homo = np.hstack([pts_3d, np.ones((pts_3d.shape[0], 1))])
-    
-    # LiDAR坐标系 → 相机坐标系
-    pts_cam = (T @ pts_3d_homo.T).T  # (N, 4)
-    
-    if debug:
-        print(f"[DEBUG] After transform: range X:[{pts_cam[:,0].min():.2f},{pts_cam[:,0].max():.2f}], "
-              f"Y:[{pts_cam[:,1].min():.2f},{pts_cam[:,1].max():.2f}], Z(depth):[{pts_cam[:,2].min():.2f},{pts_cam[:,2].max():.2f}]")
-    
-    # 过滤相机后方的点和超出深度范围的点
+
+    # np.einsum avoids OpenBLAS GEMM single-thread bug (OMP_NUM_THREADS=1)
+    pts_cam = np.einsum('ij,nj->ni', T, pts_3d_homo)
+
     valid_mask = (pts_cam[:, 2] > min_depth) & (pts_cam[:, 2] < max_depth)
-    
+    n_input = len(pts_cam)
+    n_depth_ok = int(valid_mask.sum())
     if debug:
-        print(f"[DEBUG] Points with valid depth ({min_depth}<z<{max_depth}): {valid_mask.sum()}/{len(pts_cam)}")
-    
+        print(f"[DEBUG] Points with valid depth ({min_depth}<z<{max_depth}): {n_depth_ok}/{n_input}")
+
     pts_cam_valid = pts_cam[valid_mask, :3]
-    
+
     if len(pts_cam_valid) == 0:
         return np.array([]), np.array([]), valid_mask
-    
-    # 投影到图像平面
-    pts_2d_homo = (K @ pts_cam_valid.T).T
+
+    pts_2d_homo = np.einsum('ij,nj->ni', K, pts_cam_valid)
     pts_2d = pts_2d_homo[:, :2] / pts_2d_homo[:, 2:3]
-    
+
     depths = pts_cam_valid[:, 2]
-    
-    # 过滤图像边界外的点
+
     h, w = image_size
     in_bounds = (pts_2d[:, 0] >= 0) & (pts_2d[:, 0] < w) & \
                 (pts_2d[:, 1] >= 0) & (pts_2d[:, 1] < h)
-    
+
     if debug:
         print(f"[DEBUG] Points in image bounds ({w}x{h}): {in_bounds.sum()}/{len(pts_2d)}")
         if in_bounds.sum() > 0:
@@ -489,9 +479,11 @@ def create_error_analysis_panel(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         return panel
 
-    pts_homo = np.hstack([points_sampled[:, :3], np.ones((N, 1))])
-    gt_cam = (gt_T @ pts_homo.T).T
-    pred_cam = (pred_T @ pts_homo.T).T
+    pts_homo = np.hstack([points_sampled[:, :3].astype(np.float64), np.ones((N, 1))])
+    gt_T64 = np.float64(gt_T)
+    pred_T64 = np.float64(pred_T)
+    gt_cam = np.einsum('ij,nj->ni', gt_T64, pts_homo)
+    pred_cam = np.einsum('ij,nj->ni', pred_T64, pts_homo)
 
     both_depth_valid = (gt_cam[:, 2] > 0.1) & (pred_cam[:, 2] > 0.1)
     gt_cam_v = gt_cam[both_depth_valid, :3]
@@ -503,9 +495,10 @@ def create_error_analysis_panel(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
         return panel
 
-    gt_2d_h = (K @ gt_cam_v.T).T
+    K64 = np.float64(K)
+    gt_2d_h = np.einsum('ij,nj->ni', K64, gt_cam_v)
     gt_2d = gt_2d_h[:, :2] / gt_2d_h[:, 2:3]
-    pred_2d_h = (K @ pred_cam_v.T).T
+    pred_2d_h = np.einsum('ij,nj->ni', K64, pred_cam_v)
     pred_2d = pred_2d_h[:, :2] / pred_2d_h[:, 2:3]
 
     in_bounds = (
@@ -908,46 +901,26 @@ def visualize_batch_projection(
         img = images[i]
         points = points_batch[i]
         
-        if debug and i == 0:
-            print(f"\n[VIS DEBUG] Sample {i}: image shape={img.shape}, points shape={points.shape}")
-        
         if masks is not None:
             valid_mask = masks[i] == 1
             points = points[valid_mask]
-            if debug and i == 0:
-                print(f"[VIS DEBUG] After mask: {len(points)} points")
         
         valid_points = points[np.all(np.abs(points) < 999998, axis=1)]
-        
-        if debug and i == 0:
-            print(f"[VIS DEBUG] After padding filter: {len(valid_points)} points")
         
         if len(valid_points) > 0:
             distance_from_origin = np.linalg.norm(valid_points[:, :3], axis=1)
             valid_points = valid_points[distance_from_origin > 1.0]
         
-        if debug and i == 0:
-            print(f"[VIS DEBUG] After origin filter: {len(valid_points)} points")
-            if len(valid_points) > 0:
-                print(f"[VIS DEBUG] Point range: X[{valid_points[:,0].min():.2f}, {valid_points[:,0].max():.2f}], "
-                      f"Y[{valid_points[:,1].min():.2f}, {valid_points[:,1].max():.2f}], "
-                      f"Z[{valid_points[:,2].min():.2f}, {valid_points[:,2].max():.2f}]")
-        
         if len(valid_points) < 100:
             raw_count = len(points_batch[i])
             mask_count = int((masks[i] == 1).sum()) if masks is not None else raw_count
             print(f"[VIS WARNING] Sample {i}: only {len(valid_points)} valid points "
-                  f"(raw={raw_count}, after_mask={mask_count}). "
-                  f"Possible data pipeline issue -- expected thousands of points per sample.")
+                  f"(raw={raw_count}, after_mask={mask_count})", flush=True)
         
         init_T = init_T_batch[i]
         gt_T = gt_T_batch[i]
         pred_T = pred_T_batch[i]
         K = K_batch[i]
-        
-        if debug and i == 0:
-            print(f"[VIS DEBUG] GT T matrix:\n{gt_T}")
-            print(f"[VIS DEBUG] K matrix:\n{K}")
         
         comparison = create_init_gt_pred_comparison(
             img, valid_points, init_T, gt_T, pred_T, K,

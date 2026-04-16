@@ -155,18 +155,13 @@ def _parse_train_log_errors(ckpt_path, target_epoch, existing_train, existing_va
 def make_collate_fn(target_size):
     """创建 collate 函数"""
     def crop_and_resize(item, size, intrinsic):
-        """
-        缩放图像并相应调整内参
-        
-        ⚠️ 重要修复：图像缩放时必须同步调整内参矩阵！
-        """
+        """缩放图像并同步调整内参矩阵"""
         img = cv2.cvtColor(np.array(item), cv2.COLOR_RGB2BGR)
         h, w = img.shape[:2]
         
         # 缩放图像
         resized = cv2.resize(img, size)
         
-        # ✅ 修复：调整内参以匹配缩放后的图像
         scale_x = size[0] / w
         scale_y = size[1] / h
         
@@ -176,21 +171,9 @@ def make_collate_fn(target_size):
             [0, 0, 1]
         ])
         
-        # 🔍 添加调试输出（只输出第一个样本）
-        global _debug_intrinsic_printed
-        if not hasattr(crop_and_resize, '_debug_printed'):
-            print(f"\n[DEBUG crop_and_resize] 图像尺寸: {w}x{h} → {size[0]}x{size[1]}")
-            print(f"[DEBUG crop_and_resize] 缩放比例: scale_x={scale_x:.6f}, scale_y={scale_y:.6f}")
-            print(f"[DEBUG crop_and_resize] 原始内参K:")
-            print(intrinsic)
-            print(f"[DEBUG crop_and_resize] 缩放后内参K:")
-            print(new_intrinsic)
-            crop_and_resize._debug_printed = True
-        
         return resized, new_intrinsic
     
     def collate_fn(batch):
-        # ✅ 修复：同时处理图像和内参
         processed = [crop_and_resize(item[0], target_size, item[3]) for item in batch]
         imgs = [p[0] for p in processed]
         intrinsics = [p[1] for p in processed]
@@ -376,6 +359,8 @@ def evaluate_checkpoint(args):
     print(f"\n2. 初始化模型（图像尺寸: {args.target_width}x{args.target_height}）...")
     print(f"   回归头类型: {'MLP (V6)' if use_mlp_head else 'Linear (V5及更早)'}"
           f"{' (auto-detected)' if args.use_mlp_head < 0 else ''}")
+    _use_fd = getattr(args, 'use_foundation_depth', 0) > 0
+    _fd_mode = getattr(args, 'fd_mode', 'replace') if _use_fd else 'replace'
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
@@ -383,9 +368,12 @@ def evaluate_checkpoint(args):
         rotation_only=rotation_only,
         use_mlp_head=use_mlp_head,
         bev_pool_factor=args.bev_pool_factor,
-        use_foundation_depth=getattr(args, 'use_foundation_depth', 0) > 0,
+        use_foundation_depth=_use_fd,
         depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
+        fd_mode=_fd_mode,
     ).to(device)
+    if _use_fd:
+        print(f"   Foundation Depth: model={getattr(args, 'depth_model_type', 'midas_small')}, mode={_fd_mode}")
     
     state_dict = _auto_permute_spconv_weights(state_dict, model)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -860,6 +848,8 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
         use_mlp_head = args.use_mlp_head > 0
     else:
         use_mlp_head = 'rotation_pred.0.weight' in state_dict
+    _use_fd = getattr(args, 'use_foundation_depth', 0) > 0
+    _fd_mode = getattr(args, 'fd_mode', 'replace') if _use_fd else 'replace'
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
@@ -867,8 +857,9 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
         rotation_only=rotation_only,
         use_mlp_head=use_mlp_head,
         bev_pool_factor=args.bev_pool_factor,
-        use_foundation_depth=getattr(args, 'use_foundation_depth', 0) > 0,
+        use_foundation_depth=_use_fd,
         depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
+        fd_mode=_fd_mode,
     ).to(device)
     state_dict = _auto_permute_spconv_weights(state_dict, model)
     model.load_state_dict(state_dict, strict=False)
@@ -1757,6 +1748,10 @@ def main():
                        help="Use Foundation Depth (MiDaS) for LSS (1=enable, 0=disable)")
     parser.add_argument("--depth_model_type", type=str, default="midas_small",
                        help="Depth model type for Foundation Depth (default: midas_small)")
+    parser.add_argument("--fd_mode", type=str, default="replace",
+                       choices=["replace", "replace_v1", "replace_v2", "dual_path", "supervision"],
+                       help="Foundation Depth mode (default: replace). "
+                            "replace_v2=SpatialAligner, dual_path=fusion, supervision=aux loss")
     
     args = parser.parse_args()
 

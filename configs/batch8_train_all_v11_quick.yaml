@@ -95,7 +95,7 @@ defaults:
     seed: 42                   # 全局随机种子
 
     # === Quick模式加速参数 ===
-    max_frames_per_seq: 1000   # 每序列最大帧数 (均匀采样)
+    max_frames_per_seq: 500   # 每序列最大帧数 (均匀采样)
     eval_epoches: 50           # 每N个epoch验证一次
     grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
 
@@ -108,17 +108,6 @@ experiments:
   # =========================================================================
   # ALL V11: 5组实验 — 数据扩充 + V8/V9最佳组合验证
   # =========================================================================
-
-  # 3. Z=10 only — 隔离Z分辨率增益
-  #    对照: v11_baseline vs v11_z10 → Z=10的纯增益
-  - name: "v11_z10"
-    description: "ALL V11: Z=10 only (隔离Z分辨率增益)"
-    dataset: "all"
-    version: "v11_z10_quick"
-    env:
-      BEV_ZBOUND_STEP: 2.0
-    params:
-      axis_weights: "1.0,1.0,1.0"
 
   # 1. V6冠军复现 — 13seq 124K帧数据集, 验证数据扩充增益
   #    V6在8seq 78K帧上: 0.494° → 预期13seq 124K帧: <0.4°
@@ -140,6 +129,17 @@ experiments:
       BEV_ZBOUND_STEP: 2.0
     params:
       axis_weights: "1.0,3.0,1.0"
+
+  # 3. Z=10 only — 隔离Z分辨率增益
+  #    对照: v11_baseline vs v11_z10 → Z=10的纯增益
+  - name: "v11_z10"
+    description: "ALL V11: Z=10 only (隔离Z分辨率增益)"
+    dataset: "all"
+    version: "v11_z10_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,1.0,1.0"
 
   # 4. Z=10 + Pitch×3 + warmup=10 — 更大数据集可能需要更多warmup
   #    13seq 124K帧, batch=8, 8GPU → ~1950 steps/epoch
