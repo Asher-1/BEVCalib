@@ -394,6 +394,14 @@ if [ -n "$LOG_SUFFIX" ]; then
     LOG_DIR="${LOG_DIR}_${LOG_SUFFIX}"
 fi
 
+# 检查实验输出目录是否已存在（跳过已完成的实验，仅 scratch 模式）
+if [ "${FORCE_RERUN:-0}" != "1" ] && [ "$MODE" = "scratch" ] && [ -d "$LOG_DIR" ] && [ -f "$LOG_DIR/train.log" ]; then
+    echo "⏭️  跳过训练: 输出目录已存在且包含训练日志"
+    echo "  路径: $LOG_DIR"
+    echo "  如需重新训练，请先删除该目录: rm -rf $LOG_DIR"
+    echo "  或使用 --force 参数强制重新训练"
+    exit 0
+fi
 
 mkdir -p "$LOG_DIR"
 

@@ -397,25 +397,20 @@ def main():
     bev_encoder = cfg.get("bev_encoder", True)
     img_shape = (cfg["img_height"], cfg["img_width"])
 
+    use_mlp_head = cfg.get("use_mlp_head", None)
+
     if backend_name == "pytorch":
-        from bev_calib import BEVCalib
-        model = BEVCalib(
-            deformable=deformable,
-            bev_encoder=bev_encoder,
+        from bevcalib_inference import load_bevcalib_inference, BEVCalibInference
+        wrapper, epoch = load_bevcalib_inference(
+            ckpt_path=cfg["ckpt_path"],
+            device=device,
             img_shape=img_shape,
             rotation_only=rotation_only,
-        ).to(device)
-        ckpt = torch.load(cfg["ckpt_path"], map_location=device)
-        missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-        if unexpected:
-            loss_keys = [k for k in unexpected if 'loss_fn' in k]
-            non_loss = [k for k in unexpected if 'loss_fn' not in k]
-            if loss_keys:
-                print(f"  Skipped {len(loss_keys)} loss-only keys (not needed for inference)")
-            if non_loss:
-                print(f"  WARNING: unexpected non-loss keys: {non_loss}")
-        model.eval()
-        epoch = ckpt.get("epoch", -1)
+            deformable=deformable,
+            bev_encoder=bev_encoder,
+            use_mlp_head=use_mlp_head,
+        )
+        model = wrapper.model
         print(f"  epoch      : {epoch}")
         backend = PyTorchBackend(model, device=device)
     elif backend_name == "drinfer":
@@ -427,6 +422,7 @@ def main():
             rotation_only=rotation_only,
             deformable=deformable,
             bev_encoder=bev_encoder,
+            use_mlp_head=cfg.get("use_mlp_head", None),
         )
         print(f"  epoch      : {epoch}")
         drinfer_dir = cfg.get("export_dir",

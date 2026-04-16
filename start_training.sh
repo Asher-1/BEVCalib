@@ -42,6 +42,7 @@
 #   --seed N               全局随机种子 (默认: 42)
 #   --pretrain_ckpt PATH   预训练权重路径 (用于refine/finetune训练)
 #   --num_epochs N         训练总epoch数 (默认: 400)
+#   --force                强制重新训练，即使输出目录已存在
 #   --no-tb                不自动启动 TensorBoard
 #   --tb_port PORT         TensorBoard端口 (默认: 自动检测空闲端口, 起始6006)
 #
@@ -375,6 +376,10 @@ while [[ $# -gt 0 ]]; do
             EVAL_EPOCHES="$2"; shift 2 ;;
         --grad_accum_steps)
             GRAD_ACCUM_STEPS="$2"; shift 2 ;;
+        --force)
+            export FORCE_RERUN=1
+            shift
+            ;;
         --no-tb|--no-tensorboard)
             ENABLE_TB=0
             shift
@@ -840,6 +845,15 @@ if [ "$USE_DDP" -eq 1 ]; then
     # ================================================================
     LOG_SUFFIX="small_${DDP_ANGLE}deg_${VERSION}"
     DDP_LOG_DIR="./logs/${DATASET_NAME}/model_${LOG_SUFFIX}"
+    
+    # 检查实验输出目录是否已存在（跳过已完成的实验）
+    if [ "${FORCE_RERUN:-0}" != "1" ] && [ -d "$DDP_LOG_DIR" ] && [ -f "$DDP_LOG_DIR/train.log" ]; then
+        echo "⏭️  跳过训练: 输出目录已存在且包含训练日志"
+        echo "  路径: $DDP_LOG_DIR"
+        echo "  如需重新训练，请删除该目录或使用 --force 参数"
+        exit 0
+    fi
+    
     mkdir -p "$DDP_LOG_DIR"
 
     MULTI_NODE_ARGS=""
@@ -960,6 +974,18 @@ else
 
     GPU0_LOG_DIR="./logs/${DATASET_NAME}/model_small_10deg_${VERSION}"
     GPU1_LOG_DIR="./logs/${DATASET_NAME}/model_small_5deg_${VERSION}"
+    
+    # 检查实验输出目录是否已存在（跳过已完成的实验）
+    if [ "${FORCE_RERUN:-0}" != "1" ] && \
+       [ -d "$GPU0_LOG_DIR" ] && [ -f "$GPU0_LOG_DIR/train.log" ] && \
+       [ -d "$GPU1_LOG_DIR" ] && [ -f "$GPU1_LOG_DIR/train.log" ]; then
+        echo "⏭️  跳过训练: 两组实验的输出目录均已存在"
+        echo "  GPU0: $GPU0_LOG_DIR"
+        echo "  GPU1: $GPU1_LOG_DIR"
+        echo "  如需重新训练，请删除对应目录或使用 --force 参数"
+        exit 0
+    fi
+    
     mkdir -p "$GPU0_LOG_DIR" "$GPU1_LOG_DIR"
 
     LR_ARG=""

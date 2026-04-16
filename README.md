@@ -230,6 +230,12 @@ bash batch_train.sh configs/batch_train_lr_ablation.yaml
 # Dry-run to preview commands
 bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
 
+# Force re-run (ignore existing experiment directories)
+bash batch_train.sh --force configs/batch_train_5deg.yaml
+
+# Skip experiments matching a regex pattern
+bash batch_train.sh --skip-pattern "baseline" configs/batch_train_5deg.yaml
+
 # Create custom config
 cp configs/batch_train_5deg.yaml configs/my_experiments.yaml
 bash batch_train.sh configs/my_experiments.yaml
@@ -239,6 +245,8 @@ bash batch_train.sh configs/my_experiments.yaml
 - ✅ YAML-driven (no need to edit script code)
 - ✅ **defaults 继承机制**: 消除重复配置，配置文件减少50-60%（v2.1+）
 - ✅ **智能 TensorBoard**: 监控当前实验具体目录，清晰聚焦（v2.1+）
+- ✅ **自动跳过已完成实验**: 检测 `train.log` 存在则跳过，`--force` 可覆盖
+- ✅ **实验级控制**: YAML `skip: true` / `--skip-pattern` 正则过滤
 - ✅ Supports all `start_training.sh` options (including multi-node DDP)
 - ✅ Serial execution with auto resource management
 - ✅ Pre-configured templates for common experiments

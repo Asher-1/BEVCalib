@@ -15,11 +15,14 @@ bash start_training.sh B26A v1
 ### 2. 批量训练（使用配置文件）
 
 ```bash
-# 运行预配置的Z分辨率消融实验（3组）
+# 运行预配置的Z分辨率消融实验（3组，自动跳过已完成的实验）
 bash batch_train.sh configs/batch_train_5deg.yaml
 
 # 或先预览命令
 bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
+
+# 强制重跑所有实验（忽略已存在的输出目录）
+bash batch_train.sh --force configs/batch_train_5deg.yaml
 ```
 
 ### 3. 分析性能（1行命令）
@@ -122,6 +125,7 @@ cp configs/batch_train_template.yaml configs/my_experiments.yaml
 cat > configs/my_experiments.yaml << 'EOF'
 global:
   dry_run: false
+  force_rerun: false             # true = 强制重跑已完成的实验
   wait_between_experiments: 10
 
 experiments:

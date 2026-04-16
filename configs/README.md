@@ -24,6 +24,12 @@ bash batch_train.sh configs/batch_train_5deg.yaml
 
 # 查看会执行的命令（不实际运行）
 bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
+
+# 强制重新训练（忽略已存在的实验目录）
+bash batch_train.sh --force configs/batch_train_5deg.yaml
+
+# 跳过名称匹配的实验（grep -E 正则）
+bash batch_train.sh --skip-pattern "baseline" configs/batch_train_5deg.yaml
 ```
 
 ## 📝 批量训练配置文件格式
@@ -34,6 +40,7 @@ bash batch_train.sh --dry-run configs/batch_train_5deg.yaml
 # 全局配置
 global:
   dry_run: false                 # 仅打印命令不执行
+  force_rerun: false             # 强制重跑（忽略已存在的实验目录）
   batch_log_dir: "logs"          # 批量训练日志目录
   wait_between_experiments: 10   # 实验间等待时间（秒）
 
@@ -134,7 +141,8 @@ experiments:
 
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `dry_run` | bool | false | 仅打印命令不执行 |
+| `dry_run` | bool | false | 仅打印命令不执行（CLI: `--dry-run`） |
+| `force_rerun` | bool | false | 强制重跑（CLI: `--force`） |
 | `batch_log_dir` | str | "logs" | 批量日志目录 |
 | `wait_between_experiments` | int | 10 | 实验间等待时间（秒） |
 
@@ -151,6 +159,8 @@ experiments:
 | --- | --- | --- | --- |
 | `name` | str | "exp{i}" | 实验显示名称 |
 | `description` | str | "" | 实验描述 |
+| `skip` | bool | false | 跳过此实验 |
+| `skip_reason` | str | "" | 跳过原因（日志中显示） |
 
 **环境变量 (env):**
 | 参数 | 类型 | 说明 |

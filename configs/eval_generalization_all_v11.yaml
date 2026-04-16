@@ -54,7 +54,7 @@ models:
     mode_desc: "ALL V11 Z=10+pitch3 (V8/V9最佳组合)"
 
   - label: "v11-z10"
-    dir_name: "model_small_5deg_v11_z10"
+    dir_name: "model_small_5deg_v11_z10_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
