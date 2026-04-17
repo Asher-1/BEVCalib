@@ -224,6 +224,48 @@ def parse_eval_stats(extrinsics_path):
                     result[f'{key}_max'] = vals[7]
                 except (ValueError, IndexError):
                     pass
+
+    # Parse PER-SEQUENCE STATISTICS block
+    per_seq = {}
+    seq_block_start = text.find("PER-SEQUENCE STATISTICS")
+    if seq_block_start >= 0:
+        seq_block = text[seq_block_start:]
+        for line in seq_block.split('\n'):
+            s = line.strip()
+            if not s or s.startswith('=') or s.startswith('-') or s.startswith('Seq') or s.startswith('PER'):
+                continue
+            parts = s.split()
+            if len(parts) >= 10:
+                try:
+                    seq_id = parts[0]
+                    per_seq[seq_id] = {
+                        'samples': int(parts[1]),
+                        'rot_mean': float(parts[2]),
+                        'rot_std': float(parts[3]),
+                        'rot_median': float(parts[4]),
+                        'rot_p95': float(parts[5]),
+                        'rot_max': float(parts[6]),
+                        'roll_mean': float(parts[7]),
+                        'pitch_mean': float(parts[8]),
+                        'yaw_mean': float(parts[9]),
+                    }
+                except (ValueError, IndexError):
+                    pass
+    result['per_sequence'] = per_seq
+
+    # Parse Sequence Boundaries
+    seq_bounds = []
+    bounds_start = text.find("Sequence Boundaries:")
+    if bounds_start >= 0:
+        for line in text[bounds_start:bounds_start+500].split('\n')[1:]:
+            m_b = re.match(r'\s*Seq\s+(\S+):\s*samples\s+(\d+)\s*-\s*(\d+)\s*\((\d+)\s*frames\)', line)
+            if m_b:
+                seq_bounds.append({
+                    'seq': m_b.group(1), 'start': int(m_b.group(2)),
+                    'end': int(m_b.group(3)), 'count': int(m_b.group(4)),
+                })
+    result['seq_boundaries'] = seq_bounds
+
     return result if 'rot_error_mean' in result else None
 
 
@@ -294,32 +336,67 @@ def run_evaluations():
         print(f"{'='*80}")
 
         env = os.environ.copy()
+        env.pop("USE_DRCV_BACKEND", None)
         env["BEV_ZBOUND_STEP"] = mcfg["bev_zbound_step"]
         for env_key in ("BEV_XBOUND_MIN", "BEV_XBOUND_MAX",
                         "BEV_YBOUND_MIN", "BEV_YBOUND_MAX", "BEV_XY_STEP"):
             if env_key.lower() in mcfg:
                 env[env_key] = str(mcfg[env_key.lower()])
 
-        cmd = [
-            sys.executable, EVAL_SCRIPT,
-            "--ckpt_path", ckpt_path,
-            "--dataset_root", TEST_DATA,
-            "--output_dir", per_model_dir,
-            "--angle_range_deg", str(ANGLE_RANGE),
-            "--trans_range", str(TRANS_RANGE),
-            "--use_full_dataset",
-            "--max_batches", "0",
-            "--rotation_only", str(mcfg["rotation_only"]),
-            "--vis_interval", str(VIS_INTERVAL),
-            "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
-        ]
+        use_drinfer_backend = mcfg.get("backend", "pytorch") == "drinfer"
+
+        if use_drinfer_backend:
+            drinfer_eval_script = os.path.join(
+                os.path.dirname(EVAL_SCRIPT), "evaluate_drinfer.py")
+            export_dir = mcfg.get("export_dir", "")
+            if not export_dir:
+                model_base_dr = os.path.join(MODELS_DIR, mcfg["dir_name"])
+                export_dir = os.path.join(model_base_dr, "drinfer")
+            cmd = [
+                sys.executable, drinfer_eval_script,
+                "--ckpt_path", ckpt_path,
+                "--export_dir", export_dir,
+                "--dataset_root", TEST_DATA,
+                "--output_dir", per_model_dir,
+                "--angle_range_deg", str(ANGLE_RANGE),
+                "--trans_range", str(TRANS_RANGE),
+                "--use_full_dataset",
+                "--max_batches", "0",
+                "--rotation_only", str(mcfg["rotation_only"]),
+                "--vis_interval", str(VIS_INTERVAL),
+                "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
+            ]
+            if mcfg.get("compare_pytorch"):
+                cmd.append("--compare_pytorch")
+            if mcfg.get("model_name"):
+                cmd.extend(["--model_name", str(mcfg["model_name"])])
+            if mcfg.get("model_version"):
+                cmd.extend(["--model_version", str(mcfg["model_version"])])
+        else:
+            cmd = [
+                sys.executable, EVAL_SCRIPT,
+                "--ckpt_path", ckpt_path,
+                "--dataset_root", TEST_DATA,
+                "--output_dir", per_model_dir,
+                "--angle_range_deg", str(ANGLE_RANGE),
+                "--trans_range", str(TRANS_RANGE),
+                "--use_full_dataset",
+                "--max_batches", "0",
+                "--rotation_only", str(mcfg["rotation_only"]),
+                "--vis_interval", str(VIS_INTERVAL),
+                "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
+            ]
         if "use_mlp_head" in mcfg:
             cmd.extend(["--use_mlp_head", str(mcfg["use_mlp_head"])])
         if "bev_pool_factor" in mcfg:
             cmd.extend(["--bev_pool_factor", str(mcfg["bev_pool_factor"])])
-        if mcfg.get("use_drcv"):
-            cmd.append("--use_drcv")
-            env["USE_DRCV_BACKEND"] = "1"
+        if "use_drcv" in mcfg:
+            if mcfg["use_drcv"]:
+                if not use_drinfer_backend:
+                    cmd.append("--use_drcv")
+                env["USE_DRCV_BACKEND"] = "1"
+            else:
+                env["USE_DRCV_BACKEND"] = "0"
         if mcfg.get("use_foundation_depth"):
             cmd.extend(["--use_foundation_depth", str(mcfg["use_foundation_depth"])])
             env["HF_HUB_OFFLINE"] = "1"
@@ -327,6 +404,12 @@ def run_evaluations():
             cmd.extend(["--depth_model_type", str(mcfg["depth_model_type"])])
         if mcfg.get("fd_mode"):
             cmd.extend(["--fd_mode", str(mcfg["fd_mode"])])
+        if mcfg.get("voxel_mode"):
+            cmd.extend(["--voxel_mode", str(mcfg["voxel_mode"])])
+        if mcfg.get("scatter_reduce"):
+            cmd.extend(["--scatter_reduce", str(mcfg["scatter_reduce"])])
+        if mcfg.get("to_bev_mode"):
+            cmd.extend(["--to_bev_mode", str(mcfg["to_bev_mode"])])
 
         log_path = os.path.join(per_model_dir, "eval_run.log")
         os.makedirs(per_model_dir, exist_ok=True)
@@ -766,8 +849,62 @@ def generate_report(all_stats):
     lines.append("![Model Ranking](charts/model_ranking.png)")
     lines.append("")
 
-    # Section 7: Projection comparison
-    sec_num_proj = "七" if trans_stats else "六"
+    # Section 7: Per-sequence analysis
+    sec_num_seq = "七" if trans_stats else "六"
+    has_seq_data = any(s.get('per_sequence') for s in all_stats)
+    if has_seq_data:
+        lines.append("=" * 80)
+        lines.append(f"{sec_num_seq}、Per-Sequence 误差分析")
+        lines.append("=" * 80)
+        lines.append("")
+        lines.append("各模型在不同 sequence 上的 Mean Rotation Error (deg):")
+        lines.append("")
+        all_seq_ids = sorted(set(
+            sid for s in all_stats for sid in s.get('per_sequence', {}).keys()
+        ))
+        if all_seq_ids:
+            header = "| 模型 |" + " | ".join(f"Seq {sid}" for sid in all_seq_ids) + " |"
+            sep = "| --- |" + " | ".join("---:" for _ in all_seq_ids) + " |"
+            lines.append(header)
+            lines.append(sep)
+            for s in sorted_stats:
+                ps = s.get('per_sequence', {})
+                row = f"| {s['label']}"
+                for sid in all_seq_ids:
+                    if sid in ps:
+                        row += f" | {ps[sid]['rot_mean']:.3f}"
+                    else:
+                        row += " | -"
+                row += " |"
+                lines.append(row)
+            lines.append("")
+
+            # Flag problematic sequences
+            lines.append("异常 sequence 识别（任一模型 Mean Rot > 2x 整体 Mean）:")
+            for s in sorted_stats:
+                ps = s.get('per_sequence', {})
+                overall_mean = s.get('rot_error_mean', 0)
+                for sid, sv in ps.items():
+                    if sv['rot_mean'] > overall_mean * 2 and sv['samples'] >= 50:
+                        lines.append(
+                            f"  - {s['label']}: Seq {sid} Mean={sv['rot_mean']:.3f}° "
+                            f"(整体={overall_mean:.3f}°, 比值={sv['rot_mean']/max(overall_mean,0.001):.1f}x, "
+                            f"{sv['samples']}样本)")
+            lines.append("")
+
+        # Per-sequence boundary info
+        first_with_bounds = next((s for s in all_stats if s.get('seq_boundaries')), None)
+        if first_with_bounds:
+            lines.append("Sequence 到 Sample Index 映射:")
+            lines.append("")
+            lines.append("| Sequence | Sample范围 | 帧数 |")
+            lines.append("| --- | --- | ---: |")
+            for sb in first_with_bounds['seq_boundaries']:
+                lines.append(f"| Seq {sb['seq']} | {sb['start']} - {sb['end']} | {sb['count']} |")
+            lines.append("")
+
+    # Section 8: Projection comparison
+    sec_num_proj = "八" if has_seq_data else ("七" if trans_stats else "六")
     lines.append("=" * 80)
     lines.append(f"{sec_num_proj}、点云投影效果图对比")
     lines.append("=" * 80)
@@ -781,8 +918,8 @@ def generate_report(all_stats):
                 lines.append(f"![{fn}](projection_comparison/{fn})")
                 lines.append("")
 
-    # Section 8: Conclusions
-    sec_num_conc = "八" if trans_stats else "七"
+    # Section 9: Conclusions
+    sec_num_conc = "九" if has_seq_data else ("八" if trans_stats else "七")
     lines.append("=" * 80)
     lines.append(f"{sec_num_conc}、结论与建议")
     lines.append("=" * 80)

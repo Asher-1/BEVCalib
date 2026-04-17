@@ -1,0 +1,118 @@
+# BEVCalib ALL V8 Voxel 模式消融 — 泛化性能评估
+#
+# 对应训练配置: batch8_train_all_v8_voxel_quick.yaml
+# 评估 6 组 voxel/BEV 模式的泛化精度差异
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_all_v8_voxel.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v8_voxel"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V8 Voxel 模式消融 (6组) ====================
+
+  # 0. 控制基线: hard + concat (=v8_baseline)
+  - label: "v8-hard-concat"
+    dir_name: "model_small_5deg_v8_voxel_baseline_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-hard-concat"
+    mode_desc: "V8 Voxel: hard + concat (控制基线)"
+
+  # 1. scatter-mean + concat
+  - label: "v8-scatter-mean"
+    dir_name: "model_small_5deg_v8_scatter_mean_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-mean"
+    mode_desc: "V8 Voxel: scatter-mean + concat (密度归一化)"
+
+  # 2. scatter-sum + concat
+  - label: "v8-scatter-sum"
+    dir_name: "model_small_5deg_v8_scatter_sum_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-sum"
+    mode_desc: "V8 Voxel: scatter-sum + concat (drinfer兼容)"
+
+  # 3. hard + learned BEV
+  - label: "v8-hard-learned"
+    dir_name: "model_small_5deg_v8_bev_learned_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    to_bev_mode: "learned"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-hard-learned"
+    mode_desc: "V8 Voxel: hard + learned BEV (可学习Z投影)"
+
+  # 4. scatter-sum + learned
+  - label: "v8-scatter-sum-learned"
+    dir_name: "model_small_5deg_v8_scatter_sum_learned_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "learned"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-sum-learned"
+    mode_desc: "V8 Voxel: scatter-sum + learned (drinfer + 可学习Z)"
+
+  # 5. scatter-mean + learned
+  - label: "v8-scatter-mean-learned"
+    dir_name: "model_small_5deg_v8_scatter_mean_learned_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "learned"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-mean-learned"
+    mode_desc: "V8 Voxel: scatter-mean + learned (密度归一化 + 可学习Z)"

@@ -9,9 +9,18 @@ import torch.nn as nn
 USE_DRCV = os.environ.get("USE_DRCV_BACKEND", "1") == "1"
 
 if USE_DRCV:
+    # drcv.ops.torch_sparse uses deprecated collections.Sequence (removed in Python 3.10+)
+    import collections, collections.abc
+    if not hasattr(collections, "Sequence"):
+        collections.Sequence = collections.abc.Sequence
+
     from drcv.ops.voxel import voxelization as _drcv_voxelization
+    from drcv.ops.torch_scatter import scatter_add as _scatter_add
+    from drcv.ops.torch_scatter import scatter_mean as _scatter_mean
 else:
     from spconv.pytorch.utils import PointToVoxel
+    _scatter_add = None
+    _scatter_mean = None
 
 try:
     from .pc_encoders import SparseEncoder
@@ -26,33 +35,68 @@ from bev_settings import xbound, ybound, zbound, down_ratio, sparse_shape, vsize
 
 _COORS_RANGE = [xbound[0], ybound[0], zbound[0], xbound[1], ybound[1], zbound[1]]
 
+_VOXEL_MIN = torch.tensor(_COORS_RANGE[:3])
+_VOXEL_SIZE = torch.tensor(vsize_xyz)
+_GRID_MAX = torch.tensor([sparse_shape[0] - 1, sparse_shape[1] - 1, sparse_shape[2] - 1])
+
 
 class Lidar2BEV(nn.Module):
-    def __init__(self):
+    """Point cloud -> BEV feature pipeline.
+
+    Args:
+        to_bev_mode: Sparse-to-BEV conversion strategy forwarded to
+            :class:`SparseEncoder`.  ``'concat'`` | ``'learned'`` | ``'sum'``.
+        voxel_mode: Voxelization strategy.
+            ``'hard'`` (default) — CUDA hard_voxelize + sum reduce.
+            ``'scatter'`` — torch.unique + scatter, drinfer-trace compatible.
+        scatter_reduce: Aggregation for scatter mode.
+            ``'sum'`` — scatter_add, matches hard voxelization behavior.
+            ``'mean'`` — scatter_mean (drcv dr_voxelization style),
+            more robust to varying point density.
+    """
+
+    def __init__(self, to_bev_mode='concat', voxel_mode='hard', scatter_reduce='sum'):
         super(Lidar2BEV, self).__init__()
-        if USE_DRCV:
-            print("Use DRCV as Lidar2BEV backend")
-            self._voxel_size = vsize_xyz
-            self._coors_range = _COORS_RANGE
-            self._max_num_points = 10
-            self._max_num_voxels = 120000
+        assert voxel_mode in ('hard', 'scatter'), \
+            f"voxel_mode must be 'hard' or 'scatter', got '{voxel_mode}'"
+        assert scatter_reduce in ('sum', 'mean'), \
+            f"scatter_reduce must be 'sum' or 'mean', got '{scatter_reduce}'"
+        self.voxel_mode = voxel_mode
+        self.scatter_reduce = scatter_reduce
+
+        if voxel_mode == 'hard':
+            if USE_DRCV:
+                print("Use DRCV hard_voxelize as Lidar2BEV backend")
+                self._voxel_size = vsize_xyz
+                self._coors_range = _COORS_RANGE
+                self._max_num_points = 10
+                self._max_num_voxels = 120000
+            else:
+                self.ptvoxel = PointToVoxel(
+                    vsize_xyz=vsize_xyz,
+                    coors_range_xyz=tuple(_COORS_RANGE),
+                    num_point_features=3,
+                    max_num_voxels=120000,
+                    max_num_points_per_voxel=10,
+                    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                )
         else:
-            self.ptvoxel = PointToVoxel(
-                vsize_xyz=vsize_xyz,
-                coors_range_xyz=tuple(_COORS_RANGE),
-                num_point_features=3,
-                max_num_voxels=120000,
-                max_num_points_per_voxel=10,
-                device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            )
-        self.sparse_encoder = SparseEncoder(sparse_shape=sparse_shape)
-        self.proj_head = ProjectionHead()
+            print(f"Use scatter_{scatter_reduce} voxelization (drinfer-trace compatible)")
+
         self.voxelize_reduce = True
+        self.sparse_encoder = SparseEncoder(
+            sparse_shape=sparse_shape, to_bev_mode=to_bev_mode)
+        encoder_out_ch = self.sparse_encoder.to_bev.out_channels
+        self.proj_head = ProjectionHead(embedding_dim=encoder_out_ch)
         self.out_channels = self.proj_head.projection_dim
 
-    def _voxelize_single(self, points):
-        """Voxelize a single point cloud sample.
-        Both backends return (voxels, coors, num_points) with coors in zyx order.
+    # ------------------------------------------------------------------
+    # Hard voxelization (original approach)
+    # ------------------------------------------------------------------
+
+    def _voxelize_single_hard(self, points):
+        """CUDA hard_voxelize for a single sample.
+        Returns (voxels, coors_zyx, num_points).
         """
         if USE_DRCV:
             return _drcv_voxelization(
@@ -62,43 +106,110 @@ class Lidar2BEV(nn.Module):
         return self.ptvoxel(points)
 
     @torch.no_grad()
-    def voxelize(self, pc):
-        vox, coors, num_points = None, None, None
-        B, _, _ = pc.shape
+    def _voxelize_hard(self, pc):
+        """Batch hard voxelization.
+        Returns (feats [M, C], coors [M, 4] in batch-z-y-x order).
+        """
+        feats_list, coors_list = [], []
+        B = pc.shape[0]
         for i in range(B):
-            vox_, coors_, num_points_ = self._voxelize_single(pc[i])  # zyx order
-            batch_id = torch.full([vox_.shape[0], 1], i, dtype=torch.int32, device=vox_.device)
+            vox, coors_zyx, _ = self._voxelize_single_hard(pc[i])
             if self.voxelize_reduce:
-                vox_ = torch.sum(vox_, dim=1, keepdim=False)
-            coors_ = torch.cat([batch_id, coors_], dim=1)
-            if vox is None:
-                vox = vox_
-                coors = coors_
-                num_points = num_points_
+                vox = vox.sum(dim=1)
+            batch_col = torch.full(
+                (coors_zyx.shape[0], 1), i,
+                dtype=torch.int32, device=pc.device)
+            feats_list.append(vox)
+            coors_list.append(torch.cat([batch_col, coors_zyx], dim=1))
+        return torch.cat(feats_list, 0), torch.cat(coors_list, 0)
+
+    # ------------------------------------------------------------------
+    # Scatter voxelization (dr_voxelization compatible)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _voxelize_scatter(self, pc):
+        """Scatter-based voxelization.
+
+        ``scatter_reduce='mean'`` uses ``drcv.ops.voxel.dr_voxelization``
+        (unique + scatter_mean).
+        ``scatter_reduce='sum'`` uses scatter_add (matches hard_voxelize).
+
+        Falls back to native PyTorch ops during ``torch.jit.trace``
+        to avoid ``GenFunction`` CUDA errors in the drinfer export path.
+
+        Returns (feats [M, C], coors [M, 4] in batch-x-y-z order).
+        """
+        B, N, C = pc.shape
+        vmin = _VOXEL_MIN.to(device=pc.device, dtype=pc.dtype)
+        vs = _VOXEL_SIZE.to(device=pc.device, dtype=pc.dtype)
+        gmax = _GRID_MAX.to(device=pc.device)
+
+        use_native = torch.jit.is_tracing() or _scatter_add is None
+        use_mean = self.scatter_reduce == 'mean'
+
+        feats_list, coors_list = [], []
+        for i in range(B):
+            pts = pc[i]
+            grid = ((pts[:, :3] - vmin) / vs).int()
+            mask = ((grid >= 0) & (grid <= gmax)).all(dim=1)
+            pts, grid = pts[mask], grid[mask]
+
+            batch_col = torch.full(
+                (grid.shape[0], 1), i,
+                dtype=grid.dtype, device=grid.device)
+            coors = torch.cat([batch_col, grid], dim=1)
+
+            uniq_coors, inv = torch.unique(coors, return_inverse=True, dim=0)
+            n_vox = uniq_coors.shape[0]
+
+            if use_native:
+                vox_feats = pts.new_zeros(n_vox, C)
+                vox_feats.scatter_add_(
+                    0, inv.unsqueeze(1).expand(-1, C), pts)
+                if use_mean:
+                    counts = pts.new_zeros(n_vox, 1)
+                    counts.scatter_add_(
+                        0, inv.unsqueeze(1),
+                        torch.ones(pts.shape[0], 1, device=pts.device, dtype=pts.dtype))
+                    vox_feats = vox_feats / counts.clamp(min=1)
+            elif use_mean:
+                vox_feats = _scatter_mean(pts, inv, dim=0, dim_size=n_vox)
             else:
-                vox = torch.cat([vox, vox_], 0) # zyx order
-                coors = torch.cat([coors, coors_], 0)
-                num_points = torch.cat([num_points, num_points_], 0)
-        
-        return vox, coors, num_points
+                vox_feats = _scatter_add(pts, inv, dim=0, dim_size=n_vox)
+
+            feats_list.append(vox_feats)
+            coors_list.append(uniq_coors)
+
+        return torch.cat(feats_list, 0), torch.cat(coors_list, 0)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
 
     def forward(self, pc):
         """
         Args:
-            pc: (B, C, N)
+            pc: (B, C, N) — C=3 for xyz point cloud
         Returns:
-            bev feats: (B, C, H, W)
+            bev feats: (B, out_C, H, W)
         """
         B, C, N = pc.shape
-        pc = pc.permute(0, 2, 1).contiguous()
-        vox, coors, num_points = self.voxelize(pc)
+        pc = pc.permute(0, 2, 1).contiguous()  # (B, N, C)
 
-        z_part, y_part, x_part, c_part = vox[:, 0:1], vox[:, 1:2], vox[:, 2:3], vox[:, 3:C]
-        vox = torch.cat([c_part, x_part, y_part, z_part], dim=1)
-        coors = coors[:, [0, 3, 2, 1]]  # zyx to xyz
+        if self.voxel_mode == 'scatter':
+            vox, coors = self._voxelize_scatter(pc)
+            # coors already in (batch, x, y, z) order — no reorder needed
+        else:
+            vox, coors = self._voxelize_hard(pc)
+            # hard voxelization: vox in (z, y, x) order, coors in (batch, z, y, x)
+            vox = torch.cat(
+                [vox[:, 3:C], vox[:, 2:3], vox[:, 1:2], vox[:, 0:1]], dim=1)
+            coors = coors[:, [0, 3, 2, 1]]
+
         out = self.sparse_encoder(vox, coors, B)
-        B, C, H, W = out.shape
-        out = out.permute(0, 2, 3, 1).reshape(B * H * W, C)
+        B, C_out, H, W = out.shape
+        out = out.permute(0, 2, 3, 1).reshape(B * H * W, C_out)
         out = self.proj_head(out)
         out = out.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
         return out
@@ -377,34 +488,35 @@ if f_sp.grad is not None and f_dr.grad is not None:
             sp_g.flatten().unsqueeze(0), dr_g.flatten().unsqueeze(0)).item()
 results["2d_grad"] = grad_info
 
-# ---- 3. Full Encoder ----
+# ---- 3. Full Encoder (matches SparseEncoder architecture) ----
 def _build_enc(sp, shape):
     ci = sp.SparseSequential(
-        sp.SubMConv3d(3, 16, 3, padding=1, bias=False, indice_key="s1"),
+        sp.SubMConv3d(3, 16, 3, padding=1, bias=False, indice_key="subm1"),
         nn.BatchNorm1d(16, eps=1e-3, momentum=0.01), nn.ReLU(True))
     cfg = [[16,16,32],[32,32,64],[64,64,128],[128,128]]
     pad = [[0,0,1],[0,0,1],[0,0,(1,1,0)],[0,0]]
     layers = nn.ModuleList()
-    c = 3
+    c = 16
     for i, blks in enumerate(cfg):
         bl = nn.ModuleList()
         for j, co in enumerate(blks):
             p = tuple(pad[i])[j]
+            ik = f"subm{i+1}_{j}"
             if j==len(blks)-1 and i<len(cfg)-1:
                 bl.append(sp.SparseSequential(
-                    sp.SparseConv3d(c, co, 3, padding=p, stride=(2,2,2), indice_key=f"sc{i+1}"),
+                    sp.SparseConv3d(c, co, 3, padding=p, stride=(2,2,2), indice_key=f"spconv{i+1}"),
                     nn.BatchNorm1d(co, eps=1e-3, momentum=0.01), nn.ReLU(True)))
             else:
                 bl.append(sp.SparseSequential(
-                    sp.SubMConv3d(co, co, 3, stride=1, padding=1, bias=False),
+                    sp.SubMConv3d(c, co, 3, stride=1, padding=1, bias=False, indice_key=ik),
                     nn.BatchNorm1d(co, eps=1e-3, momentum=0.01), nn.ReLU(True),
-                    sp.SubMConv3d(co, co, 3, stride=1, padding=1, bias=False),
+                    sp.SubMConv3d(co, co, 3, stride=1, padding=1, bias=False, indice_key=ik),
                     nn.BatchNorm1d(co, eps=1e-3, momentum=0.01)))
             c = co
         layers.append(bl)
     cout = sp.SparseSequential(
         sp.SparseConv3d(c, 128, (3,3,3), stride=(1,1,2), padding=(1,1,0),
-                        indice_key="sd2", bias=False),
+                        indice_key="spconv_down2", bias=False),
         nn.BatchNorm1d(128, eps=1e-3, momentum=0.01), nn.ReLU(True))
     class E(nn.Module):
         def __init__(self):
@@ -570,6 +682,255 @@ def _test_pipeline(device):
     return ok
 
 
+# ---- Test 5: Voxel mode equivalence (hard vs scatter) ----
+
+def _test_voxel_modes(device):
+    """Verify 'hard' and 'scatter' voxel modes produce identical output
+    through the full Lidar2BEV pipeline with shared weights."""
+    print("\n" + "=" * 60)
+    print("Test 5: Voxel Mode Equivalence (hard vs scatter)")
+    print("=" * 60)
+
+    torch.manual_seed(42)
+    model_hard = Lidar2BEV(to_bev_mode='concat', voxel_mode='hard').to(device).eval()
+    model_scatter = Lidar2BEV(to_bev_mode='concat', voxel_mode='scatter').to(device).eval()
+    model_scatter.load_state_dict(model_hard.state_dict(), strict=True)
+    print("  [OK] scatter model loaded hard model weights (strict=True)")
+
+    all_pass = True
+    for B, N in [(1, 5000), (2, 20000), (1, 50000)]:
+        pts = torch.zeros(B, 3, N, device=device)
+        for dim, (lo, hi) in enumerate([
+            (xbound[0], xbound[1]), (ybound[0], ybound[1]), (zbound[0], zbound[1])
+        ]):
+            margin = (hi - lo) * 0.05
+            pts[:, dim, :] = torch.rand(B, N, device=device) * (hi - lo - 2*margin) + lo + margin
+
+        with torch.no_grad():
+            out_h = model_hard(pts)
+            out_s = model_scatter(pts)
+
+        diff = (out_h - out_s).abs()
+        cos = torch.nn.functional.cosine_similarity(
+            out_h.flatten(), out_s.flatten(), dim=0).item()
+        ok = cos > 0.999
+        all_pass &= ok
+        print(f"  B={B} N={N}: max_diff={diff.max():.6e}, mean_diff={diff.mean():.6e}, "
+              f"cos={cos:.8f}  {'PASS' if ok else 'FAIL'}")
+
+    if all_pass:
+        print("  [result] ALL PASS — hard and scatter modes are equivalent")
+    else:
+        print("  [result] SOME FAIL")
+    return all_pass
+
+
+# ---- Test 6: Voxelization output comparison (hard-sum vs scatter-sum vs scatter-mean) ----
+
+def _test_voxel_output_comparison(device):
+    """Compare raw voxelization outputs across all three modes.
+
+    Checks:
+      A) hard-sum vs scatter-sum: same voxels, same aggregated features
+      B) scatter-sum vs scatter-mean: same voxels, sum == mean * count
+      C) full pipeline: hard-sum vs scatter-mean BEV feature similarity
+    """
+    print("\n" + "=" * 60)
+    print("Test 6: Voxelization Output Comparison (hard-sum / scatter-sum / scatter-mean)")
+    print("=" * 60)
+
+    torch.manual_seed(42)
+    B, N, C = 1, 10000, 3
+    pts = torch.zeros(B, C, N, device=device)
+    for dim, (lo, hi) in enumerate([
+        (xbound[0], xbound[1]), (ybound[0], ybound[1]), (zbound[0], zbound[1])
+    ]):
+        margin = (hi - lo) * 0.05
+        pts[:, dim, :] = torch.rand(B, N, device=device) * (hi - lo - 2*margin) + lo + margin
+    pc = pts.permute(0, 2, 1).contiguous()  # (B, N, C)
+
+    all_pass = True
+
+    # --- Part A: raw voxelization outputs ---
+    print("\n  --- A) Raw voxel feature comparison ---")
+
+    m_hard = Lidar2BEV(to_bev_mode='concat', voxel_mode='hard').to(device).eval()
+    m_ssum = Lidar2BEV(to_bev_mode='concat', voxel_mode='scatter',
+                        scatter_reduce='sum').to(device).eval()
+    m_smean = Lidar2BEV(to_bev_mode='concat', voxel_mode='scatter',
+                         scatter_reduce='mean').to(device).eval()
+
+    with torch.no_grad():
+        feats_h, coors_h = m_hard._voxelize_hard(pc)
+        feats_ss, coors_ss = m_ssum._voxelize_scatter(pc)
+        feats_sm, coors_sm = m_smean._voxelize_scatter(pc)
+
+    print(f"  voxel counts — hard: {feats_h.shape[0]}, "
+          f"scatter-sum: {feats_ss.shape[0]}, scatter-mean: {feats_sm.shape[0]}")
+
+    # hard returns coors as batch-z-y-x; scatter returns batch-x-y-z
+    # normalize to batch-x-y-z for comparison
+    coors_h_bxyz = coors_h[:, [0, 3, 2, 1]]  # batch-z-y-x → batch-x-y-z
+
+    # sort both by coordinate for alignment
+    def _sort_key(c):
+        return c[:, 0] * 1000000 + c[:, 1] * 10000 + c[:, 2] * 100 + c[:, 3]
+
+    idx_h = _sort_key(coors_h_bxyz).argsort()
+    idx_ss = _sort_key(coors_ss).argsort()
+    idx_sm = _sort_key(coors_sm).argsort()
+
+    coors_h_sorted = coors_h_bxyz[idx_h]
+    coors_ss_sorted = coors_ss[idx_ss]
+    coors_sm_sorted = coors_sm[idx_sm]
+    feats_h_sorted = feats_h[idx_h]
+    feats_ss_sorted = feats_ss[idx_ss]
+    feats_sm_sorted = feats_sm[idx_sm]
+
+    # A1: scatter-sum vs scatter-mean share same voxels
+    if coors_ss_sorted.shape == coors_sm_sorted.shape and \
+       (coors_ss_sorted == coors_sm_sorted).all():
+        print("  [A1] scatter-sum vs scatter-mean: same voxel coordinates  PASS")
+    else:
+        print("  [A1] scatter-sum vs scatter-mean: voxel coordinates DIFFER  FAIL")
+        all_pass = False
+
+    # A2: verify sum == mean * count
+    inv = torch.zeros(pc.shape[1], dtype=torch.long, device=device)
+    from drcv.ops.torch_scatter import scatter_add as _sa
+    pts_0 = pc[0]
+    vmin = _VOXEL_MIN.to(device=pc.device, dtype=pc.dtype)
+    vs = _VOXEL_SIZE.to(device=pc.device, dtype=pc.dtype)
+    gmax = _GRID_MAX.to(device=pc.device)
+    grid = ((pts_0[:, :3] - vmin) / vs).int()
+    mask = ((grid >= 0) & (grid <= gmax)).all(dim=1)
+    pts_masked, grid_masked = pts_0[mask], grid[mask]
+    batch_col = torch.zeros(grid_masked.shape[0], 1, dtype=grid_masked.dtype, device=device)
+    coors_full = torch.cat([batch_col, grid_masked], dim=1)
+    uniq_coors, inv_idx = torch.unique(coors_full, return_inverse=True, dim=0)
+    counts = torch.zeros(uniq_coors.shape[0], device=device)
+    counts.scatter_add_(0, inv_idx, torch.ones_like(inv_idx, dtype=counts.dtype))
+
+    idx_sm2 = _sort_key(uniq_coors).argsort()
+    counts_sorted = counts[idx_sm2]
+    reconstructed_sum = feats_sm_sorted * counts_sorted.unsqueeze(1)
+    diff_recon = (feats_ss_sorted - reconstructed_sum).abs()
+    ok_a2 = diff_recon.max().item() < 1e-4
+    all_pass &= ok_a2
+    print(f"  [A2] sum == mean * count: max_diff={diff_recon.max():.6e}  "
+          f"{'PASS' if ok_a2 else 'FAIL'}")
+
+    # A3: hard vs scatter-sum voxel feature comparison
+    n_h, n_s = coors_h_sorted.shape[0], coors_ss_sorted.shape[0]
+    coors_match = (n_h == n_s) and (coors_h_sorted == coors_ss_sorted).all().item()
+    if coors_match:
+        diff_hs = (feats_h_sorted - feats_ss_sorted).abs()
+        cos_hs = torch.nn.functional.cosine_similarity(
+            feats_h_sorted.flatten(), feats_ss_sorted.flatten(), dim=0).item()
+        ok_a3 = cos_hs > 0.99
+        all_pass &= ok_a3
+        print(f"  [A3] hard-sum vs scatter-sum features: max_diff={diff_hs.max():.6e}, "
+              f"cos={cos_hs:.8f}  {'PASS' if ok_a3 else 'FAIL'}")
+    else:
+        if n_h != n_s:
+            reason = f"count mismatch ({n_h} vs {n_s})"
+        else:
+            n_coord_diff = (coors_h_sorted != coors_ss_sorted).any(dim=1).sum().item()
+            reason = (f"same count ({n_h}) but {n_coord_diff} voxels have different coords "
+                      f"(float→int rounding diff between CUDA kernel and PyTorch)")
+        cos_hs = torch.nn.functional.cosine_similarity(
+            feats_h_sorted.flatten().float(), feats_ss_sorted.flatten().float(), dim=0).item()
+        ok_a3 = cos_hs > 0.99
+        all_pass &= ok_a3
+        print(f"  [A3] hard-sum vs scatter-sum: {reason}")
+        print(f"       feature cos={cos_hs:.8f}  {'PASS' if ok_a3 else 'FAIL'}")
+
+    # --- Part B: full pipeline comparison ---
+    print("\n  --- B) Full pipeline: hard-sum vs scatter-mean BEV output ---")
+
+    torch.manual_seed(42)
+    model_hard = Lidar2BEV(to_bev_mode='concat', voxel_mode='hard').to(device).eval()
+    model_mean = Lidar2BEV(to_bev_mode='concat', voxel_mode='scatter',
+                            scatter_reduce='mean').to(device).eval()
+    model_mean.load_state_dict(model_hard.state_dict(), strict=True)
+
+    for B_test, N_test in [(1, 5000), (2, 20000)]:
+        pts_test = torch.zeros(B_test, 3, N_test, device=device)
+        for dim, (lo, hi) in enumerate([
+            (xbound[0], xbound[1]), (ybound[0], ybound[1]), (zbound[0], zbound[1])
+        ]):
+            margin = (hi - lo) * 0.05
+            pts_test[:, dim, :] = (
+                torch.rand(B_test, N_test, device=device) * (hi - lo - 2*margin) + lo + margin)
+
+        with torch.no_grad():
+            out_h = model_hard(pts_test)
+            out_m = model_mean(pts_test)
+
+        diff_bev = (out_h - out_m).abs()
+        cos_bev = torch.nn.functional.cosine_similarity(
+            out_h.flatten(), out_m.flatten(), dim=0).item()
+        ok_b = cos_bev > 0.95
+        all_pass &= ok_b
+        print(f"  B={B_test} N={N_test}: max_diff={diff_bev.max():.6e}, "
+              f"mean_diff={diff_bev.mean():.6e}, cos={cos_bev:.8f}  "
+              f"{'PASS' if ok_b else 'FAIL'}")
+        print(f"    (note: sum vs mean aggregation — larger divergence is expected)")
+
+    if all_pass:
+        print("  [result] ALL PASS")
+    else:
+        print("  [result] SOME FAIL")
+    return all_pass
+
+
+# ---- Test 7: JIT traceability for scatter modes ----
+
+def _test_jit_trace(device):
+    """Verify scatter-sum and scatter-mean are JIT-traceable (drinfer export)."""
+    print("\n" + "=" * 60)
+    print("Test 7: JIT Traceability (scatter-sum & scatter-mean)")
+    print("=" * 60)
+
+    B, N = 1, 5000
+    pts = torch.zeros(B, 3, N, device=device)
+    for dim, (lo, hi) in enumerate([
+        (xbound[0], xbound[1]), (ybound[0], ybound[1]), (zbound[0], zbound[1])
+    ]):
+        margin = (hi - lo) * 0.05
+        pts[:, dim, :] = torch.rand(B, N, device=device) * (hi - lo - 2*margin) + lo + margin
+
+    all_pass = True
+    for mode_name, scatter_reduce in [("scatter-sum", "sum"), ("scatter-mean", "mean")]:
+        model = Lidar2BEV(
+            to_bev_mode='concat', voxel_mode='scatter',
+            scatter_reduce=scatter_reduce).to(device).eval()
+        with torch.no_grad():
+            out_eager = model(pts)
+        print(f"  {mode_name}: eager output={out_eager.shape}, nan={out_eager.isnan().any().item()}")
+
+        try:
+            with torch.no_grad():
+                traced = torch.jit.trace(model, (pts,))
+            out_traced = traced(pts)
+            diff = (out_eager - out_traced).abs()
+            cos = torch.nn.functional.cosine_similarity(
+                out_eager.flatten(), out_traced.flatten(), dim=0).item()
+            ok = cos > 0.999
+            all_pass &= ok
+            print(f"  {mode_name}: JIT trace OK, eager-vs-traced max_diff={diff.max():.6e}, "
+                  f"cos={cos:.8f}  {'PASS' if ok else 'FAIL'}")
+        except Exception as e:
+            all_pass = False
+            print(f"  {mode_name}: JIT trace FAILED — {e}")
+
+    if all_pass:
+        print("  [result] ALL PASS — both modes are JIT-traceable")
+    else:
+        print("  [result] SOME FAIL")
+    return all_pass
+
+
 # ---- main ----
 
 if __name__ == "__main__":
@@ -588,6 +949,9 @@ if __name__ == "__main__":
     results["3_encoder"] = encoder_ok
 
     results["4_pipeline"] = _test_pipeline(device)
+    results["5_voxel_modes"] = _test_voxel_modes(device)
+    results["6_voxel_output_cmp"] = _test_voxel_output_comparison(device)
+    results["7_jit_trace"] = _test_jit_trace(device)
 
     print("\n" + "=" * 60)
     print("Summary")

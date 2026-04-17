@@ -642,7 +642,176 @@ experiments:
 - 硬编码实验配置在脚本中
 - 支持基础参数
 
+## 🔧 DrInfer 转换配置 (drinfer_config_*.yaml)
+
+用于 `utils/torch2drinfer.py` 的模型转换配置，定义 PyTorch → DrInfer 导出参数。
+
+### 配置文件列表
+
+| 配置文件 | Voxel Mode | Scatter Reduce | To-BEV Mode | 用途 |
+| --- | --- | --- | --- | --- |
+| `drinfer_config_v8_scatter_mean_concat.yaml` | scatter | mean | concat | V8 scatter+mean+concat |
+| `drinfer_config_v8_scatter_mean_learned.yaml` | scatter | mean | learned | V8 scatter+mean+learned |
+| `drinfer_config_v8_scatter_sum_concat.yaml` | scatter | sum | concat | V8 scatter+sum+concat |
+| `drinfer_config_v8_scatter_sum_learned.yaml` | scatter | sum | learned | V8 scatter+sum+learned |
+| `drinfer_config_all.yaml` | — | — | — | all_training_data 通用配置 |
+| `drinfer_config_b26a.yaml` | — | — | — | B26A 数据集配置 |
+
+### 基本用法
+
+```bash
+# 1. 快速导出 (flat 布局: .bin + .txt 文件)
+python utils/torch2drinfer.py --config configs/drinfer_config_v8_scatter_mean_concat.yaml
+
+# 2. 完整部署导出 (pmodel 布局: engine_graph/ + input_data/ + output_data/)
+python utils/torch2drinfer.py --config configs/drinfer_config_v8_scatter_mean_concat.yaml --layout pmodel
+
+# 3. 指定输出目录
+python utils/torch2drinfer.py --config configs/drinfer_config_v8_scatter_mean_concat.yaml --output_dir /path/to/output
+
+# 4. 推理评估 (单后端)
+python utils/drinfer_infer.py --config configs/drinfer_config_v8_scatter_mean_concat.yaml
+
+# 5. PyTorch vs DrInfer 对比评估
+python utils/drinfer_infer.py --config configs/drinfer_config_v8_scatter_mean_concat.yaml --mode compare
+
+# 6. DrInfer 泛化评估
+python evaluate_drinfer.py \
+    --ckpt_path logs/.../checkpoint/ckpt_best_val.pth \
+    --export_dir logs/.../drinfer \
+    --dataset_root /path/to/test_data
+```
+
+### 导出布局说明
+
+| 布局 | 参数 | 输出内容 | 适用场景 |
+| --- | --- | --- | --- |
+| flat | `--layout flat` (默认) | `.bin` + `.txt` 文件 | 快速导出、开发调试 |
+| pmodel | `--layout pmodel` | `engine_graph/` + `input_data/` + `output_data/` + `nn_param.cfg` + `trace.json` | 正式部署、`pmodel forward`/`pmodel calibrate` 兼容 |
+
+**pmodel 布局验证:**
+```bash
+# 方式1: pmodel forward (使用合成数据，可能因稀疏卷积启发式限制而失败)
+pmodel forward $export_dir/bevcalib_fusion_head
+
+# 方式2: 使用真实数据对比 (推荐)
+python utils/drinfer_infer.py --config configs/drinfer_config_xxx.yaml --mode compare
+```
+
+### 配置文件格式
+
+```yaml
+# -- 模型检查点 --
+ckpt_path: "logs/.../checkpoint/ckpt_best_val.pth"
+
+# -- 数据集 --
+dataset_root: "/path/to/dataset"
+validate_sample_ratio: 0.2
+
+# -- 模型架构 --
+deformable: false
+bev_encoder: true
+rotation_only: true
+
+# -- 输入维度 --
+img_height: 360
+img_width: 640
+max_num_points: 200000
+pc_bev_channels: 128
+bev_height: 100
+bev_width: 100
+
+# -- BEV 设置 (必须与训练配置一致) --
+bev_zbound_step: "4.0"
+
+# -- Voxel/BEV 模式 (必须与训练配置一致) --
+voxel_mode: scatter            # hard | scatter
+scatter_reduce: mean           # sum | mean
+to_bev_mode: concat            # concat | learned | sum
+
+# -- 评估参数 --
+angle_range_deg: 5.0
+trans_range: 0.15
+batch_size: 1                  # DrInfer engine 固定 batch_size=1
+num_workers: 4
+max_batches: 5                 # 0 = 评估所有 batch
+
+# -- 导出设置 --
+export_strategy: "full"
+export_dir: "logs/.../drinfer"
+model_name: "bevcalib_fusion_head"
+model_version: "v2"
+
+# -- 推理设置 --
+inference_backend: "drinfer"   # pytorch | drinfer
+device: "cuda"
+
+# -- 可选: 图导出验证 --
+verify_export_graph: true      # flat 布局是否启用 numpy 级别验证
+
+# -- 报告输出 --
+report_output: "logs/.../drinfer/eval_report.json"
+```
+
+### 参数说明
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `ckpt_path` | str | (必需) | PyTorch 检查点路径 |
+| `dataset_root` | str | (必需) | 数据集根目录 |
+| `img_height` / `img_width` | int | 360 / 640 | 输入图像尺寸 |
+| `max_num_points` | int | 200000 | 最大点云数量 |
+| `bev_zbound_step` | str | "2.0" | BEV Z 方向步长 (必须与训练一致) |
+| `voxel_mode` | str | "scatter" | 体素化模式: `hard` / `scatter` |
+| `scatter_reduce` | str | "sum" | Scatter 聚合方式: `sum` / `mean` |
+| `to_bev_mode` | str | "concat" | BEV 转换模式: `concat` / `learned` / `sum` |
+| `batch_size` | int | 1 | DrInfer 推理 batch size |
+| `max_batches` | int | 5 | 评估 batch 数 (0=全部) |
+| `export_dir` | str | (自动) | 导出目录 |
+| `model_name` | str | "bevcalib_fusion_head" | 模型名称 |
+| `model_version` | str | "v2" | 模型版本 |
+| `verify_export_graph` | bool | true | flat 布局是否验证导出图 |
+| `inference_backend` | str | "drinfer" | 推理后端: `pytorch` / `drinfer` |
+| `report_output` | str | (可选) | JSON 报告输出路径 |
+
+### 创建新的 DrInfer 配置
+
+```bash
+# 以已有配置为模板
+cp configs/drinfer_config_v8_scatter_mean_concat.yaml configs/drinfer_config_my_model.yaml
+
+# 修改 ckpt_path, export_dir, voxel/bev 模式等参数
+vim configs/drinfer_config_my_model.yaml
+
+# 导出
+python utils/torch2drinfer.py --config configs/drinfer_config_my_model.yaml --layout pmodel
+```
+
+### 完整 DrInfer 工作流
+
+```bash
+# Step 1: 训练完成后导出模型
+python utils/torch2drinfer.py \
+    --config configs/drinfer_config_v8_scatter_mean_concat.yaml \
+    --layout pmodel
+
+# Step 2: 验证导出模型精度与耗时
+python utils/drinfer_infer.py \
+    --config configs/drinfer_config_v8_scatter_mean_concat.yaml \
+    --mode compare
+
+# Step 3: 泛化评估
+python evaluate_drinfer.py \
+    --ckpt_path logs/.../checkpoint/ckpt_best_val.pth \
+    --export_dir logs/.../drinfer \
+    --dataset_root /path/to/test_data \
+    --compare_pytorch
+
+# Step 4: 批量泛化评估 (通过 run_generalization_eval.py)
+python run_generalization_eval.py --config configs/eval_xxx.yaml
+```
+
 ---
 
 **维护者**: dahailu  
-**最后更新**: 2026-03-09
+**最后更新**: 2026-04-15

@@ -17,7 +17,7 @@ from collections import defaultdict
 import numpy as np
 import random
 from pathlib import Path
-from tools import generate_single_perturbation_from_T
+from tools import generate_single_perturbation_from_T, augment_gt_pitch_flip
 import shutil
 import cv2
 import os
@@ -322,6 +322,15 @@ def parse_args():
                         help="Foundation depth mode: replace(v1 compat), replace_v2(fixed), dual_path(fusion), supervision(aux loss)")
     parser.add_argument("--depth_sup_alpha", type=float, default=0.5,
                         help="Depth supervision loss weight (only for fd_mode=supervision)")
+    parser.add_argument("--voxel_mode", type=str, default="hard",
+                        choices=["hard", "scatter"],
+                        help="Voxelization: hard(CUDA hard_voxelize+sum) or scatter(torch.unique+scatter_add_, drinfer-trace compatible)")
+    parser.add_argument("--to_bev_mode", type=str, default="concat",
+                        choices=["concat", "learned", "sum"],
+                        help="Sparse-to-BEV: concat(z-plane concat), learned(per-z kernel), sum(scatter-add)")
+    parser.add_argument("--scatter_reduce", type=str, default="sum",
+                        choices=["sum", "mean"],
+                        help="Scatter voxelization reduce: sum(match hard) or mean(dr_voxelization style)")
     parser.add_argument("--lr_schedule", type=str, default="step",
                         choices=["step", "cosine_warm_restarts"],
                         help="LR scheduler type")
@@ -348,6 +357,12 @@ def parse_args():
                         help="Image color jitter strength (0=disabled)")
     parser.add_argument("--augment_intrinsic", type=float, default=0.0,
                         help="Camera intrinsic augmentation strength: max relative deviation for fx/fy/cx/cy (e.g. 0.05=±5%%, 0=disabled)")
+    parser.add_argument("--augment_pitch_flip_prob", type=float, default=0.0,
+                        help="GT pitch flip augmentation probability (0=disabled). "
+                             "When > 0, randomly rotates GT around LiDAR Y-axis to "
+                             "balance the positive/negative pitch distribution.")
+    parser.add_argument("--augment_pitch_flip_max_deg", type=float, default=6.0,
+                        help="Max rotation angle (degrees) for GT pitch flip augmentation")
     parser.add_argument("--early_stopping_patience", type=int, default=0,
                         help="Early stopping patience in epochs (0=disabled)")
     parser.add_argument("--seed", type=int, default=42,
@@ -692,6 +707,9 @@ def main():
             use_foundation_depth=use_foundation_depth,
             depth_model_type=args.depth_model_type,
             fd_mode=fd_mode,
+            voxel_mode=args.voxel_mode,
+            to_bev_mode=args.to_bev_mode,
+            scatter_reduce=args.scatter_reduce,
         ).to(device)
 
     if args.pretrain_ckpt is not None:
@@ -783,6 +801,10 @@ def main():
     if is_main and args.augment_intrinsic > 0:
         tprint(f"Intrinsic augmentation: ±{args.augment_intrinsic*100:.0f}% (fx/fy coupled, cx/cy ±{args.augment_intrinsic*50:.0f}%)")
 
+    if is_main and args.augment_pitch_flip_prob > 0:
+        tprint(f"GT pitch flip augmentation: prob={args.augment_pitch_flip_prob}, "
+               f"max_deg={args.augment_pitch_flip_max_deg}°")
+
     _identity_4x4 = torch.eye(4, device=device)
 
     train_noise = {
@@ -872,6 +894,12 @@ def main():
 
             t_prep_start = time.time()
             gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
+            if args.augment_pitch_flip_prob > 0:
+                gt_T_to_camera_np = augment_gt_pitch_flip(
+                    gt_T_to_camera_np,
+                    prob=args.augment_pitch_flip_prob,
+                    max_deg=args.augment_pitch_flip_max_deg,
+                )
             per_axis_weights_parsed = None
             if args.per_axis_weights:
                 per_axis_weights_parsed = tuple(float(x) for x in args.per_axis_weights.split(','))

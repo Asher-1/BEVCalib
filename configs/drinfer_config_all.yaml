@@ -1,6 +1,16 @@
 # =============================================================================
 # BEVCalib DrInfer Conversion & Inference Configuration
 # =============================================================================
+#
+# 用法:
+#   # flat 布局 (快速导出)
+#   python utils/torch2drinfer.py --config configs/drinfer_config_all.yaml
+#
+#   # pmodel 布局 (完整部署目录)
+#   python utils/torch2drinfer.py --config configs/drinfer_config_all.yaml --layout pmodel
+#
+#   # 推理对比
+#   python utils/drinfer_infer.py --config configs/drinfer_config_all.yaml --mode compare
 
 # -- Model checkpoint ----------------------------------------------------------
 ckpt_path: "logs/all_training_data/model_small_10deg_v4_z10_rotation/all_training_data_scratch/checkpoint/ckpt_400.pth"
@@ -24,13 +34,15 @@ bev_width: 100
 
 # -- BEV settings --------------------------------------------------------------
 bev_zbound_step: "2.0"   # z10: step=2.0 (10 Z-voxels)
+# voxel_mode: scatter — 导出默认 scatter (drinfer trace 兼容), 训练默认 hard
+# to_bev_mode: concat — 必须与训练配置一致 (concat/learned/sum)
 
 # -- Evaluation parameters -----------------------------------------------------
 angle_range_deg: 10.0
 trans_range: 0.3
 batch_size: 1             # DrInfer engine uses fixed batch_size=1
 num_workers: 4
-max_batches: 5            # 0 = evaluate all batches
+max_batches: 50            # 0 = evaluate all batches
 
 # -- Export (torch2drinfer.py) -------------------------------------------------
 export_strategy: "full"   # "full", "split", or "onnx"

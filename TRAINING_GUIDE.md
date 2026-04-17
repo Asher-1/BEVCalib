@@ -1220,12 +1220,117 @@ angle_range_deg: "5"
 angle_range_deg: 5
 ```
 
+## DrInfer 模型部署
+
+### 概述
+
+训练完成后，可将 PyTorch 模型导出为 DrInfer 格式，用于高效推理部署。工具链包括：
+
+| 工具 | 用途 |
+| --- | --- |
+| `utils/torch2drinfer.py` | PyTorch → DrInfer 模型导出（支持 flat/pmodel 两种布局） |
+| `utils/drinfer_infer.py` | DrInfer 推理 & PyTorch vs DrInfer 对比评估 |
+| `evaluate_drinfer.py` | DrInfer 模型泛化能力评估 |
+
+### Step 1: 准备 DrInfer 配置文件
+
+```bash
+# 已有预配置模板 (在 configs/ 目录下)
+ls configs/drinfer_config_*.yaml
+
+# 或从模板创建
+cp configs/drinfer_config_v8_scatter_mean_concat.yaml configs/drinfer_config_my_model.yaml
+vim configs/drinfer_config_my_model.yaml
+```
+
+**关键配置项**（必须与训练配置一致）:
+- `bev_zbound_step`: BEV Z 方向步长
+- `voxel_mode`: 体素化模式（`hard` / `scatter`）
+- `scatter_reduce`: Scatter 聚合方式（`sum` / `mean`）
+- `to_bev_mode`: BEV 转换模式（`concat` / `learned` / `sum`）
+
+### Step 2: 导出 DrInfer 模型
+
+```bash
+# 快速导出 (flat 布局: .bin + .txt)
+python utils/torch2drinfer.py --config configs/drinfer_config_my_model.yaml
+
+# 完整部署导出 (pmodel 布局: 含 nn_param.cfg、input/output_data)
+python utils/torch2drinfer.py --config configs/drinfer_config_my_model.yaml --layout pmodel
+
+# 指定输出目录
+python utils/torch2drinfer.py --config configs/drinfer_config_my_model.yaml --layout pmodel --output_dir /path/to/output
+```
+
+**布局对比**:
+
+| 布局 | 输出目录结构 | 用途 |
+| --- | --- | --- |
+| `flat` | `export_dir/{model_name}.bin` + `.txt` | 快速导出、开发验证 |
+| `pmodel` | `export_dir/bevcalib_fusion_head/engine_graph/` + `input_data/` + `output_data/` | 正式部署、`pmodel forward` 兼容 |
+
+### Step 3: 验证导出精度
+
+```bash
+# PyTorch vs DrInfer 对比 (精度 + 耗时 + 显存)
+python utils/drinfer_infer.py --config configs/drinfer_config_my_model.yaml --mode compare
+
+# 单后端评估
+python utils/drinfer_infer.py --config configs/drinfer_config_my_model.yaml --backend drinfer
+python utils/drinfer_infer.py --config configs/drinfer_config_my_model.yaml --backend pytorch
+
+# pmodel 布局验证 (可选)
+pmodel forward logs/.../drinfer/bevcalib_fusion_head
+```
+
+### Step 4: 泛化能力评估
+
+```bash
+# 单数据集评估
+python evaluate_drinfer.py \
+    --ckpt_path logs/.../checkpoint/ckpt_best_val.pth \
+    --export_dir logs/.../drinfer \
+    --dataset_root /path/to/test_data \
+    --compare_pytorch
+
+# 批量泛化评估 (通过 run_generalization_eval.py)
+# 在 eval 配置中设置 backend: drinfer
+python run_generalization_eval.py --config configs/eval_generalization.yaml
+```
+
+### 完整部署流程示例
+
+```bash
+# 1. 训练模型
+bash batch_train.sh configs/batch8_train_all_v8_quick.yaml
+
+# 2. 导出为 DrInfer
+python utils/torch2drinfer.py \
+    --config configs/drinfer_config_v8_scatter_mean_concat.yaml \
+    --layout pmodel
+
+# 3. 精度对比验证
+python utils/drinfer_infer.py \
+    --config configs/drinfer_config_v8_scatter_mean_concat.yaml \
+    --mode compare
+
+# 4. 泛化评估
+python evaluate_drinfer.py \
+    --ckpt_path logs/all_training_data/model_small_5deg_v8_scatter_mean_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth \
+    --export_dir logs/all_training_data/model_small_5deg_v8_scatter_mean_quick/drinfer \
+    --dataset_root /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data \
+    --compare_pytorch
+```
+
+**详细 DrInfer 配置说明**: 见 [configs/README.md](configs/README.md) 中的 "DrInfer 转换配置" 章节。
+
 ## 相关文档
 
 - **数据准备**: [PREPARE_CUSTOM_DATASET.md](PREPARE_CUSTOM_DATASET.md)
 - **模型评估**: [README.md#evaluation](README.md#evaluation)
 - **性能分析**: [utils/ANALYSIS_GUIDE.md](utils/ANALYSIS_GUIDE.md)
 - **批量训练配置**: [configs/README.md](configs/README.md)
+- **DrInfer 配置详解**: [configs/README.md](configs/README.md) (DrInfer 转换配置章节)
 
 ## 故障排除
 

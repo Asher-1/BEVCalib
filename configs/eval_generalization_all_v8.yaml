@@ -28,6 +28,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 5
@@ -39,6 +40,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 10
@@ -50,6 +52,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 5
@@ -61,6 +64,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 10
@@ -72,6 +76,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 5
@@ -83,6 +88,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 10
@@ -94,24 +100,12 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 10
     version: "v8-z10-pitch-all"
     mode_desc: "ALL V8 Z=10 + axis_wt=1,3,1 + per_axis_wt=1,2,1 (全Pitch优化)"
-
-  # 7. drcv后端A/B对照
-  - label: "v8-baseline-drcv"
-    dir_name: "model_small_5deg_v8_baseline_drcv"
-    ckpt: "ckpt_best_val.pth"
-    bev_zbound_step: "4.0"
-    rotation_only: 1
-    use_mlp_head: 0
-    use_drcv: 1
-    angle_deg: 5
-    z_voxels: 5
-    version: "v8-baseline-drcv"
-    mode_desc: "ALL V8 drcv后端A/B (Linear+quat, vs v8-baseline)"
 
   # ==================== 基线对照 ====================
 
@@ -121,6 +115,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     use_mlp_head: 0
     angle_deg: 5
     z_voxels: 5

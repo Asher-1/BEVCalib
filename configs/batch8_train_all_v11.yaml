@@ -83,7 +83,7 @@ defaults:
     seed: 42
 
     eval_epoches: 50           # 每N个epoch验证一次
-    grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
+    grad_accum_steps: 1        # 梯度累积步数 
 
     foreground: true
     no_tensorboard: true

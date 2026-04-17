@@ -1,6 +1,16 @@
 # =============================================================================
-# BEVCalib DrInfer Conversion & Inference Configuration
+# BEVCalib DrInfer Conversion & Inference Configuration (B26A)
 # =============================================================================
+#
+# 用法:
+#   # flat 布局 (快速导出)
+#   python utils/torch2drinfer.py --config configs/drinfer_config_b26a.yaml
+#
+#   # pmodel 布局 (完整部署目录)
+#   python utils/torch2drinfer.py --config configs/drinfer_config_b26a.yaml --layout pmodel
+#
+#   # 推理对比
+#   python utils/drinfer_infer.py --config configs/drinfer_config_b26a.yaml --mode compare
 
 # -- Model checkpoint ----------------------------------------------------------
 ckpt_path: "logs/B26A/model_small_5deg_v8-z5_axis_loss0.5_rotation/B26A_scratch/checkpoint/ckpt_400.pth"
@@ -30,7 +40,7 @@ angle_range_deg: 5.0
 trans_range: 0.15
 batch_size: 1             # DrInfer engine uses fixed batch_size=1
 num_workers: 4
-max_batches: 5            # 0 = evaluate all batches
+max_batches: 50            # 0 = evaluate all batches
 
 # -- Export (torch2drinfer.py) -------------------------------------------------
 export_strategy: "full"   # "full", "split", or "onnx"

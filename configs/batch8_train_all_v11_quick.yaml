@@ -97,7 +97,11 @@ defaults:
     # === Quick模式加速参数 ===
     max_frames_per_seq: 500   # 每序列最大帧数 (均匀采样)
     eval_epoches: 50           # 每N个epoch验证一次
-    grad_accum_steps: 1        # 梯度累积步数 (AllReduce通信减半)
+    grad_accum_steps: 1        # 梯度累积步数 
+
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
 
     # === 运行模式 ===
     foreground: true           # 前台运行 (batch模式必须)

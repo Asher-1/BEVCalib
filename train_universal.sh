@@ -42,6 +42,8 @@
 #   --augment_pc_dropout R   - Point cloud dropout ratio (default: 0.0)
 #   --augment_color_jitter S - Image color jitter strength (default: 0.0)
 #   --augment_intrinsic S    - Camera intrinsic augmentation strength (default: 0.0, e.g. 0.05=±5%)
+#   --augment_pitch_flip_prob P  - GT pitch flip augmentation probability (default: 0.0=disabled)
+#   --augment_pitch_flip_max_deg D - Max rotation for pitch flip in degrees (default: 6.0)
 #   --eval_angle_range_deg D - Evaluation perturbation angle (default: same as training angle)
 #   --early_stopping_patience N - Early stopping patience in eval cycles (default: 0)
 #   --seed N                 - Global random seed for reproducibility (default: 42)
@@ -294,6 +296,16 @@ while [[ $# -gt 0 ]]; do
             AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
         --augment_intrinsic)
             AUGMENT_INTRINSIC="$2"; shift 2 ;;
+        --augment_pitch_flip_prob)
+            AUGMENT_PITCH_FLIP_PROB="$2"; shift 2 ;;
+        --augment_pitch_flip_max_deg)
+            AUGMENT_PITCH_FLIP_MAX_DEG="$2"; shift 2 ;;
+        --voxel_mode)
+            VOXEL_MODE="$2"; shift 2 ;;
+        --to_bev_mode)
+            TO_BEV_MODE="$2"; shift 2 ;;
+        --scatter_reduce)
+            SCATTER_REDUCE="$2"; shift 2 ;;
         --eval_angle_range_deg)
             EVAL_ANGLE_RANGE_DEG="$2"; shift 2 ;;
         --early_stopping_patience)
@@ -535,7 +547,9 @@ _AUG_STR=""
 [ -n "$AUGMENT_COLOR_JITTER" ] && [ "$AUGMENT_COLOR_JITTER" != "0" ] && [ "$AUGMENT_COLOR_JITTER" != "0.0" ] && \
     _AUG_STR="${_AUG_STR}color=${AUGMENT_COLOR_JITTER} "
 [ -n "$AUGMENT_INTRINSIC" ] && [ "$AUGMENT_INTRINSIC" != "0" ] && [ "$AUGMENT_INTRINSIC" != "0.0" ] && \
-    _AUG_STR="${_AUG_STR}intrinsic=±${AUGMENT_INTRINSIC}"
+    _AUG_STR="${_AUG_STR}intrinsic=±${AUGMENT_INTRINSIC} "
+[ -n "$AUGMENT_PITCH_FLIP_PROB" ] && [ "$AUGMENT_PITCH_FLIP_PROB" != "0" ] && [ "$AUGMENT_PITCH_FLIP_PROB" != "0.0" ] && \
+    _AUG_STR="${_AUG_STR}pflip=${AUGMENT_PITCH_FLIP_PROB}(±${AUGMENT_PITCH_FLIP_MAX_DEG:-6}°)"
 _print_row "Augmentation:"  "${_AUG_STR:-disabled}"
 [ -n "$EARLY_STOPPING_PATIENCE" ] && [ "$EARLY_STOPPING_PATIENCE" != "0" ] && \
 _print_row "Early Stop:"    "patience=$EARLY_STOPPING_PATIENCE"
@@ -548,6 +562,12 @@ _print_row "PyTorch:"       "$PYTORCH_VER"
 _print_row "CUDA:"          "$CUDA_VER"
 _print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
 _print_row "BEV Z-Step:"    "${BEV_ZBOUND_STEP:-4.0}"
+_section_end
+
+_maybe_sep
+_print_row "Voxel Mode:"       "${VOXEL_MODE:-hard}"
+_print_row "Scatter Reduce:"   "${SCATTER_REDUCE:-sum}"
+_print_row "To-BEV Mode:"      "${TO_BEV_MODE:-concat}"
 if [ "$NNODES" -gt 1 ]; then
     _section_end
     _maybe_sep
@@ -658,6 +678,8 @@ OPTIM_FLAGS=""
 [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
 [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
 [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_intrinsic $AUGMENT_INTRINSIC"
+[ -n "$AUGMENT_PITCH_FLIP_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pitch_flip_prob $AUGMENT_PITCH_FLIP_PROB"
+[ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
 [ -n "$EVAL_ANGLE_RANGE_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --eval_angle_range_deg $EVAL_ANGLE_RANGE_DEG"
 [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
 [ -n "$SEED" ] && OPTIM_FLAGS="$OPTIM_FLAGS --seed $SEED"
@@ -671,6 +693,9 @@ OPTIM_FLAGS=""
 [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_FLAGS="$OPTIM_FLAGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
 [ -n "$EVAL_EPOCHES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --eval_epoches $EVAL_EPOCHES"
 [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --grad_accum_steps $GRAD_ACCUM_STEPS"
+[ -n "$VOXEL_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --voxel_mode $VOXEL_MODE"
+[ -n "$TO_BEV_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --to_bev_mode $TO_BEV_MODE"
+[ -n "$SCATTER_REDUCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --scatter_reduce $SCATTER_REDUCE"
 
 DEFORMABLE_VAL=${USE_DEFORMABLE:-0}
 [ -n "$BEV_POOL_FACTOR" ] && OPTIM_FLAGS="$OPTIM_FLAGS --bev_pool_factor $BEV_POOL_FACTOR"

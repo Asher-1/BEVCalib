@@ -1,0 +1,160 @@
+# BEVCalib ALL V14 快速筛选训练 — max_frames_per_seq=500
+#
+# 目的: 用每序列500帧 (~5.5K总帧) 快速验证 pitch flip augmentation 效果
+#       全量训练 130K帧需要 6-8h/实验, 此配置约 30min/实验
+#
+# 筛选后的 Top-2 配置将用 batch8_train_all_v14.yaml 做全量训练
+#
+# V14 核心创新: GT Pitch Flip Augmentation
+#   - 训练数据正:负Pitch ≈ 66:34, 导致负Pitch序列误差 3.1x
+#   - pitch_flip 在扰动前随机旋转GT Y轴, 平衡 Pitch 分布
+#
+# 实验矩阵 (与 batch8_train_all_v14 一致, 加 max_frames_per_seq):
+#   1. v14_v6_pflip:          V6冠军+pflip (隔离效果)
+#   2. v14_z10_p3_pflip:      Z=10+p3+pflip (核心实验)
+#   3. v14_z10_p3_pflip_low:  Z=10+p3+pflip(0.3) (轻度)
+#   4. v14_z10_p3_pflip_cos:  Z=10+p3+pflip+Cosine (全组合)
+#   5. v14_z10_p3_baseline:   Z=10+p3 对照组 (无pflip)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v14_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 6.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    max_frames_per_seq: 500
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # 1. V6 冠军 + pitch_flip — 隔离增强效果
+  - name: "v14_v6_pflip_quick"
+    description: "ALL V14 Quick: V6冠军+pflip(0.5) 500帧/seq"
+    dataset: "all"
+    version: "v14_v6_pflip_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_flip_prob: 0.5
+
+  # 2. 核心实验: Z=10 + pitch3 + pitch_flip
+  - name: "v14_z10_p3_pflip_quick"
+    description: "ALL V14 Quick: Z=10+p3+pflip(0.5) 500帧/seq"
+    dataset: "all"
+    version: "v14_z10_p3_pflip_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_flip_prob: 0.5
+
+  # 3. 轻度 pitch_flip (prob=0.3)
+  - name: "v14_z10_p3_pflip_low_quick"
+    description: "ALL V14 Quick: Z=10+p3+pflip(0.3) 500帧/seq"
+    dataset: "all"
+    version: "v14_z10_p3_pflip_low_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_flip_prob: 0.3
+
+  # 4. 全组合: pflip + Cosine
+  - name: "v14_z10_p3_pflip_cos_quick"
+    description: "ALL V14 Quick: Z=10+p3+pflip+Cosine 500帧/seq"
+    dataset: "all"
+    version: "v14_z10_p3_pflip_cos_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_flip_prob: 0.5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+
+  # 5. 对照组: 无 pitch_flip
+  - name: "v14_z10_p3_baseline_quick"
+    description: "ALL V14 Quick: Z=10+p3 对照组(无pflip) 500帧/seq"
+    dataset: "all"
+    version: "v14_z10_p3_baseline_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+# ============================================================================
+# Quick vs Full 对比
+# ============================================================================
+#
+# 参数            | Quick (本配置)          | Full (v14原配置)
+# ----------------+------------------------+------------------
+# 帧数/序列       | 500                    | 全部 (~12K avg)
+# 总训练帧数      | ~5,500 (80%)=4,400     | ~130,000 (80%)=104K
+# 节点数          | 1 (单机)               | 32 (多机)
+# 预计训练时间    | ~30 min/实验            | ~6-8 h/实验
+# 5组总时间       | ~2.5 h                  | ~30-40 h
+# 用途            | 快速验证pflip有效性     | 最终模型训练
+#
+# 快速验证关注:
+#   - 实验2 vs 5 (pflip vs 无pflip) 的 val loss 差异
+#   - pflip 是否导致训练不稳定 (loss曲线抖动)
+#   - prob=0.3 vs 0.5 的收敛速度差异

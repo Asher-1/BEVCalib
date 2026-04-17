@@ -66,17 +66,22 @@ class BEVCalibInference(nn.Module):
             x = m.deformable_transformer(x)
             _B, C, H, W = x.shape
             x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
-            bev_mask = cam_bev_mask.reshape(_B, H * W).unsqueeze(-1)
-            x = x * bev_mask
-            x = x.mean(dim=1)
+            bev_mask = cam_bev_mask.reshape(_B, H * W).float().unsqueeze(-1)
+            x = (x * bev_mask).sum(dim=1) / bev_mask.sum(dim=1).clamp(min=1)
         else:
             _B, C, H, W = x.shape
+            if hasattr(m, 'bev_pool_factor') and m.bev_pool_factor > 1:
+                pf = m.bev_pool_factor
+                x = nn.functional.avg_pool2d(x, pf)
+                cam_bev_mask = nn.functional.max_pool2d(
+                    cam_bev_mask.reshape(_B, 1, H, W).float(), pf).squeeze(1)
+                _, _, H, W = x.shape
             x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
             bev_mask_f = cam_bev_mask.reshape(_B, H * W).float()
-            x = x * bev_mask_f.unsqueeze(-1)
-            padding_mask = 1.0 - bev_mask_f
+            padding_mask = (1.0 - bev_mask_f) * (-1e4)
             x = m.transformer(x, src_key_padding_mask=padding_mask)
-            x = x.mean(dim=1)
+            valid_mask = bev_mask_f.unsqueeze(-1)
+            x = (x * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
 
         if not self.rotation_only:
             translation = m.translation_pred(x)
@@ -113,15 +118,6 @@ def _detect_use_mlp_head(state_dict):
 
 
 def prepare_for_drinfer_export(wrapper, img_shape=(360, 640)):
-    """
-    Patch the model graph to remove all operations that DrInfer's
-    model_parserv3 cannot trace:
-      1. Swin's dynamic maybe_pad  -> hardcoded constant padding
-      2. nn.TransformerEncoderLayer -> decomposed forward (bypass fused path)
-      3. Register aten::zero / aten::alias symbolics for spconv
-      4. Switch bev_pool to scatter_add (DrInfer-exportable)
-    Must be called *before* model_parserv3.
-    """
     import types
     from transformers.models.swin.modeling_swin import (
         SwinLayer, SwinPatchMerging, SwinPatchEmbeddings,
@@ -219,117 +215,101 @@ def prepare_for_drinfer_export(wrapper, img_shape=(360, 640)):
               f"{patched_merges} PatchMerging, "
               f"{patched_embeds} PatchEmbeddings patched")
 
-    # --- 2. Patch TransformerEncoderLayer: bypass fused path ------------------
+    # --- 2. Patch TransformerEncoderLayer: manual attention (no SDPA) ---------
     if hasattr(model, 'transformer') and not model.deformable:
-        try:
-            import frontend_python.pytorch_parser.parse_utils.multi_head_attention as DR_MHA
+        encoder = model.transformer
+        patched_te = 0
+        for i, layer in enumerate(encoder.layers):
+            if not isinstance(layer, nn.TransformerEncoderLayer):
+                continue
 
-            encoder = model.transformer
-            patched_te = 0
-            for i, layer in enumerate(encoder.layers):
-                if not isinstance(layer, nn.TransformerEncoderLayer):
-                    continue
+            d_model = layer.self_attn.embed_dim
+            nhead = layer.self_attn.num_heads
 
-                d_model = layer.self_attn.embed_dim
-                nhead = layer.self_attn.num_heads
+            def _make_manual_attn_forward(lyr, dm, nh):
+                """Replace TransformerEncoderLayer forward with manual
+                Q*K^T -> softmax -> V attention using only basic ops (no SDPA).
+                Supports src_key_padding_mask for proper attention masking."""
+                dk = dm // nh
+                scale = dk ** 0.5
 
-                dr_mha = DR_MHA.MultiheadAttention(
-                    d_model, nhead, dropout=0.0, bias=True, batch_first=True,
-                )
-                dr_mha.in_proj_weight = layer.self_attn.in_proj_weight
-                dr_mha.in_proj_bias = layer.self_attn.in_proj_bias
-                dr_mha.out_proj.weight = layer.self_attn.out_proj.weight
-                dr_mha.out_proj.bias = layer.self_attn.out_proj.bias
+                def _manual_self_attn(x, key_padding_mask=None):
+                    B, S, _ = x.shape
+                    qkv = torch.nn.functional.linear(
+                        x, lyr.self_attn.in_proj_weight,
+                        lyr.self_attn.in_proj_bias)
+                    q, k, v = qkv.chunk(3, dim=-1)
+                    q = q.view(B, S, nh, dk).permute(0, 2, 1, 3)
+                    k = k.view(B, S, nh, dk).permute(0, 2, 1, 3)
+                    v = v.view(B, S, nh, dk).permute(0, 2, 1, 3)
+                    scores = torch.matmul(q, k.transpose(-2, -1)) / scale
+                    if key_padding_mask is not None:
+                        scores = scores + key_padding_mask.unsqueeze(1).unsqueeze(2)
+                    weights = torch.softmax(scores, dim=-1)
+                    out = torch.matmul(weights, v)
+                    out = out.permute(0, 2, 1, 3).reshape(B, S, dm)
+                    return torch.nn.functional.linear(
+                        out, lyr.self_attn.out_proj.weight,
+                        lyr.self_attn.out_proj.bias)
 
-                layer.self_attn = dr_mha
+                def _patched_forward(src, src_mask=None,
+                                     src_key_padding_mask=None,
+                                     is_causal=False):
+                    x = src
+                    if lyr.norm_first:
+                        x = x + _manual_self_attn(lyr.norm1(x), src_key_padding_mask)
+                        x = x + lyr._ff_block(lyr.norm2(x))
+                    else:
+                        x = lyr.norm1(x + _manual_self_attn(x, src_key_padding_mask))
+                        x = lyr.norm2(x + lyr._ff_block(x))
+                    return x
+                return _patched_forward
 
-                def _make_patched_forward(lyr):
-                    def _patched_forward(src, src_mask=None, src_key_padding_mask=None,
-                                         is_causal=False):
-                        import torch.nn.functional as _F
-                        src_key_padding_mask = _F._canonical_mask(
-                            mask=src_key_padding_mask,
-                            mask_name="src_key_padding_mask",
-                            other_type=_F._none_or_dtype(src_mask),
-                            other_name="src_mask",
-                            target_type=src.dtype,
-                        )
-                        src_mask = _F._canonical_mask(
-                            mask=src_mask, mask_name="src_mask",
-                            other_type=None, other_name="",
-                            target_type=src.dtype, check_other=False,
-                        )
-                        x = src
-                        if lyr.norm_first:
-                            x = x + lyr._sa_block(lyr.norm1(x), src_mask,
-                                                   src_key_padding_mask,
-                                                   is_causal=is_causal)
-                            x = x + lyr._ff_block(lyr.norm2(x))
-                        else:
-                            x = lyr.norm1(x + lyr._sa_block(x, src_mask,
-                                                             src_key_padding_mask,
-                                                             is_causal=is_causal))
-                            x = lyr.norm2(x + lyr._ff_block(x))
-                        return x
-                    return _patched_forward
+            layer.forward = _make_manual_attn_forward(layer, d_model, nhead)
+            patched_te += 1
 
-                layer.forward = _make_patched_forward(layer)
-                patched_te += 1
-
-            print(f"[patch] TransformerEncoder: {patched_te} layers patched "
-                  f"(fused path bypassed, DrInfer MHA installed)")
-        except ImportError as e:
-            print(f"[patch] WARNING: could not patch TransformerEncoder: {e}")
-
-    # --- 3. Register custom op symbolics for drcv voxel/spconv/bev_pool ------
-    try:
-        from frontend_python.pytorch_parser.registry import OperatorRegister
-        from frontend_python.pytorch_parser.dr_symbolic.jit_utils import create_dr_op
-        from frontend_python.pytorch_parser.dr_symbolic.helper import CUSTOM_DOMAIN
-
-        @OperatorRegister.register_version("aten", 1)
-        def zero(g, self):
-            return create_dr_op(g, "dr::ZerosLike", self)
-
-        @OperatorRegister.register_version("aten", 1)
-        def alias(g, self):
-            return self
-
-        @OperatorRegister.register_version(CUSTOM_DOMAIN, 1)
-        def _Voxelization(g, points, *args):
-            return create_dr_op(g, "dr::HardVoxelize", points, outputs=3)
-
-        from frontend_python.pytorch_parser.dr_symbolic import helper as dr_helper
-        from frontend_python.pytorch_parser.dr_symbolic.helper import parse_dr_args
-
-        @OperatorRegister.register_version(CUSTOM_DOMAIN, 1)
-        @parse_dr_args('v', 'v', 'v', 'v', 'i')
-        def SparseConvFunction(g, features, filters, indice_pairs,
-                               indice_pair_num, num_activate_out):
-            return create_dr_op(g, "dr::SparseConv", features, filters,
-                                indice_pairs, indice_pair_num,
-                                transpose_t=dr_helper._get_bool_tensor(False),
-                                subm_t=dr_helper._get_bool_tensor(False),
-                                num_act_out_i=num_activate_out)
-
-        @OperatorRegister.register_version(CUSTOM_DOMAIN, 1)
-        @parse_dr_args('v', 'v', 'v', 'v', 'i')
-        def SubMConvFunction(g, features, filters, indice_pairs,
-                             indice_pair_num, num_activate_out):
-            return create_dr_op(g, "dr::SparseConv", features, filters,
-                                indice_pairs, indice_pair_num,
-                                transpose_t=dr_helper._get_bool_tensor(False),
-                                subm_t=dr_helper._get_bool_tensor(True),
-                                num_act_out_i=num_activate_out)
-
-        print("[patch] Registered drcv op symbolics: "
-              "_Voxelization, SparseConvFunction, SubMConvFunction, "
-              "aten::zero, aten::alias")
-    except Exception as e:
-        print(f"[patch] WARNING: could not register op symbolics: {e}")
+        print(f"[patch] TransformerEncoder: {patched_te} layers patched "
+              f"(manual attention, no SDPA)")
+    else:
+        print("[patch] No standard transformer to patch")
 
     print("[patch] Model prepared for DrInfer export")
     return wrapper
+
+
+def _adapt_proj_heads_to_checkpoint(model, state_dict, device):
+    """Adapt ProjectionHead and SpconvToDenseBEV dimensions to match checkpoint.
+
+    See evaluate_checkpoint._adapt_model_to_checkpoint for full explanation.
+    """
+    from proj_head import ProjectionHead
+
+    for branch_name in ('img_branch', 'pc_branch'):
+        proj_key = f'{branch_name}.proj_head.projection.weight'
+        if proj_key not in state_dict:
+            continue
+        ckpt_shape = state_dict[proj_key].shape
+        model_params = dict(model.named_parameters())
+        if proj_key not in model_params or ckpt_shape == model_params[proj_key].shape:
+            continue
+
+        ckpt_embed = ckpt_shape[1]
+        branch = getattr(model, branch_name)
+
+        if branch_name == 'pc_branch' and hasattr(branch, 'sparse_encoder'):
+            to_bev = branch.sparse_encoder.to_bev
+            if to_bev.mode == 'concat':
+                new_n_z = ckpt_embed // to_bev.in_channels
+                if new_n_z * to_bev.in_channels == ckpt_embed:
+                    to_bev.n_z = new_n_z
+                    to_bev.out_channels = ckpt_embed
+                    print(f"[load] Adapted {branch_name}.to_bev n_z → {new_n_z}")
+
+        branch.proj_head = ProjectionHead(
+            embedding_dim=ckpt_embed,
+            projection_dim=ckpt_shape[0],
+        ).to(device)
+        print(f"[load] Adapted {branch_name}.proj_head embedding_dim → {ckpt_embed}")
 
 
 def load_bevcalib_inference(
@@ -340,6 +320,9 @@ def load_bevcalib_inference(
     deformable=False,
     bev_encoder=True,
     use_mlp_head=None,
+    voxel_mode="scatter",
+    to_bev_mode="concat",
+    scatter_reduce="sum",
 ):
     """
     Load a BEVCalib checkpoint and return an inference wrapper.
@@ -352,6 +335,9 @@ def load_bevcalib_inference(
         deformable:    whether the model uses deformable attention
         bev_encoder:   whether the model uses BEV encoder
         use_mlp_head:  None=auto-detect from checkpoint, True=MLP head, False=Linear head
+        voxel_mode:    'hard' or 'scatter' (default 'scatter' for drinfer trace)
+        to_bev_mode:   'concat', 'learned', or 'sum' (must match training config)
+        scatter_reduce: 'sum' or 'mean' (scatter voxelization reduce mode)
 
     Returns:
         wrapper: BEVCalibInference on the specified device
@@ -366,14 +352,19 @@ def load_bevcalib_inference(
         use_mlp_head = _detect_use_mlp_head(state)
         print(f"[load] Auto-detected use_mlp_head={use_mlp_head}")
 
+    print(f"[load] voxel_mode={voxel_mode}, to_bev_mode={to_bev_mode}, scatter_reduce={scatter_reduce}")
     model = BEVCalib(
         deformable=deformable,
         bev_encoder=bev_encoder,
         img_shape=(img_shape[0], img_shape[1]),
         rotation_only=rotation_only,
         use_mlp_head=use_mlp_head,
+        voxel_mode=voxel_mode,
+        to_bev_mode=to_bev_mode,
+        scatter_reduce=scatter_reduce,
     )
 
+    _adapt_proj_heads_to_checkpoint(model, state, device)
     missing, unexpected = model.load_state_dict(state, strict=False)
     if unexpected:
         loss_keys = [k for k in unexpected if 'loss_fn' in k]
