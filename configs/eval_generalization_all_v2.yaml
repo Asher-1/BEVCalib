@@ -32,6 +32,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v5-z5-axis03"
@@ -42,6 +43,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v5-z5-axis05"
@@ -52,6 +54,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v5-z5-axis10"
@@ -62,6 +65,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v5-z5-no-axis"
@@ -75,6 +79,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "10.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 2
     version: "v5-z2-axis01"
@@ -85,6 +90,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "10.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 2
     version: "v5-z2-axis03"
@@ -95,6 +101,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "10.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 2
     version: "v5-z2-axis05"
@@ -105,6 +112,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "10.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 2
     version: "v5-z2-no-axis"

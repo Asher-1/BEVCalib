@@ -87,6 +87,51 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
     last_angle = np.rad2deg(delta_rots[-1:].magnitude()[0]) if B > 0 else 0.0
     return T_new, last_angle, rand_magnitudes[-1] if B > 0 else 0.0
 
+def augment_gt_pitch_flip(T, prob=0.5, max_deg=6.0):
+    """Balance pitch distribution by applying random Y-axis rotation to GT extrinsics.
+
+    The LiDAR→Camera rotation matrix has a "pitch sign" that depends on
+    camera mounting angle crossing the nominal -90° roll boundary. Training
+    data is often imbalanced (e.g. 66% positive vs 34% negative pitch sign),
+    causing systematic prediction bias.
+
+    This augmentation rotates the GT around the LiDAR Y-axis (left) by a
+    random angle in [-max_deg, +max_deg]. A ~3° rotation is sufficient to
+    flip the pitch sign for typical extrinsics, so max_deg=6 ensures most
+    samples cross the boundary when selected.
+
+    The rotation is applied to the GT BEFORE perturbation generation, so the
+    perturbed BEV and correction target stay consistent.
+
+    Parameters:
+        T: np.ndarray, shape (B, 4, 4) — GT LiDAR→Camera transforms
+        prob: probability of applying the augmentation per sample
+        max_deg: maximum rotation angle in degrees
+    Returns:
+        T_aug: np.ndarray, shape (B, 4, 4) — augmented GT transforms
+    """
+    if prob <= 0 or max_deg <= 0:
+        return T
+    B = T.shape[0]
+    T_aug = T.copy()
+    mask = np.random.rand(B) < prob
+    if not mask.any():
+        return T_aug
+    n_flip = mask.sum()
+    angles_deg = np.random.uniform(-max_deg, max_deg, n_flip)
+    angles_rad = np.deg2rad(angles_deg)
+    cos_a = np.cos(angles_rad)
+    sin_a = np.sin(angles_rad)
+    for idx, i in enumerate(np.where(mask)[0]):
+        Ry = np.array([
+            [ cos_a[idx], 0, sin_a[idx]],
+            [ 0,          1, 0         ],
+            [-sin_a[idx], 0, cos_a[idx]],
+        ])
+        T_aug[i, :3, :3] = T[i, :3, :3] @ Ry
+    return T_aug
+
+
 def generate_intrinsic_matrix(fx, fy, cx, cy):
     intrinsic_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
     return intrinsic_matrix

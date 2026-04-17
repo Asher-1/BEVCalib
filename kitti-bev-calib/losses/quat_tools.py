@@ -172,43 +172,35 @@ def batch_quat2mat(q):
     """
     assert q.shape[-1] == 4, "Last dimension must be 4 for quaternion"
     
-    # Normalize quaternions
     q = q / torch.norm(q, dim=-1, keepdim=True)
-    
-    # Extract components
-    q0, q1, q2, q3 = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
-    
-    # Form the matrix
-    mat = torch.zeros((*q.shape[:-1], 4, 4), device=q.device)
-    
-    mat[..., 0, 0] = 1 - 2*q2**2 - 2*q3**2
-    mat[..., 0, 1] = 2*q1*q2 - 2*q3*q0
-    mat[..., 0, 2] = 2*q1*q3 + 2*q2*q0
-    
-    mat[..., 1, 0] = 2*q1*q2 + 2*q3*q0
-    mat[..., 1, 1] = 1 - 2*q1**2 - 2*q3**2
-    mat[..., 1, 2] = 2*q2*q3 - 2*q1*q0
-    
-    mat[..., 2, 0] = 2*q1*q3 - 2*q2*q0
-    mat[..., 2, 1] = 2*q2*q3 + 2*q1*q0
-    mat[..., 2, 2] = 1 - 2*q1**2 - 2*q2**2
-    
-    mat[..., 3, 3] = 1.
-    
-    return mat
+
+    q0, q1, q2, q3 = q[..., 0:1], q[..., 1:2], q[..., 2:3], q[..., 3:4]
+    z = torch.zeros_like(q0)
+    o = torch.ones_like(q0)
+
+    row0 = torch.cat([o - 2*q2**2 - 2*q3**2, 2*q1*q2 - 2*q3*q0,
+                       2*q1*q3 + 2*q2*q0, z], dim=-1)
+    row1 = torch.cat([2*q1*q2 + 2*q3*q0, o - 2*q1**2 - 2*q3**2,
+                       2*q2*q3 - 2*q1*q0, z], dim=-1)
+    row2 = torch.cat([2*q1*q3 - 2*q2*q0, 2*q2*q3 + 2*q1*q0,
+                       o - 2*q1**2 - 2*q2**2, z], dim=-1)
+    row3 = torch.cat([z, z, z, o], dim=-1)
+    return torch.stack([row0, row1, row2, row3], dim=-2)
 
 def batch_tvector2mat(t):
     """
-    Translation vectors to homogeneous transformation matrices with identity rotation
+    Translation vectors to homogeneous transformation matrices with identity rotation.
+    Uses torch.stack instead of in-place slice assignment for JIT/drinfer compatibility.
     Args:
         t (torch.Tensor): shape [...,3], translation vectors
-
     Returns:
         torch.Tensor: [...,4,4] homogeneous transformation matrices
     """
     assert t.shape[-1] == 3, "Last dimension must be 3 for translation"
-    
-    mat = torch.eye(4, device=t.device).expand(*t.shape[:-1], 4, 4).clone()
-    mat[..., 0:3, 3] = t[...]
-    
-    return mat
+    z = torch.zeros_like(t[..., :1])
+    o = torch.ones_like(t[..., :1])
+    row0 = torch.cat([o, z, z, t[..., 0:1]], dim=-1)
+    row1 = torch.cat([z, o, z, t[..., 1:2]], dim=-1)
+    row2 = torch.cat([z, z, o, t[..., 2:3]], dim=-1)
+    row3 = torch.cat([z, z, z, o], dim=-1)
+    return torch.stack([row0, row1, row2, row3], dim=-2)

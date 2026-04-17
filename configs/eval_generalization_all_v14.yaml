@@ -1,0 +1,201 @@
+# BEVCalib ALL V14 泛化性能评估
+#
+# V14 Pitch 平衡增强 (5组实验, 对应 batch8_train_all_v14.yaml):
+#   1. v14-v6-pflip:          V6冠军+pitch_flip(0.5) 隔离效果
+#   2. v14-z10-p3-pflip:      Z=10+pitch3+pflip(0.5) 核心实验
+#   3. v14-z10-p3-pflip-low:  Z=10+pitch3+pflip(0.3) 轻度
+#   4. v14-z10-p3-pflip-cos:  Z=10+pitch3+pflip+Cosine 全组合
+#   5. v14-z10-p3-baseline:   Z=10+pitch3 对照组 (无pflip)
+#
+# + ALL-V6 冠军对照 (历史最佳)
+#
+# 泛化评估重点:
+#   - 负 Pitch 序列 (Test Seq 02, 06) 误差是否显著下降
+#   - 正 Pitch 序列性能是否无退化
+#   - 整体 Mean Rotation Error 是否优于 V6 冠军 (0.29°)
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=0 /opt/conda/envs/bevcalib310/bin/python run_generalization_eval.py \
+#     --config configs/eval_generalization_all_v14.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v14_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v14_quick"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # ==================== V14 ALL 全量训练 (5组) ====================
+
+  - label: "v14-v6-pflip"
+    dir_name: "model_small_5deg_v14_v6_pflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-v6-pflip"
+    mode_desc: "V6冠军+pflip(0.5) 隔离增强效果"
+
+  - label: "v14-z10-p3-pflip"
+    dir_name: "model_small_5deg_v14_z10_p3_pflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-pflip"
+    mode_desc: "Z=10+pitch3+pflip(0.5) 核心实验"
+
+  - label: "v14-z10-p3-pflip-low"
+    dir_name: "model_small_5deg_v14_z10_p3_pflip_low"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-pflip-low"
+    mode_desc: "Z=10+pitch3+pflip(0.3) 轻度翻转"
+
+  - label: "v14-z10-p3-pflip-cos"
+    dir_name: "model_small_5deg_v14_z10_p3_pflip_cos"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-pflip-cos"
+    mode_desc: "Z=10+pitch3+pflip+Cosine 全组合"
+
+  - label: "v14-z10-p3-baseline"
+    dir_name: "model_small_5deg_v14_z10_p3_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-baseline"
+    mode_desc: "Z=10+pitch3 对照组(无pflip)"
+
+  # ==================== V14 Quick 训练 (对照, 训练后启用) ====================
+
+  - label: "v14-v6-pflip-q"
+    dir_name: "model_small_5deg_v14_v6_pflip_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-v6-pflip-q"
+    mode_desc: "Quick: V6+pflip (500帧/seq)"
+
+  - label: "v14-z10-p3-pflip-q"
+    dir_name: "model_small_5deg_v14_z10_p3_pflip_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-pflip-q"
+    mode_desc: "Quick: Z=10+p3+pflip (500帧/seq)"
+
+  - label: "v14-z10-p3-pflip-low-q"
+    dir_name: "model_small_5deg_v14_z10_p3_pflip_low_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-pflip-low-q"
+    mode_desc: "Quick: Z=10+p3+pflip(0.3) (500帧/seq)"
+
+  - label: "v14-z10-p3-pflip-cos-q"
+    dir_name: "model_small_5deg_v14_z10_p3_pflip_cos_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-pflip-cos-q"
+    mode_desc: "Quick: Z=10+p3+pflip+Cosine (500帧/seq)"
+
+  - label: "v14-z10-p3-baseline-q"
+    dir_name: "model_small_5deg_v14_z10_p3_baseline_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 10
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    version: "v14-z10-p3-baseline-q"
+    mode_desc: "Quick: Z=10+p3 对照组 (500帧/seq)"
+
+  # ==================== 历史基线 ====================
+
+  - label: "all-v6-champion"
+    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion"
+    mode_desc: "ALL V6 泛化冠军 0.291 (历史最佳)"

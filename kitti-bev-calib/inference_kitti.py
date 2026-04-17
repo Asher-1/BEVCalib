@@ -162,14 +162,17 @@ def main():
     img_shape = (target_size[1], target_size[0])
     print(f"🔧 网络输入尺寸 (H, W): {img_shape}")
     
+    ckpt = torch.load(args.ckpt_path, map_location=device)
+    ckpt_args = ckpt.get('args', {})
     model = BEVCalib(
         deformable=False,      
         bev_encoder=True,
         img_shape=img_shape,
         rotation_only=rotation_only,
+        voxel_mode=ckpt_args.get('voxel_mode', 'hard'),
+        to_bev_mode=ckpt_args.get('to_bev_mode', 'concat'),
+        scatter_reduce=ckpt_args.get('scatter_reduce', 'sum'),
     ).to(device)
-
-    ckpt = torch.load(args.ckpt_path, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
 

@@ -23,6 +23,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "20.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 10
     z_voxels: 1
     version: "v4"
@@ -33,6 +34,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 10
     z_voxels: 5
     version: "v4"
@@ -43,6 +45,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "20.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 1
     version: "v4"
@@ -53,6 +56,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v4"

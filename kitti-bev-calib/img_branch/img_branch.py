@@ -315,32 +315,7 @@ class Cam2BEV(nn.Module):
         # expand(B, Nprime // B).reshape(-1, 1)
         geom_feats = torch.cat([geom_feats, batch_ix], 1)
 
-        nx0_int, nx1_int, nx2_int = int(self.nx[0]), int(self.nx[1]), int(self.nx[2])
-
-        # filter out points that are outside box
-        kept = (
-            (geom_feats[:, 0] >= 0)
-            & (geom_feats[:, 0] < nx0_int)
-            & (geom_feats[:, 1] >= 0)
-            & (geom_feats[:, 1] < nx1_int)
-            & (geom_feats[:, 2] >= 0)
-            & (geom_feats[:, 2] < nx2_int)
-        )
-        img_pc = img_pc[kept]
-        geom_feats = geom_feats[kept]
-
-        try:
-            # (B, out_channels, nx[2], nx[0], nx[1])
-            cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) 
-        except Exception as e:
-            print(
-                f"[ERROR] bev_pool CUDA failed: {e}. "
-                f"Returning zeros — image branch gradient will be zero this step. "
-                f"Input: img_pc={img_pc.shape}, geom_feats={geom_feats.shape}, B={B}",
-                file=sys.stderr, flush=True
-            )
-            cam_bev = torch.zeros(B, C, nx2_int, nx0_int, nx1_int, device=img_pc.device, dtype=img_pc.dtype)
-
+        cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1])
         cam_bev = torch.cat(cam_bev.unbind(dim=2), 1)
 
         return cam_bev
@@ -365,31 +340,8 @@ class Cam2BEV(nn.Module):
             )
             geom_feats = torch.cat([geom_feats, batch_ix], 1)
 
-            # filter out points that are outside box
-            kept = (
-                (geom_feats[:, 0] >= 0)
-                & (geom_feats[:, 0] < self.nx[0])
-                & (geom_feats[:, 1] >= 0)
-                & (geom_feats[:, 1] < self.nx[1])
-                & (geom_feats[:, 2] >= 0)
-                & (geom_feats[:, 2] < self.nx[2])
-            )
-            img_pc = img_pc[kept]
-            geom_feats = geom_feats[kept]
-            try:
-                # (B, out_channels, nx[2], nx[0], nx[1])
-                cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1]) 
-            except Exception as e:
-                print(
-                    f"[ERROR] ref_bev_pool CUDA failed: {e}. "
-                    f"Returning zeros — mask will be empty. "
-                    f"Input: img_pc={img_pc.shape}, geom_feats={geom_feats.shape}, B={B}",
-                    file=sys.stderr, flush=True
-                )
-                cam_bev = torch.zeros(B, C, self.nx[2].item(), self.nx[0].item(), self.nx[1].item(), device=img_pc.device, dtype=img_pc.dtype)
-
+            cam_bev = bev_pool(img_pc, geom_feats, B, self.nx[2], self.nx[0], self.nx[1])
             binary_bev = torch.max(cam_bev, dim=2)[0]
-            
             binary_bev = (binary_bev != 0).float()
 
         return binary_bev

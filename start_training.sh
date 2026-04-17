@@ -38,6 +38,8 @@
 #   --augment_pc_dropout R 点云随机丢弃比例 (默认: 0.0)
 #   --augment_color_jitter S 图像色彩抖动强度 (默认: 0.0)
 #   --augment_intrinsic S  相机内参随机扰动强度 (默认: 0.0, e.g. 0.05=±5%)
+#   --augment_pitch_flip_prob P  GT pitch翻转增强概率 (默认: 0.0=禁用)
+#   --augment_pitch_flip_max_deg D  pitch翻转最大旋转角 (默认: 6.0°)
 #   --early_stopping_patience N 早停耐心值 (默认: 0=禁用)
 #   --seed N               全局随机种子 (默认: 42)
 #   --pretrain_ckpt PATH   预训练权重路径 (用于refine/finetune训练)
@@ -344,6 +346,16 @@ while [[ $# -gt 0 ]]; do
             AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
         --augment_intrinsic)
             AUGMENT_INTRINSIC="$2"; shift 2 ;;
+        --augment_pitch_flip_prob)
+            AUGMENT_PITCH_FLIP_PROB="$2"; shift 2 ;;
+        --augment_pitch_flip_max_deg)
+            AUGMENT_PITCH_FLIP_MAX_DEG="$2"; shift 2 ;;
+        --voxel_mode)
+            VOXEL_MODE="$2"; shift 2 ;;
+        --to_bev_mode)
+            TO_BEV_MODE="$2"; shift 2 ;;
+        --scatter_reduce)
+            SCATTER_REDUCE="$2"; shift 2 ;;
         --eval_angle)
             EVAL_ANGLE="$2"; shift 2 ;;
         --early_stopping_patience)
@@ -900,6 +912,8 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
     [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
     [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic $AUGMENT_INTRINSIC"
+    [ -n "$AUGMENT_PITCH_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_prob $AUGMENT_PITCH_FLIP_PROB"
+    [ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
     [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
@@ -916,6 +930,9 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
     [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
+    [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
+    [ -n "$TO_BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --to_bev_mode $TO_BEV_MODE"
+    [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
@@ -1011,6 +1028,8 @@ else
     [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
     [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
     [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic $AUGMENT_INTRINSIC"
+    [ -n "$AUGMENT_PITCH_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_prob $AUGMENT_PITCH_FLIP_PROB"
+    [ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
     [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
@@ -1027,6 +1046,9 @@ else
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
     [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
+    [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
+    [ -n "$TO_BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --to_bev_mode $TO_BEV_MODE"
+    [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"

@@ -100,6 +100,9 @@ class BEVCalib(nn.Module):
                  use_foundation_depth = False,
                  depth_model_type = "midas_small",
                  fd_mode = "replace",
+                 voxel_mode = "hard",
+                 to_bev_mode = "concat",
+                 scatter_reduce = "sum",
                 ):
         super(BEVCalib, self).__init__()
         self.use_mlp_head = use_mlp_head
@@ -115,7 +118,11 @@ class BEVCalib(nn.Module):
             depth_model_type=depth_model_type,
             fd_mode=fd_mode,
         )
-        self.pc_branch = Lidar2BEV()
+        self.pc_branch = Lidar2BEV(
+            to_bev_mode=to_bev_mode,
+            voxel_mode=voxel_mode,
+            scatter_reduce=scatter_reduce,
+        )
         self.bev_encoder_use = bev_encoder
         if self.bev_encoder_use:
             self.bev_encoder = BEVEncoder()

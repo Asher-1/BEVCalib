@@ -1,0 +1,41 @@
+# DrInfer 转换配置 — V8 Voxel: scatter + sum + learned
+#
+# 用法:
+#   # flat 布局 (快速导出 .bin + .txt)
+#   python utils/torch2drinfer.py --config configs/drinfer_config_v8_scatter_sum_learned.yaml
+#
+#   # pmodel 布局 (完整部署目录)
+#   python utils/torch2drinfer.py --config configs/drinfer_config_v8_scatter_sum_learned.yaml --layout pmodel
+#
+#   # 推理对比
+#   python utils/drinfer_infer.py --config configs/drinfer_config_v8_scatter_sum_learned.yaml --mode compare
+
+dataset_root: /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data
+validate_sample_ratio: 0.2
+deformable: false
+bev_encoder: true
+rotation_only: true
+img_height: 360
+img_width: 640
+max_num_points: 200000
+pc_bev_channels: 128
+bev_height: 100
+bev_width: 100
+bev_zbound_step: '4.0'
+angle_range_deg: 5.0
+trans_range: 0.15
+batch_size: 1
+num_workers: 4
+max_batches: 50
+export_strategy: full
+model_name: bevcalib_fusion_head
+model_version: v2
+inference_backend: drinfer
+device: cuda
+ckpt_path: logs/all_training_data/model_small_5deg_v8_scatter_sum_learned_quick/checkpoint/ckpt_best_val.pth
+export_dir: logs/all_training_data/model_small_5deg_v8_scatter_sum_learned_quick/drinfer
+report_output: logs/all_training_data/model_small_5deg_v8_scatter_sum_learned_quick/drinfer/eval_report.json
+verify_export_graph: true
+voxel_mode: scatter
+scatter_reduce: sum
+to_bev_mode: learned

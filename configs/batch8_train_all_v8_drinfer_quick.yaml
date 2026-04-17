@@ -1,0 +1,167 @@
+# BEVCalib ALL V8 Voxel 模式消融 — 基于 v8_baseline 设置
+#
+# 基座: v8_baseline (ALL冠军: Linear+quat+StepLR+无aug, Z=5, axis=1,1,1)
+# 变量: voxel_mode, scatter_reduce, to_bev_mode
+#
+# 实验矩阵 (6组):
+#
+#   实验                        | voxel  | reduce | to_bev  | 对照
+#   ----------------------------+--------+--------+---------+----------------
+#   0 v8_voxel_baseline         | hard   | -      | concat  | 控制基线 (=v8_baseline)
+#   1 v8_scatter_mean            | scatter| mean   | concat  | vs 0: 密度归一化效果
+#   2 v8_scatter_sum             | scatter| sum    | concat  | vs 0,1: voxel 影响
+#   3 v8_bev_learned             | hard   | -      | learned | vs 0: to_bev 影响
+#   4 v8_scatter_sum_learned     | scatter| sum    | learned | vs 2,3: 组合
+#   5 v8_scatter_mean_learned    | scatter| mean   | learned | vs 1,4: 最优探索
+#
+# 关键对比:
+#   1 vs 0: scatter-mean 是否优于 hard (密度归一化 vs 截断累加)
+#   2 vs 0: scatter-sum 是否精度等效 hard (sum语义一致, 仅浮点差)
+#   3 vs 0: learned BEV 是否优于 concat
+#   5: scatter-mean + learned 是否为最优组合
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v8_voxel_quick.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v8_voxel_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+
+  params:
+    # === 与 v8_baseline 完全一致 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    early_stopping_patience: 30
+    seed: 42
+
+    # === Quick 模式 ===
+    max_frames_per_seq: 500
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V8 Voxel 模式消融 (基座 = v8_baseline: Z=5, axis=1,1,1)
+  # =========================================================================
+
+  # 1. scatter-mean + concat: 密度归一化聚合
+  - name: "v8_scatter_mean"
+    description: "V8 Voxel: scatter-mean + concat (密度归一化)"
+    dataset: "all"
+    version: "v8_scatter_mean_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      voxel_mode: "scatter"
+      scatter_reduce: "mean"
+      to_bev_mode: "concat"
+
+  # 2. scatter-sum + concat: 仅替换 voxel_mode
+  - name: "v8_scatter_sum"
+    description: "V8 Voxel: scatter-sum + concat (drinfer兼容)"
+    dataset: "all"
+    version: "v8_scatter_sum_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      voxel_mode: "scatter"
+      scatter_reduce: "sum"
+      to_bev_mode: "concat"
+
+  # 3. hard + learned BEV: 可学习 Z 投影
+  - name: "v8_bev_learned"
+    description: "V8 Voxel: hard + learned BEV (可学习Z投影)"
+    dataset: "all"
+    version: "v8_bev_learned_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      voxel_mode: "hard"
+      to_bev_mode: "learned"
+
+  # 4. 控制基线: hard + concat (= v8_baseline 精确复现)
+  - name: "v8_voxel_baseline"
+    description: "V8 Voxel: hard + concat 控制基线 (=v8_baseline)"
+    dataset: "all"
+    version: "v8_voxel_baseline_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      voxel_mode: "hard"
+      to_bev_mode: "concat"
+
+  # 5. scatter-sum + learned: drinfer 兼容 + 可学习 BEV
+  - name: "v8_scatter_sum_learned"
+    description: "V8 Voxel: scatter-sum + learned (drinfer + 可学习Z投影)"
+    dataset: "all"
+    version: "v8_scatter_sum_learned_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      voxel_mode: "scatter"
+      scatter_reduce: "sum"
+      to_bev_mode: "learned"
+
+  # 6. scatter-mean + learned: 最完整优化组合
+  - name: "v8_scatter_mean_learned"
+    description: "V8 Voxel: scatter-mean + learned (密度归一化 + 可学习Z投影)"
+    dataset: "all"
+    version: "v8_scatter_mean_learned_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      voxel_mode: "scatter"
+      scatter_reduce: "mean"
+      to_bev_mode: "learned"
+
+# ============================================================================
+# 消融矩阵 (与 v8_baseline 完全同基座, 仅变 voxel 参数)
+# ============================================================================
+#
+#   实验                     | voxel  | reduce | to_bev  | drinfer | 预期 vs baseline
+#   -------------------------+--------+--------+---------+---------+-----------------
+#   1 v8_scatter_mean         | scatter| mean   | concat  | 是      | 可能微降 (归一化)
+#   2 v8_scatter_sum          | scatter| sum    | concat  | 是      | ≈ baseline (cos>0.999)
+#   3 v8_voxel_baseline      | hard   | (sum)  | concat  | 否      | = v8_baseline
+#   4 v8_bev_learned          | hard   | -      | learned | 否      | 待验证 (多参数)
+#   5 v8_scatter_sum_learned  | scatter| sum    | learned | 是      | 待验证
+#   6 v8_scatter_mean_learned | scatter| mean   | learned | 是      | 待验证 (最优?)

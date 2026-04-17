@@ -77,7 +77,7 @@ class QuickCumsumCudaV2(torch.autograd.Function):
         return x_grad, None, None, None, None, None, None, None
 
 
-def bev_pool_ext(feats, coords, B, D, H, W):
+def bev_pool_custom(feats, coords, B, D, H, W):
     assert feats.shape[0] == coords.shape[0]
 
     ranks = (
@@ -104,22 +104,29 @@ def bev_pool_ext(feats, coords, B, D, H, W):
 
 
 def bev_pool_drcv(feats, coords, B, D, H, W):
-    """BEV pool via drcv bev_pool_v2.
+    """BEV pool via drcv bev_pool_v2 (training backend, NOT JIT-traceable).
 
-    The drcv kernel computes:  out[ranks_bev[i]] += depth[ranks_depth[i]] * feat[ranks_feat[i]]
-    We set depth=1 for every point to bypass depth weighting and directly scatter feats.
+    Accepts unfiltered feats/coords; out-of-bounds are filtered internally.
+    Uses ``QuickCumsumCuda`` (autograd.Function) for gradient support.
+    For DrInfer export use ``bev_pool_scatter`` instead.
 
     coords layout: (N, 4) = [x_voxel, y_voxel, z_voxel, batch_idx]
-    Output shape from bev_pool_v2_func: (B, C, D, H, W)  (permuted inside bev_pool_v2_func).
-    ranks_bev = flat index into (B, D, H, W):
-      batch*(D*H*W) + z*(H*W) + x*W + y
-      = coords[:,3]*(D*H*W) + coords[:,2]*(H*W) + coords[:,0]*W + coords[:,1]
+    Output: (B, C, D, H, W)
     """
     from drcv.ops.bev_pool_v2 import bev_pool_v2_func
     assert feats.shape[0] == coords.shape[0]
-    N = feats.shape[0]
     C = feats.shape[1]
     D_int, H_int, W_int = int(D), int(H), int(W)
+
+    kept = (
+        (coords[:, 0] >= 0) & (coords[:, 0] < H_int)
+        & (coords[:, 1] >= 0) & (coords[:, 1] < W_int)
+        & (coords[:, 2] >= 0) & (coords[:, 2] < D_int)
+        & (coords[:, 3] >= 0) & (coords[:, 3] < B)
+    )
+    feats = feats[kept]
+    coords = coords[kept]
+    N = feats.shape[0]
     if N == 0:
         return feats.new_zeros((B, C, D_int, H_int, W_int))
 
@@ -155,32 +162,111 @@ def bev_pool_drcv(feats, coords, B, D, H, W):
     )
     return x
 
+def bev_pool_scatter(feats, coords, B, D, H, W):
+    """JIT-traceable BEV pool using scatter_add (no custom CUDA extension).
+
+    Accepts UNFILTERED feats/coords (the caller should NOT boolean-index
+    with `kept`).  Invalid coordinates are handled via masking: their
+    features are zeroed so scatter_add is a no-op for those positions.
+
+    coords layout: (N, 4) = [x_voxel, y_voxel, z_voxel, batch_idx]  (long)
+    Output: (B, C, D, H, W)
+    """
+    C = feats.shape[1]
+    D_int, H_int, W_int = int(D), int(H), int(W)
+    total = B * D_int * H_int * W_int
+
+    valid = (
+        (coords[:, 0] >= 0) & (coords[:, 0] < H_int)
+        & (coords[:, 1] >= 0) & (coords[:, 1] < W_int)
+        & (coords[:, 2] >= 0) & (coords[:, 2] < D_int)
+        & (coords[:, 3] >= 0) & (coords[:, 3] < B)
+    ).unsqueeze(-1).float()
+
+    feats_masked = feats * valid
+
+    flat_idx = (
+        coords[:, 3] * (D_int * H_int * W_int)
+        + coords[:, 2] * (H_int * W_int)
+        + coords[:, 0] * W_int
+        + coords[:, 1]
+    ).clamp(0, total - 1).long()
+
+    out_flat = feats.new_zeros(total, C)
+    out_flat.scatter_add_(0, flat_idx.unsqueeze(-1).expand(-1, C), feats_masked)
+
+    return out_flat.view(B, D_int, H_int, W_int, C).permute(0, 4, 1, 2, 3).contiguous()
+
+
+_USE_SCATTER = True
+
+def set_bev_pool_backend(use_scatter: bool):
+    """Switch bev_pool between scatter (traceable) and drcv (faster CUDA)."""
+    global _USE_SCATTER
+    _USE_SCATTER = use_scatter
+
+
 def bev_pool(feats, coords, B, D, H, W):
+    if _USE_SCATTER:
+        return bev_pool_scatter(feats, coords, B, D, H, W)
     return bev_pool_drcv(feats, coords, B, D, H, W)
 
 if __name__ == "__main__":
     torch.manual_seed(42)
-    N, C = 200, 128
-    B, D, H, W = 2, 5, 10, 10
 
-    feats = torch.randn(N, C, device="cuda")
-    coords = torch.stack([
-        torch.randint(0, H, (N,)),   # x_voxel in [0, H)
-        torch.randint(0, W, (N,)),   # y_voxel in [0, W)
-        torch.randint(0, D, (N,)),   # z_voxel in [0, D)
-        torch.randint(0, B, (N,)),   # batch_idx in [0, B)
-    ], dim=1).to("cuda")
+    def _run_test(N, C, B, D, H, W, include_oob=False):
+        print("=" * 60)
+        tag = f"N={N}, C={C}, B={B}, D={D}, H={H}, W={W}"
+        if include_oob:
+            tag += " (with out-of-bounds coords)"
+        print(f"Test: {tag}")
+        print("=" * 60)
 
-    print("=" * 60)
-    print(f"Test: N={N}, C={C}, B={B}, D={D}, H={H}, W={W}")
-    print("=" * 60)
+        feats = torch.randn(N, C, device="cuda")
+        if include_oob:
+            coords = torch.stack([
+                torch.randint(-5, H + 5, (N,)),
+                torch.randint(-5, W + 5, (N,)),
+                torch.randint(-2, D + 2, (N,)),
+                torch.randint(0, B, (N,)),
+            ], dim=1).to("cuda")
+        else:
+            coords = torch.stack([
+                torch.randint(0, H, (N,)),
+                torch.randint(0, W, (N,)),
+                torch.randint(0, D, (N,)),
+                torch.randint(0, B, (N,)),
+            ], dim=1).to("cuda")
 
-    x_drcv = bev_pool_drcv(feats, coords, B, D, H, W)
-    print(f"\n[drcv]  shape={x_drcv.shape}, non-zero={int((x_drcv != 0).sum())}, nan={torch.isnan(x_drcv).any().item()}")
+        kept = (
+            (coords[:, 0] >= 0) & (coords[:, 0] < H)
+            & (coords[:, 1] >= 0) & (coords[:, 1] < W)
+            & (coords[:, 2] >= 0) & (coords[:, 2] < D)
+        )
+        feats_f, coords_f = feats[kept], coords[kept]
+        n_valid = int(kept.sum())
 
-    x_ext = bev_pool_ext(feats, coords, B, D, H, W)
-    print(f"[ext]   shape={x_ext.shape}, non-zero={int((x_ext != 0).sum())}, nan={torch.isnan(x_ext).any().item()}")
+        x_drcv = bev_pool_drcv(feats_f, coords_f, B, D, H, W)
+        print(f"[drcv]    shape={x_drcv.shape}, nonzero={int((x_drcv!=0).sum()):>8}, "
+              f"nan={torch.isnan(x_drcv).any().item()}")
 
-    diff = (x_drcv - x_ext).abs()
-    print(f"\n[compare] max_diff={diff.max().item():.6e}, mean_diff={diff.mean().item():.6e}")
-    print("MATCH" if diff.max().item() < 1e-5 else "MISMATCH")
+        x_custom = bev_pool_custom(feats_f, coords_f, B, D, H, W)
+        print(f"[custom]  shape={x_custom.shape}, nonzero={int((x_custom!=0).sum()):>8}, "
+              f"nan={torch.isnan(x_custom).any().item()}")
+
+        x_scatter = bev_pool_scatter(feats, coords, B, D, H, W)
+        print(f"[scatter] shape={x_scatter.shape}, nonzero={int((x_scatter!=0).sum()):>8}, "
+              f"nan={torch.isnan(x_scatter).any().item()}  "
+              f"(unfiltered, {n_valid}/{N} valid)")
+
+        d1 = (x_drcv - x_custom).abs()
+        d2 = (x_drcv - x_scatter).abs()
+        print(f"\n[drcv vs custom]  max={d1.max().item():.6e}, mean={d1.mean().item():.6e}  "
+              f"{'MATCH' if d1.max().item() < 1e-4 else 'MISMATCH'}")
+        print(f"[drcv vs scatter] max={d2.max().item():.6e}, mean={d2.mean().item():.6e}  "
+              f"{'MATCH' if d2.max().item() < 1e-4 else 'MISMATCH'}")
+        print()
+
+    _run_test(200, 128, 2, 5, 10, 10)
+    _run_test(5000, 128, 1, 5, 100, 100)
+    _run_test(50000, 128, 1, 5, 100, 100, include_oob=True)

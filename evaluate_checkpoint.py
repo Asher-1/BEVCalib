@@ -24,6 +24,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'kitti-bev-calib'))
 if '--use_drcv' in sys.argv:
     os.environ['USE_DRCV_BACKEND'] = '1'
 
+# Auto-detect backend from checkpoint before heavy imports.
+# Checkpoints trained with spconv have 5D ".weight" keys in sparse_encoder;
+# drcv checkpoints use ".kernel" keys instead.
+if 'USE_DRCV_BACKEND' not in os.environ:
+    _ckpt_path = None
+    for _i, _a in enumerate(sys.argv):
+        if _a == '--ckpt_path' and _i + 1 < len(sys.argv):
+            _ckpt_path = sys.argv[_i + 1]
+            break
+    if _ckpt_path and os.path.exists(_ckpt_path):
+        _sd = torch.load(_ckpt_path, map_location='cpu').get('model_state_dict', {})
+        _pc_keys = [k for k in _sd if k.startswith('pc_branch.sparse_encoder')]
+        if any('.kernel' in k for k in _pc_keys):
+            os.environ['USE_DRCV_BACKEND'] = '1'
+        elif any(k.endswith('.weight') and len(_sd[k].shape) == 5 for k in _pc_keys):
+            os.environ['USE_DRCV_BACKEND'] = '0'
+            print(f"[Auto-detect] Checkpoint uses spconv backend → USE_DRCV_BACKEND=0")
+        del _sd, _pc_keys
+    if '_ckpt_path' in dir():
+        del _ckpt_path
+
 from custom_dataset import CustomDataset
 from bev_calib import BEVCalib
 from tools import generate_single_perturbation_from_T
@@ -249,6 +270,61 @@ def _auto_permute_spconv_weights(state_dict, model):
     return state_dict
 
 
+def _adapt_model_to_checkpoint(model, state_dict, device):
+    """Adapt model's ProjectionHead and SpconvToDenseBEV dimensions to match checkpoint.
+
+    Older checkpoints were trained when the drcv SparseEncoder conv_out had stride-2
+    in Z (matching spconv), yielding a different n_z for SpconvToDenseBEV concat mode.
+    The current drcv conv_out uses stride-1, changing n_z and thus proj_head embedding_dim.
+    This function detects the mismatch and rebuilds the affected modules so that
+    load_state_dict succeeds and the forward pass reproduces training behavior
+    (Z indices beyond n_z are clamped, matching what happened during training).
+    """
+    from proj_head import ProjectionHead
+
+    adapted = False
+    for branch_name in ('img_branch', 'pc_branch'):
+        proj_key = f'{branch_name}.proj_head.projection.weight'
+        if proj_key not in state_dict:
+            continue
+
+        ckpt_shape = state_dict[proj_key].shape
+        model_params = dict(model.named_parameters())
+        if proj_key not in model_params:
+            continue
+        model_shape = model_params[proj_key].shape
+
+        if ckpt_shape == model_shape:
+            continue
+
+        ckpt_embedding_dim = ckpt_shape[1]
+        ckpt_projection_dim = ckpt_shape[0]
+
+        branch = getattr(model, branch_name)
+
+        if branch_name == 'pc_branch' and hasattr(branch, 'sparse_encoder'):
+            encoder = branch.sparse_encoder
+            if hasattr(encoder, 'to_bev') and encoder.to_bev.mode == 'concat':
+                old_n_z = encoder.to_bev.n_z
+                new_n_z = ckpt_embedding_dim // encoder.to_bev.in_channels
+                if new_n_z * encoder.to_bev.in_channels == ckpt_embedding_dim and new_n_z != old_n_z:
+                    encoder.to_bev.n_z = new_n_z
+                    encoder.to_bev.out_channels = ckpt_embedding_dim
+                    print(f"   [Adapt] {branch_name}.sparse_encoder.to_bev: "
+                          f"n_z {old_n_z} → {new_n_z}")
+
+        branch.proj_head = ProjectionHead(
+            embedding_dim=ckpt_embedding_dim,
+            projection_dim=ckpt_projection_dim,
+        ).to(device)
+        print(f"   [Adapt] {branch_name}.proj_head: "
+              f"embedding_dim {model_shape[1]} → {ckpt_embedding_dim} "
+              f"(matched to checkpoint)")
+        adapted = True
+
+    return adapted
+
+
 def _resolve_perturbation_from_ckpt(args, checkpoint):
     """Auto-resolve perturbation params from checkpoint if not set via CLI.
     
@@ -361,6 +437,10 @@ def evaluate_checkpoint(args):
           f"{' (auto-detected)' if args.use_mlp_head < 0 else ''}")
     _use_fd = getattr(args, 'use_foundation_depth', 0) > 0
     _fd_mode = getattr(args, 'fd_mode', 'replace') if _use_fd else 'replace'
+    ckpt_args = checkpoint.get('args', {})
+    _voxel_mode = args.voxel_mode or ckpt_args.get('voxel_mode', 'hard')
+    _scatter_reduce = args.scatter_reduce or ckpt_args.get('scatter_reduce', 'sum')
+    _to_bev_mode = args.to_bev_mode or ckpt_args.get('to_bev_mode', 'concat')
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
@@ -371,11 +451,17 @@ def evaluate_checkpoint(args):
         use_foundation_depth=_use_fd,
         depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
         fd_mode=_fd_mode,
+        voxel_mode=_voxel_mode,
+        to_bev_mode=_to_bev_mode,
+        scatter_reduce=_scatter_reduce,
     ).to(device)
+    print(f"   Voxel: mode={_voxel_mode}, scatter_reduce={_scatter_reduce}, to_bev={_to_bev_mode}"
+          f"{' (from checkpoint)' if not args.voxel_mode else ''}")
     if _use_fd:
         print(f"   Foundation Depth: model={getattr(args, 'depth_model_type', 'midas_small')}, mode={_fd_mode}")
     
     state_dict = _auto_permute_spconv_weights(state_dict, model)
+    _adapt_model_to_checkpoint(model, state_dict, device)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
         print(f"   Missing keys: {missing}")
@@ -390,6 +476,30 @@ def evaluate_checkpoint(args):
         data_folder=args.dataset_root,
         auto_detect=True
     )
+    
+    # 构建 sample index → sequence 映射表
+    seq_boundaries = []
+    if hasattr(dataset, 'all_files') and dataset.all_files:
+        cur_seq = None
+        cur_start = 0
+        for i, fpath in enumerate(dataset.all_files):
+            seq_id = fpath.split('/')[0]
+            if seq_id != cur_seq:
+                if cur_seq is not None:
+                    seq_boundaries.append((cur_seq, cur_start, i - 1))
+                cur_seq = seq_id
+                cur_start = i
+        if cur_seq is not None:
+            seq_boundaries.append((cur_seq, cur_start, len(dataset.all_files) - 1))
+        print(f"   序列边界映射:")
+        for seq_id, s, e in seq_boundaries:
+            print(f"     Seq {seq_id}: samples {s} - {e} ({e - s + 1} 帧)")
+
+    def _get_sequence_for_sample(sample_idx):
+        for seq_id, s, e in seq_boundaries:
+            if s <= sample_idx <= e:
+                return seq_id
+        return "unknown"
     
     # 根据 use_full_dataset 决定是否使用全量数据
     if args.use_full_dataset:
@@ -438,6 +548,7 @@ def evaluate_checkpoint(args):
         'trans_error': [], 'fwd_error': [], 'lat_error': [], 'ht_error': [],
         'rot_error': [], 'roll_error': [], 'pitch_error': [], 'yaw_error': []
     }
+    sample_sequences = []  # per-sample sequence ID
     gt_extrinsics_written = False
     
     sample_count = 0
@@ -484,10 +595,11 @@ def evaluate_checkpoint(args):
                 
                 save_vis = (vis_interval > 0 and sample_idx % vis_interval == 0)
                 
+                _seq_tag = f" [Seq {_get_sequence_for_sample(sample_idx)}]"
                 if save_vis:
-                    print(f"   处理样本 {sample_idx} (含可视化)...", end='', flush=True)
+                    print(f"   处理样本 {sample_idx}{_seq_tag} (含可视化)...", end='', flush=True)
                 elif sample_idx % 50 == 0:
-                    print(f"   处理样本 {sample_idx}/{max_batches * args.batch_size}...", end='', flush=True)
+                    print(f"   处理样本 {sample_idx}/{max_batches * args.batch_size}{_seq_tag}...", end='', flush=True)
                 
                 if save_vis:
                     vis_image = visualize_batch_projection(
@@ -513,6 +625,10 @@ def evaluate_checkpoint(args):
                 # 计算误差
                 errors = compute_pose_errors(T_pred_np[i], gt_T_to_camera_np[i])
                 
+                # 记录 sequence 归属
+                seq_id = _get_sequence_for_sample(sample_idx)
+                sample_sequences.append(seq_id)
+                
                 # 累积误差
                 for key in all_errors:
                     all_errors[key].append(errors[key])
@@ -526,6 +642,10 @@ def evaluate_checkpoint(args):
                         f.write(f"Dataset: {args.dataset_root}\n")
                         f.write(f"Mode: {eval_mode}\n")
                         f.write(f"Perturbation: {args.angle_range_deg}deg, {args.trans_range}m\n")
+                        if seq_boundaries:
+                            f.write(f"\nSequence Boundaries:\n")
+                            for sb_seq, sb_s, sb_e in seq_boundaries:
+                                f.write(f"  Seq {sb_seq}: samples {sb_s} - {sb_e} ({sb_e - sb_s + 1} frames)\n")
                         f.write(f"="*80 + "\n\n")
                         
                         f.write("Ground Truth Extrinsics (LiDAR → Camera):\n")
@@ -534,7 +654,7 @@ def evaluate_checkpoint(args):
                         f.write("\n" + "="*80 + "\n\n")
                         gt_extrinsics_written = True
                     
-                    f.write(f"Sample {sample_idx:04d}\n")
+                    f.write(f"Sample {sample_idx:04d} [Seq {seq_id}]\n")
                     f.write("-" * 80 + "\n")
                     
                     f.write("\nPredicted Extrinsics (LiDAR → Camera):\n")
@@ -619,11 +739,39 @@ def evaluate_checkpoint(args):
         f.write(f"  Roll  (LiDAR X):  {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
         f.write(f"  Pitch (LiDAR Y):  {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
         f.write(f"  Yaw   (LiDAR Z):  {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
+
+        # Per-sequence statistics
+        if sample_sequences and seq_boundaries:
+            f.write("\n" + "="*80 + "\n")
+            f.write("PER-SEQUENCE STATISTICS\n")
+            f.write("="*80 + "\n\n")
+            rot_arr = np.array(all_errors['rot_error'])
+            roll_arr = np.array(all_errors['roll_error'])
+            pitch_arr = np.array(all_errors['pitch_error'])
+            yaw_arr = np.array(all_errors['yaw_error'])
+            seq_arr = np.array(sample_sequences)
+
+            header = f"{'Seq':<6} {'Samples':>8} {'Rot Mean':>10} {'Rot Std':>10} {'Rot Med':>10} {'Rot P95':>10} {'Rot Max':>10} {'Roll':>8} {'Pitch':>8} {'Yaw':>8}"
+            f.write(f"  {header}\n")
+            f.write(f"  {'-'*len(header)}\n")
+            for sb_seq, sb_s, sb_e in seq_boundaries:
+                mask = seq_arr == sb_seq
+                n = int(mask.sum())
+                if n == 0:
+                    continue
+                sr = rot_arr[mask]
+                f.write(f"  {sb_seq:<6} {n:>8} {np.mean(sr):>10.4f} {np.std(sr):>10.4f} "
+                        f"{np.median(sr):>10.4f} {np.percentile(sr, 95):>10.4f} {np.max(sr):>10.4f} "
+                        f"{np.mean(roll_arr[mask]):>8.4f} {np.mean(pitch_arr[mask]):>8.4f} {np.mean(yaw_arr[mask]):>8.4f}\n")
+            f.write("\n")
         f.write("\n" + "="*80 + "\n")
 
     # ========== 生成评估可视化图表 ==========
     print(f"\n5. 生成评估图表...")
-    _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_only=rotation_only)
+    _generate_eval_charts(all_errors, eval_dir, sample_count, args,
+                          rotation_only=rotation_only,
+                          sample_sequences=sample_sequences,
+                          seq_boundaries=seq_boundaries)
 
     print(f"\n✓ 评估完成！")
     print(f"   - 评估样本数: {sample_count}")
@@ -632,7 +780,9 @@ def evaluate_checkpoint(args):
     print("=" * 80)
 
 
-def _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_only=False):
+def _generate_eval_charts(all_errors, eval_dir, sample_count, args,
+                          rotation_only=False, sample_sequences=None,
+                          seq_boundaries=None):
     """生成评估误差分布可视化图表"""
     charts_dir = os.path.join(eval_dir, "charts")
     os.makedirs(charts_dir, exist_ok=True)
@@ -650,36 +800,56 @@ def _generate_eval_charts(all_errors, eval_dir, sample_count, args, rotation_onl
     ckpt_name = os.path.basename(args.ckpt_path).replace('.pth', '')
     title_suffix = f"({ckpt_name}, {sample_count} samples)"
 
+    # Per-sequence color mapping
+    _SEQ_COLORS = ['#2196F3', '#FF5722', '#4CAF50', '#9C27B0', '#FF9800', '#00BCD4',
+                   '#E91E63', '#8BC34A', '#3F51B5', '#FFEB3B', '#795548', '#607D8B']
+    seq_color_map = {}
+    if seq_boundaries:
+        for i, (sid, _, _) in enumerate(seq_boundaries):
+            seq_color_map[sid] = _SEQ_COLORS[i % len(_SEQ_COLORS)]
+
     def _save(fig, name):
         p = os.path.join(charts_dir, name)
         fig.savefig(p, dpi=150, bbox_inches='tight')
         plt.close(fig)
 
-    # --- Chart 1: Per-sample scatter with mean/P95/max lines ---
+    # --- Chart 1: Per-sample scatter with mean/P95/max lines + sequence coloring ---
     if rotation_only:
         fig, ax2 = plt.subplots(1, 1, figsize=(16, 5))
     else:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
-        ax1.scatter(indices, trans, s=4, alpha=0.4, c='steelblue', label='Per-sample Trans')
+        if sample_sequences and seq_boundaries:
+            for sid, ss, se in seq_boundaries:
+                c = seq_color_map.get(sid, 'steelblue')
+                ax1.scatter(indices[ss:se+1], trans[ss:se+1], s=4, alpha=0.4, c=c, label=f'Seq {sid}')
+            ax1.legend(fontsize=8, loc='upper right', ncol=2, markerscale=3)
+        else:
+            ax1.scatter(indices, trans, s=4, alpha=0.4, c='steelblue', label='Per-sample Trans')
         ax1.axhline(np.mean(trans), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(trans):.4f}m')
-        ax1.axhline(np.median(trans), color='orange', ls='-.', lw=1.5, label=f'Median={np.median(trans):.4f}m')
         ax1.axhline(np.percentile(trans, 95), color='red', ls=':', lw=1.5, label=f'P95={np.percentile(trans, 95):.4f}m')
-        ax1.axhline(np.max(trans), color='darkred', ls='-', lw=1, label=f'Max={np.max(trans):.4f}m')
         ax1.set_ylabel('Translation Error (m)', fontsize=12)
         ax1.set_title(f'Per-Sample Translation Error {title_suffix}', fontsize=13, fontweight='bold')
-        ax1.legend(fontsize=9, loc='upper right')
         ax1.grid(True, alpha=0.3)
 
-    ax2.scatter(indices, rot, s=4, alpha=0.4, c='coral', label='Per-sample Rot')
+    if sample_sequences and seq_boundaries:
+        for sid, ss, se in seq_boundaries:
+            c = seq_color_map.get(sid, 'coral')
+            ax2.scatter(indices[ss:se+1], rot[ss:se+1], s=4, alpha=0.4, c=c, label=f'Seq {sid}')
+        ax2.legend(fontsize=8, loc='upper right', ncol=2, markerscale=3)
+    else:
+        ax2.scatter(indices, rot, s=4, alpha=0.4, c='coral', label='Per-sample Rot')
     ax2.axhline(np.mean(rot), color='green', ls='--', lw=1.5, label=f'Mean={np.mean(rot):.2f}°')
     ax2.axhline(np.median(rot), color='orange', ls='-.', lw=1.5, label=f'Median={np.median(rot):.2f}°')
     ax2.axhline(np.percentile(rot, 95), color='red', ls=':', lw=1.5, label=f'P95={np.percentile(rot, 95):.2f}°')
-    ax2.axhline(np.max(rot), color='darkred', ls='-', lw=1, label=f'Max={np.max(rot):.2f}°')
     ax2.set_xlabel('Sample Index', fontsize=12)
     ax2.set_ylabel('Rotation Error (°)', fontsize=12)
-    ax2.set_title(f'Per-Sample Rotation Error {title_suffix}', fontsize=13, fontweight='bold')
-    ax2.legend(fontsize=9, loc='upper right')
+    ax2.set_title(f'Per-Sample Rotation Error (colored by sequence) {title_suffix}', fontsize=13, fontweight='bold')
     ax2.grid(True, alpha=0.3)
+    # Add sequence boundary vertical lines
+    if seq_boundaries:
+        for sid, ss, se in seq_boundaries:
+            if ss > 0:
+                ax2.axvline(ss, color='gray', ls=':', lw=0.8, alpha=0.5)
 
     plt.tight_layout()
     _save(fig, 'error_scatter_all_samples.png')
@@ -850,6 +1020,10 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
         use_mlp_head = 'rotation_pred.0.weight' in state_dict
     _use_fd = getattr(args, 'use_foundation_depth', 0) > 0
     _fd_mode = getattr(args, 'fd_mode', 'replace') if _use_fd else 'replace'
+    ckpt_args = checkpoint.get('args', {})
+    _voxel_mode = getattr(args, 'voxel_mode', None) or ckpt_args.get('voxel_mode', 'hard')
+    _scatter_reduce = getattr(args, 'scatter_reduce', None) or ckpt_args.get('scatter_reduce', 'sum')
+    _to_bev_mode = getattr(args, 'to_bev_mode', None) or ckpt_args.get('to_bev_mode', 'concat')
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
@@ -860,8 +1034,12 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
         use_foundation_depth=_use_fd,
         depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
         fd_mode=_fd_mode,
+        voxel_mode=_voxel_mode,
+        to_bev_mode=_to_bev_mode,
+        scatter_reduce=_scatter_reduce,
     ).to(device)
     state_dict = _auto_permute_spconv_weights(state_dict, model)
+    _adapt_model_to_checkpoint(model, state_dict, device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
@@ -1701,6 +1879,11 @@ def main():
                        choices=["eval", "compare", "multi_eval"],
                        help="运行模式: eval=单模型评估, compare=两模型对比, multi_eval=多模型泛化评估")
 
+    parser.add_argument("--backend", type=str, default="pytorch",
+                       choices=["pytorch", "drinfer"],
+                       help="推理后端: pytorch=PyTorch模型, drinfer=DrInfer引擎")
+    parser.add_argument("--export_dir", type=str, default=None,
+                       help="DrInfer导出目录 (backend=drinfer时使用, 默认: <ckpt_dir>/drinfer)")
     parser.add_argument("--ckpt_path", type=str, default=None, help="Checkpoint 文件路径 (eval模式)")
     parser.add_argument("--ckpt_path_a", type=str, default=None, help="模型A checkpoint (compare模式)")
     parser.add_argument("--ckpt_path_b", type=str, default=None, help="模型B checkpoint (compare模式)")
@@ -1742,6 +1925,15 @@ def main():
                        help="BEV spatial avg-pool factor (0=disabled, 2=2x2 pool)")
     parser.add_argument("--use_drcv", action='store_true', default=False,
                        help="Use drcv sparse conv backend (env var handled before import)")
+    parser.add_argument("--voxel_mode", type=str, default=None,
+                       choices=["hard", "scatter"],
+                       help="Voxelization mode (auto-detected from checkpoint if omitted)")
+    parser.add_argument("--scatter_reduce", type=str, default=None,
+                       choices=["sum", "mean"],
+                       help="Scatter reduce mode (auto-detected from checkpoint if omitted)")
+    parser.add_argument("--to_bev_mode", type=str, default=None,
+                       choices=["concat", "learned", "sum"],
+                       help="Sparse-to-BEV mode (auto-detected from checkpoint if omitted)")
     parser.add_argument("--eval_seed", type=int, default=42,
                        help="Fixed seed for perturbation generation, ensuring reproducible evaluation (default: 42)")
     parser.add_argument("--use_foundation_depth", type=int, default=0,
@@ -1766,7 +1958,45 @@ def main():
     else:
         if not args.ckpt_path:
             parser.error("eval模式需要 --ckpt_path")
-        evaluate_checkpoint(args)
+        if args.backend == "drinfer":
+            _delegate_to_drinfer(args)
+        else:
+            evaluate_checkpoint(args)
+
+
+def _delegate_to_drinfer(args):
+    """Forward eval to evaluate_drinfer.py when --backend drinfer is specified."""
+    drinfer_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "evaluate_drinfer.py")
+    cmd = [
+        sys.executable, drinfer_script,
+        "--ckpt_path", args.ckpt_path,
+        "--dataset_root", args.dataset_root,
+        "--angle_range_deg", str(args.angle_range_deg or 5.0),
+        "--trans_range", str(args.trans_range or 0.15),
+        "--batch_size", str(args.batch_size),
+        "--rotation_only", str(args.rotation_only if args.rotation_only >= 0 else 1),
+        "--vis_interval", str(args.vis_interval),
+    ]
+    if args.export_dir:
+        cmd.extend(["--export_dir", args.export_dir])
+    if args.output_dir:
+        cmd.extend(["--output_dir", args.output_dir])
+    if args.max_batches > 0:
+        cmd.extend(["--max_batches", str(args.max_batches)])
+    if args.use_full_dataset:
+        cmd.append("--use_full_dataset")
+    if hasattr(args, 'use_drcv') and args.use_drcv:
+        cmd.append("--use_drcv")
+    for param in ("voxel_mode", "scatter_reduce", "to_bev_mode"):
+        val = getattr(args, param, None)
+        if val:
+            cmd.extend([f"--{param}", str(val)])
+    if hasattr(args, 'use_mlp_head') and args.use_mlp_head >= 0:
+        cmd.extend(["--use_mlp_head", str(args.use_mlp_head)])
+
+    print(f"[backend=drinfer] Delegating to: {' '.join(cmd[:4])}...")
+    os.execv(sys.executable, cmd)
 
 if __name__ == "__main__":
     main()

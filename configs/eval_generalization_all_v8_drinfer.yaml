@@ -1,0 +1,92 @@
+# BEVCalib V8 Voxel — DrInfer 泛化性能评估
+#
+# 使用 DrInfer backend 评估 scatter 模式模型的泛化精度
+# 如果 export_dir 下没有 .bin 文件，会自动调用 torch2drinfer.py 转换
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 python run_generalization_eval.py \
+#     --config configs/eval_generalization_all_v8_drinfer.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v8_drinfer"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 1
+  vis_interval: 200
+  timeout: 7200
+
+models:
+  # ========== scatter-mean + concat (DrInfer) ==========
+  - label: "v8-scatter-mean [DrInfer]"
+    dir_name: "model_small_5deg_v8_scatter_mean_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-mean-drinfer"
+    mode_desc: "V8 scatter-mean + concat (DrInfer 推理)"
+
+  # ========== scatter-sum + concat (DrInfer) ==========
+  - label: "v8-scatter-sum [DrInfer]"
+    dir_name: "model_small_5deg_v8_scatter_sum_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-sum-drinfer"
+    mode_desc: "V8 scatter-sum + concat (DrInfer 推理)"
+
+  # ========== scatter-mean + concat (PyTorch 对照) ==========
+  - label: "v8-scatter-mean [PyTorch]"
+    dir_name: "model_small_5deg_v8_scatter_mean_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-mean-pytorch"
+    mode_desc: "V8 scatter-mean + concat (PyTorch 对照)"
+
+  # ========== scatter-sum + concat (PyTorch 对照) ==========
+  - label: "v8-scatter-sum [PyTorch]"
+    dir_name: "model_small_5deg_v8_scatter_sum_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v8-scatter-sum-pytorch"
+    mode_desc: "V8 scatter-sum + concat (PyTorch 对照)"

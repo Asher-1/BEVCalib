@@ -37,6 +37,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v4-z5-best"
@@ -47,6 +48,7 @@ models:
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v4-z5-best-final"
@@ -58,6 +60,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v4-z5-light-aug"
@@ -68,6 +71,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v4-z5-no-aug"
@@ -79,6 +83,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v4-z5-peraxis02"
@@ -90,6 +95,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 5
     version: "v4-z5-intrinsic-aug"
@@ -101,6 +107,7 @@ models:
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "10.0"
     rotation_only: 1
+    use_drcv: 0
     angle_deg: 5
     z_voxels: 2
     version: "v4-z2-reference"
