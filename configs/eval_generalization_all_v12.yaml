@@ -14,9 +14,9 @@
 #     --config configs/eval_generalization_all_v12.yaml
 
 bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
-models_dir: "logs/all_training_data"
+models_dir: "logs/all_training_data/v12_quick"
 test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
-output_dir: "logs/evaluations/generalization_eval_all_v12"
+output_dir: "logs/evaluations/generalization_eval_all_v12_quick"
 eval_script: "evaluate_checkpoint.py"
 
 eval_params:
@@ -107,6 +107,7 @@ models:
   # ==================== 基线 ====================
 
   - label: "all-v6-champion"
+    base_dir: "logs/all_training_data"
     dir_name: "v6/model_small_5deg_v6_linear_baseline"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
@@ -119,6 +120,7 @@ models:
     mode_desc: "ALL V6 泛化冠军 0.291"
 
   - label: "all-v8-z10-pitch3"
+    base_dir: "logs/all_training_data"
     dir_name: "v8/model_small_5deg_v8_z10_pitch_wt3"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"

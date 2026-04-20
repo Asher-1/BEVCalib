@@ -84,7 +84,8 @@ models:
 
   # ===== 基准: v4-z5-no-tail (v4最佳, 泛化=0.651°) =====
   - label: "v4-z5-no-tail"
-    dir_name: "../v4/model_small_5deg_v4_z5_no_tail"
+    base_dir: "logs/all_training_data"
+    dir_name: "v4/model_small_5deg_v4_z5_no_tail"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
@@ -96,7 +97,8 @@ models:
 
   # ===== 基准: v1-champion (全局#1, 泛化=0.431°) =====
   - label: "v1-champion"
-    dir_name: "../../B26A/v1/model_small_5deg_v7_opt_axis05"
+    base_dir: "logs"
+    dir_name: "B26A/v1/model_small_5deg_v7_opt_axis05"
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1

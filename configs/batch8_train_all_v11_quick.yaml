@@ -100,7 +100,7 @@ defaults:
     grad_accum_steps: 1        # 梯度累积步数 
 
     voxel_mode: "scatter"
-    scatter_reduce: "sum"
+    scatter_reduce: "mean"
     to_bev_mode: "concat"
 
     # === 运行模式 ===

@@ -41,7 +41,7 @@ models:
     angle_deg: 5
     z_voxels: 5
     voxel_mode: "scatter"
-    scatter_reduce: "sum"
+    scatter_reduce: "mean"
     to_bev_mode: "concat"
     version: "v11-baseline"
     mode_desc: "ALL V11 V6复现 (Z=5+1,1,1, 13seq 124K帧)"
@@ -56,7 +56,7 @@ models:
     angle_deg: 5
     z_voxels: 10
     voxel_mode: "scatter"
-    scatter_reduce: "sum"
+    scatter_reduce: "mean"
     to_bev_mode: "concat"
     version: "v11-z10-pitch3"
     mode_desc: "ALL V11 Z=10+pitch3 (V8/V9最佳组合)"
@@ -71,7 +71,7 @@ models:
     angle_deg: 5
     z_voxels: 10
     voxel_mode: "scatter"
-    scatter_reduce: "sum"
+    scatter_reduce: "mean"
     to_bev_mode: "concat"
     version: "v11-z10"
     mode_desc: "ALL V11 Z=10 only (隔离Z分辨率增益)"
@@ -86,7 +86,7 @@ models:
     angle_deg: 5
     z_voxels: 10
     voxel_mode: "scatter"
-    scatter_reduce: "sum"
+    scatter_reduce: "mean"
     to_bev_mode: "concat"
     version: "v11-z10-pitch3-warm"
     mode_desc: "ALL V11 Z=10+pitch3+warmup10 (大数据集warmup)"
@@ -101,7 +101,7 @@ models:
     angle_deg: 5
     z_voxels: 10
     voxel_mode: "scatter"
-    scatter_reduce: "sum"
+    scatter_reduce: "mean"
     to_bev_mode: "concat"
     version: "v11-z10-pitch5"
     mode_desc: "ALL V11 Z=10+pitch5 (Pitch极限测试)"
@@ -109,7 +109,8 @@ models:
   # ==================== 基线 ====================
 
   - label: "all-v6-champion"
-    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    base_dir: "logs/all_training_data"
+    dir_name: "v6/model_small_5deg_v6_linear_baseline"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1

@@ -298,6 +298,16 @@ def parse_train_log_final(log_path):
     return last_train
 
 
+def _resolve_model_base(mcfg):
+    """Resolve model base directory, respecting per-model base_dir override."""
+    per_model_base_dir = mcfg.get("base_dir")
+    if per_model_base_dir:
+        if not os.path.isabs(per_model_base_dir):
+            per_model_base_dir = os.path.join(BEVCALIB_ROOT, per_model_base_dir)
+        return os.path.join(per_model_base_dir, mcfg["dir_name"])
+    return os.path.join(MODELS_DIR, mcfg["dir_name"])
+
+
 def run_evaluations():
     """Run evaluations for all models, skip completed ones."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -316,7 +326,7 @@ def run_evaluations():
             import shutil
             shutil.rmtree(per_model_dir, ignore_errors=True)
 
-        model_base = os.path.join(MODELS_DIR, mcfg["dir_name"])
+        model_base = _resolve_model_base(mcfg)
         ckpt_path = os.path.join(model_base,
                                  os.path.basename(MODELS_DIR) +
                                 "_scratch/checkpoint", mcfg["ckpt"])
@@ -350,7 +360,7 @@ def run_evaluations():
                 os.path.dirname(EVAL_SCRIPT), "evaluate_drinfer.py")
             export_dir = mcfg.get("export_dir", "")
             if not export_dir:
-                model_base_dr = os.path.join(MODELS_DIR, mcfg["dir_name"])
+                model_base_dr = _resolve_model_base(mcfg)
                 export_dir = os.path.join(model_base_dr, "drinfer")
             cmd = [
                 sys.executable, drinfer_eval_script,
@@ -447,7 +457,7 @@ def run_evaluations():
         extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
         if os.path.isfile(extrinsics_path):
             continue
-        alt_path = os.path.join(MODELS_DIR, mcfg["dir_name"],
+        alt_path = os.path.join(_resolve_model_base(mcfg),
                                  "test_data_eval/extrinsics_and_errors.txt")
         if os.path.isfile(alt_path):
             with open(alt_path, 'r') as f:
@@ -474,7 +484,7 @@ def collect_all_stats():
         if stats:
             stats['label'] = label
             stats['config'] = mcfg
-            train_log = os.path.join(MODELS_DIR, mcfg["dir_name"], "train.log")
+            train_log = os.path.join(_resolve_model_base(mcfg), "train.log")
             train_metrics = parse_train_log_final(train_log)
             stats['train_metrics'] = train_metrics
             all_stats.append(stats)
@@ -668,7 +678,7 @@ def generate_projection_comparison(all_stats):
             per_model_dir = os.path.join(OUTPUT_DIR, label)
             img_path = os.path.join(per_model_dir, f"sample_{sample_idx:04d}_projection.png")
             if not os.path.isfile(img_path):
-                alt_dir = os.path.join(MODELS_DIR, mcfg["dir_name"], "test_data_eval")
+                alt_dir = os.path.join(_resolve_model_base(mcfg), "test_data_eval")
                 img_path = os.path.join(alt_dir, f"sample_{sample_idx:04d}_projection.png")
             if os.path.isfile(img_path):
                 img = cv2.imread(img_path)

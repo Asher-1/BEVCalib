@@ -189,7 +189,8 @@ models:
   # ==================== 历史基线 ====================
 
   - label: "all-v6-champion"
-    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    base_dir: "logs/all_training_data"
+    dir_name: "v6/model_small_5deg_v6_linear_baseline"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1

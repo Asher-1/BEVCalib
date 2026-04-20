@@ -15,9 +15,9 @@
 #     --config configs/eval_generalization_all_v13_depth.yaml
 
 bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
-models_dir: "logs/all_training_data/v13_depth"
+models_dir: "logs/all_training_data/v13_depth_quick"
 test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
-output_dir: "logs/evaluations/generalization_eval_all_v13_depth"
+output_dir: "logs/evaluations/generalization_eval_all_v13_depth_quick"
 eval_script: "evaluate_checkpoint.py"
 
 eval_params:
@@ -31,7 +31,7 @@ models:
   # ==================== V13 ALL Depth (4组) ====================
 
   - label: "v13-fd-replace-v2"
-    dir_name: "model_small_5deg_v13_fd_replace_v2"
+    dir_name: "model_small_5deg_v13_fd_replace_v2_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
@@ -50,7 +50,7 @@ models:
     mode_desc: "ALL V13A Fixed FD replace_v2 (SpatialAligner)"
 
   - label: "v13-fd-dual-path"
-    dir_name: "model_small_5deg_v13_fd_dual_path"
+    dir_name: "model_small_5deg_v13_fd_dual_path_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
@@ -68,8 +68,9 @@ models:
     version: "v13-fd-dual-path"
     mode_desc: "ALL V13B Dual-path (FD depth + features)"
 
+  # fd_supervision_quick
   - label: "v13-fd-supervision"
-    dir_name: "model_small_5deg_v13_fd_supervision"
+    dir_name: "model_small_5deg_v13_fd_supervision_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
@@ -88,7 +89,7 @@ models:
     mode_desc: "ALL V13C LSS + FD depth supervision (alpha=0.5)"
 
   - label: "v13-baseline"
-    dir_name: "model_small_5deg_v13_baseline"
+    dir_name: "model_small_5deg_v13_baseline_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1
@@ -105,7 +106,8 @@ models:
   # ==================== 基线 ====================
 
   - label: "all-v6-champion"
-    dir_name: "../../all_training_data/v6/model_small_5deg_v6_linear_baseline"
+    base_dir: "logs/all_training_data"
+    dir_name: "v6/model_small_5deg_v6_linear_baseline"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
@@ -117,7 +119,8 @@ models:
     mode_desc: "ALL V6 泛化冠军 0.291"
 
   - label: "all-v8-z10-pitch3"
-    dir_name: "../../all_training_data/v8/model_small_5deg_v8_z10_pitch_wt3"
+    base_dir: "logs/all_training_data"
+    dir_name: "v8/model_small_5deg_v8_z10_pitch_wt3"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
     rotation_only: 1

@@ -983,7 +983,7 @@ def main():
                     if fd_mode == "supervision" and use_foundation_depth:
                         ds_loss = raw_model.img_branch.get_depth_supervision_loss(alpha=args.depth_sup_alpha)
                         total_loss = total_loss + ds_loss
-                        loss["depth_sup_loss"] = ds_loss.item()
+                        loss["depth_sup_loss"] = ds_loss
                     if grad_accum_steps > 1:
                         total_loss = total_loss / grad_accum_steps
                 if _bwd_ev is not None:
