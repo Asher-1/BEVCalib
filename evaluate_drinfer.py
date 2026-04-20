@@ -61,6 +61,7 @@ def _auto_export_if_needed(args, export_dir, rotation_only):
     cfg = {
         "ckpt_path": args.ckpt_path,
         "export_dir": export_dir,
+        "dataset_root": args.dataset_root,
         "img_height": args.target_height,
         "img_width": args.target_width,
         "max_num_points": args.max_num_points,
@@ -73,6 +74,7 @@ def _auto_export_if_needed(args, export_dir, rotation_only):
         "model_version": args.model_version,
         "verify_export_graph": True,
         "export_strategy": "full",
+        "max_attn_tokens": args.max_attn_tokens,
     }
 
     tmp_cfg = tempfile.NamedTemporaryFile(
@@ -131,6 +133,8 @@ def parse_args():
     p.add_argument("--max_num_points", type=int, default=200000)
     p.add_argument("--model_name", type=str, default="bevcalib_fusion_head")
     p.add_argument("--model_version", type=str, default="v2")
+    p.add_argument("--max_attn_tokens", type=int, default=800,
+                   help="Token packing limit for transformer (0=disabled, 800=default)")
     p.add_argument("--eval_seed", type=int, default=42)
     p.add_argument("--compare_pytorch", action="store_true",
                    help="Also run PyTorch inference and append comparison stats")
@@ -368,6 +372,7 @@ def main():
         voxel_mode=args.voxel_mode,
         to_bev_mode=args.to_bev_mode,
         scatter_reduce=args.scatter_reduce,
+        max_attn_tokens=args.max_attn_tokens,
     )
 
     from drinfer_infer import DrInferBackend

@@ -34,6 +34,7 @@ bev_width: 100
 
 # -- BEV settings --------------------------------------------------------------
 bev_zbound_step: "4.0"   # z5: step=4.0 (5 Z-voxels)
+max_attn_tokens: 800     # valid tokens ~735 (7.3% of 10000); 800 covers all with tight margin
 
 # -- Evaluation parameters -----------------------------------------------------
 angle_range_deg: 5.0

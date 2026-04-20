@@ -348,6 +348,7 @@ def run_evaluations():
         env = os.environ.copy()
         env.pop("USE_DRCV_BACKEND", None)
         env["BEV_ZBOUND_STEP"] = mcfg["bev_zbound_step"]
+        env["HF_HUB_OFFLINE"] = "1"
         for env_key in ("BEV_XBOUND_MIN", "BEV_XBOUND_MAX",
                         "BEV_YBOUND_MIN", "BEV_YBOUND_MAX", "BEV_XY_STEP"):
             if env_key.lower() in mcfg:
@@ -382,6 +383,10 @@ def run_evaluations():
                 cmd.extend(["--model_name", str(mcfg["model_name"])])
             if mcfg.get("model_version"):
                 cmd.extend(["--model_version", str(mcfg["model_version"])])
+            if mcfg.get("max_attn_tokens") is not None:
+                cmd.extend(["--max_attn_tokens", str(mcfg["max_attn_tokens"])])
+            if mcfg.get("use_drcv"):
+                cmd.append("--use_drcv")
         else:
             cmd = [
                 sys.executable, EVAL_SCRIPT,

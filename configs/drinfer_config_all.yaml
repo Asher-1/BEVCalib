@@ -34,6 +34,7 @@ bev_width: 100
 
 # -- BEV settings --------------------------------------------------------------
 bev_zbound_step: "2.0"   # z10: step=2.0 (10 Z-voxels)
+max_attn_tokens: 800     # valid tokens ~735 (7.3% of 10000); 800 covers all with tight margin
 # voxel_mode: scatter — 导出默认 scatter (drinfer trace 兼容), 训练默认 hard
 # to_bev_mode: concat — 必须与训练配置一致 (concat/learned/sum)
 

@@ -21,8 +21,10 @@ eval_params:
   timeout: 7200
 
 models:
+  # ==================== concat 模式 ====================
+
   # ========== scatter-mean + concat (DrInfer) ==========
-  - label: "v8-scatter-mean [DrInfer]"
+  - label: "v8-scatter-mean-concat [DrInfer]"
     dir_name: "model_small_5deg_v8_scatter_mean_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
@@ -30,6 +32,8 @@ models:
     use_drcv: 1
     use_mlp_head: 0
     backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
     model_name: "bevcalib_fusion_head"
     model_version: "v2"
     voxel_mode: "scatter"
@@ -37,11 +41,11 @@ models:
     to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 5
-    version: "v8-scatter-mean-drinfer"
-    mode_desc: "V8 scatter-mean + concat (DrInfer 推理)"
+    version: "v8-scatter-mean-concat-drinfer"
+    mode_desc: "V8 scatter-mean + concat (DrInfer + PyTorch 对照)"
 
   # ========== scatter-sum + concat (DrInfer) ==========
-  - label: "v8-scatter-sum [DrInfer]"
+  - label: "v8-scatter-sum-concat [DrInfer]"
     dir_name: "model_small_5deg_v8_scatter_sum_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
@@ -49,6 +53,8 @@ models:
     use_drcv: 1
     use_mlp_head: 0
     backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
     model_name: "bevcalib_fusion_head"
     model_version: "v2"
     voxel_mode: "scatter"
@@ -56,37 +62,49 @@ models:
     to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 5
-    version: "v8-scatter-sum-drinfer"
-    mode_desc: "V8 scatter-sum + concat (DrInfer 推理)"
+    version: "v8-scatter-sum-concat-drinfer"
+    mode_desc: "V8 scatter-sum + concat (DrInfer + PyTorch 对照)"
 
-  # ========== scatter-mean + concat (PyTorch 对照) ==========
-  - label: "v8-scatter-mean [PyTorch]"
-    dir_name: "model_small_5deg_v8_scatter_mean_quick"
+  # ==================== learned 模式 ====================
+
+  # ========== scatter-mean + learned (DrInfer) ==========
+  - label: "v8-scatter-mean-learned [DrInfer]"
+    dir_name: "model_small_5deg_v8_scatter_mean_learned_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
     use_drcv: 1
     use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
     voxel_mode: "scatter"
     scatter_reduce: "mean"
-    to_bev_mode: "concat"
+    to_bev_mode: "learned"
     angle_deg: 5
     z_voxels: 5
-    version: "v8-scatter-mean-pytorch"
-    mode_desc: "V8 scatter-mean + concat (PyTorch 对照)"
+    version: "v8-scatter-mean-learned-drinfer"
+    mode_desc: "V8 scatter-mean + learned (DrInfer + PyTorch 对照)"
 
-  # ========== scatter-sum + concat (PyTorch 对照) ==========
-  - label: "v8-scatter-sum [PyTorch]"
-    dir_name: "model_small_5deg_v8_scatter_sum_quick"
+  # ========== scatter-sum + learned (DrInfer) ==========
+  - label: "v8-scatter-sum-learned [DrInfer]"
+    dir_name: "model_small_5deg_v8_scatter_sum_learned_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     rotation_only: 1
     use_drcv: 1
     use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
     voxel_mode: "scatter"
     scatter_reduce: "sum"
-    to_bev_mode: "concat"
+    to_bev_mode: "learned"
     angle_deg: 5
     z_voxels: 5
-    version: "v8-scatter-sum-pytorch"
-    mode_desc: "V8 scatter-sum + concat (PyTorch 对照)"
+    version: "v8-scatter-sum-learned-drinfer"
+    mode_desc: "V8 scatter-sum + learned (DrInfer + PyTorch 对照)"

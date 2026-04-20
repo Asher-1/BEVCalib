@@ -22,10 +22,11 @@ class BEVCalibInference(nn.Module):
     Strips loss computation and returns the predicted LiDAR->Camera transform.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, max_attn_tokens=0):
         super().__init__()
         self.model = model
         self.rotation_only = model.rotation_only
+        self.max_attn_tokens = max_attn_tokens
 
     @torch.no_grad()
     def forward(self, img, pc, init_T_to_camera, post_cam2ego_T, cam_intrinsic):
@@ -78,6 +79,14 @@ class BEVCalibInference(nn.Module):
                 _, _, H, W = x.shape
             x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
             bev_mask_f = cam_bev_mask.reshape(_B, H * W).float()
+
+            seq_len = H * W
+            max_tok = self.max_attn_tokens
+            if 0 < max_tok < seq_len:
+                _, pack_idx = torch.topk(bev_mask_f, k=max_tok, dim=1, sorted=False)
+                x = torch.gather(x, 1, pack_idx.unsqueeze(-1).expand(-1, -1, C))
+                bev_mask_f = torch.gather(bev_mask_f, 1, pack_idx)
+
             padding_mask = (1.0 - bev_mask_f) * (-1e4)
             x = m.transformer(x, src_key_padding_mask=padding_mask)
             valid_mask = bev_mask_f.unsqueeze(-1)
@@ -215,61 +224,63 @@ def prepare_for_drinfer_export(wrapper, img_shape=(360, 640)):
               f"{patched_merges} PatchMerging, "
               f"{patched_embeds} PatchEmbeddings patched")
 
-    # --- 2. Patch TransformerEncoderLayer: manual attention (no SDPA) ---------
+    # --- 2. Replace nn.MultiheadAttention with drinfer-native DRMHA ----------
+    #
+    # PyTorch 2.x TransformerEncoderLayer uses a fused C++ forward
+    # (aten::_transformer_encoder_layer_fwd) in eval mode, bypassing
+    # module-level self_attn calls.  We must also patch layer.forward to
+    # force the Python path through _sa_block → self.self_attn → DRMHA.
     if hasattr(model, 'transformer') and not model.deformable:
+        import types
+        from frontend_python.pytorch_parser.parse_utils.multi_head_attention import (
+            MultiheadAttention as DRMHA,
+        )
+
         encoder = model.transformer
         patched_te = 0
         for i, layer in enumerate(encoder.layers):
             if not isinstance(layer, nn.TransformerEncoderLayer):
                 continue
 
-            d_model = layer.self_attn.embed_dim
-            nhead = layer.self_attn.num_heads
+            orig = layer.self_attn
+            dr_mha = DRMHA(
+                embed_dim=orig.embed_dim,
+                num_heads=orig.num_heads,
+                dropout=0.0,
+                bias=orig.in_proj_bias is not None,
+                batch_first=True,
+            ).to(next(orig.parameters()).device)
 
-            def _make_manual_attn_forward(lyr, dm, nh):
-                """Replace TransformerEncoderLayer forward with manual
-                Q*K^T -> softmax -> V attention using only basic ops (no SDPA).
-                Supports src_key_padding_mask for proper attention masking."""
-                dk = dm // nh
-                scale = dk ** 0.5
+            dr_mha.in_proj_weight.data.copy_(orig.in_proj_weight.data)
+            if orig.in_proj_bias is not None:
+                dr_mha.in_proj_bias.data.copy_(orig.in_proj_bias.data)
+            dr_mha.out_proj.weight.data.copy_(orig.out_proj.weight.data)
+            if orig.out_proj.bias is not None:
+                dr_mha.out_proj.bias.data.copy_(orig.out_proj.bias.data)
 
-                def _manual_self_attn(x, key_padding_mask=None):
-                    B, S, _ = x.shape
-                    qkv = torch.nn.functional.linear(
-                        x, lyr.self_attn.in_proj_weight,
-                        lyr.self_attn.in_proj_bias)
-                    q, k, v = qkv.chunk(3, dim=-1)
-                    q = q.view(B, S, nh, dk).permute(0, 2, 1, 3)
-                    k = k.view(B, S, nh, dk).permute(0, 2, 1, 3)
-                    v = v.view(B, S, nh, dk).permute(0, 2, 1, 3)
-                    scores = torch.matmul(q, k.transpose(-2, -1)) / scale
-                    if key_padding_mask is not None:
-                        scores = scores + key_padding_mask.unsqueeze(1).unsqueeze(2)
-                    weights = torch.softmax(scores, dim=-1)
-                    out = torch.matmul(weights, v)
-                    out = out.permute(0, 2, 1, 3).reshape(B, S, dm)
-                    return torch.nn.functional.linear(
-                        out, lyr.self_attn.out_proj.weight,
-                        lyr.self_attn.out_proj.bias)
+            layer.self_attn = dr_mha
 
-                def _patched_forward(src, src_mask=None,
-                                     src_key_padding_mask=None,
-                                     is_causal=False):
+            def _make_python_forward(lyr):
+                """Bypass fused C++ _transformer_encoder_layer_fwd."""
+                def _forward(src, src_mask=None, src_key_padding_mask=None,
+                             is_causal=False):
                     x = src
                     if lyr.norm_first:
-                        x = x + _manual_self_attn(lyr.norm1(x), src_key_padding_mask)
+                        x = x + lyr._sa_block(lyr.norm1(x), src_mask,
+                                              src_key_padding_mask, is_causal)
                         x = x + lyr._ff_block(lyr.norm2(x))
                     else:
-                        x = lyr.norm1(x + _manual_self_attn(x, src_key_padding_mask))
+                        x = lyr.norm1(x + lyr._sa_block(x, src_mask,
+                                                        src_key_padding_mask, is_causal))
                         x = lyr.norm2(x + lyr._ff_block(x))
                     return x
-                return _patched_forward
+                return _forward
 
-            layer.forward = _make_manual_attn_forward(layer, d_model, nhead)
+            layer.forward = _make_python_forward(layer)
             patched_te += 1
 
         print(f"[patch] TransformerEncoder: {patched_te} layers patched "
-              f"(manual attention, no SDPA)")
+              f"(nn.MHA → DRMHA with dr_sdpa, Python forward)")
     else:
         print("[patch] No standard transformer to patch")
 
@@ -323,6 +334,8 @@ def load_bevcalib_inference(
     voxel_mode="scatter",
     to_bev_mode="concat",
     scatter_reduce="sum",
+    bev_pool_factor=0,
+    max_attn_tokens=0,
 ):
     """
     Load a BEVCalib checkpoint and return an inference wrapper.
@@ -338,6 +351,9 @@ def load_bevcalib_inference(
         voxel_mode:    'hard' or 'scatter' (default 'scatter' for drinfer trace)
         to_bev_mode:   'concat', 'learned', or 'sum' (must match training config)
         scatter_reduce: 'sum' or 'mean' (scatter voxelization reduce mode)
+        bev_pool_factor: BEV avg-pool factor before transformer (must match training)
+        max_attn_tokens: max tokens fed to transformer (0 = all H*W; >0 packs
+                         valid tokens via topk+gather to cut O(S^2) attention cost)
 
     Returns:
         wrapper: BEVCalibInference on the specified device
@@ -362,6 +378,7 @@ def load_bevcalib_inference(
         voxel_mode=voxel_mode,
         to_bev_mode=to_bev_mode,
         scatter_reduce=scatter_reduce,
+        bev_pool_factor=bev_pool_factor,
     )
 
     _adapt_proj_heads_to_checkpoint(model, state, device)
@@ -378,5 +395,10 @@ def load_bevcalib_inference(
     epoch = ckpt.get("epoch", -1)
 
     model.to(device).eval()
-    wrapper = BEVCalibInference(model).to(device).eval()
+    wrapper = BEVCalibInference(model, max_attn_tokens=max_attn_tokens).to(device).eval()
+    if max_attn_tokens > 0:
+        bev_h = model.bev_shape[0]
+        bev_w = model.bev_shape[1]
+        print(f"[load] Token packing enabled: max_attn_tokens={max_attn_tokens} "
+              f"(BEV {bev_h}x{bev_w}={bev_h * bev_w})")
     return wrapper, epoch

@@ -170,7 +170,7 @@ def _export_flat(wrapper, cfg, export_dir):
         dummy_input, export_dir, verbose=True,
         input_names=INPUT_NAMES,
         output_names=OUTPUT_NAMES,
-        runtime_type=drinfer.MODEL_FLOAT,
+        runtime_type=drinfer.MODEL_DATA_TYPE.MODEL_FLOAT,
         optimization_flag=_build_optimization_flags(),
         fixed_shape_configs=FIXED_SHAPES,
         empty_cache=True,
@@ -235,12 +235,12 @@ def _export_pmodel(wrapper, cfg, trace_dir):
             verbose=False,
             input_names=INPUT_NAMES,
             output_names=OUTPUT_NAMES,
-            runtime_type=drinfer.MODEL_FLOAT,
+            runtime_type=drinfer.MODEL_DATA_TYPE.MODEL_FLOAT,
             optimization_flag=_build_optimization_flags(),
             fixed_shape_configs=FIXED_SHAPES,
             verify_export_graph=verify,
-            export_pmodel=False,
-            jit_check_trace=False,
+            export_pmodel=True,
+            jit_check_trace=True,
             empty_cache=True,
             export_name=info.export_name,
             log_file=os.path.join(info.engine_graph, "infer_parserv3.log"),
@@ -264,21 +264,21 @@ def _export_pmodel(wrapper, cfg, trace_dir):
     else:
         out_flat, _ = flatten(pytorch_output)
 
-    save_trace_model2(
-        info,
-        input_datas=data_flat,
-        output_datas=out_flat,
-        input_names=INPUT_NAMES,
-        output_names=OUTPUT_NAMES,
-        runtime_dtype="float",
-        max_input_dim_status={
-            "image": [True, True, True, True],
-            "point_cloud": [True, False, True],
-            "init_T": [True, True, True],
-            "post_cam2ego_T": [True, True, True],
-            "intrinsic": [True, True, True],
-        },
-    )
+    # save_trace_model2(
+    #     info,
+    #     input_datas=data_flat,
+    #     output_datas=out_flat,
+    #     input_names=INPUT_NAMES,
+    #     output_names=OUTPUT_NAMES,
+    #     runtime_dtype="float",
+    #     max_input_dim_status={
+    #         "image": [True, True, True, True],
+    #         "point_cloud": [True, False, True],
+    #         "init_T": [True, True, True],
+    #         "post_cam2ego_T": [True, True, True],
+    #         "intrinsic": [True, True, True],
+    #     },
+    # )
 
     print(f"\n[pmodel] Trace artifacts:")
     for f in [info.graph_bin, info.graph_cfg, info.graph_txt]:
@@ -349,6 +349,8 @@ def main():
         voxel_mode=cfg.get("voxel_mode", "scatter"),
         to_bev_mode=cfg.get("to_bev_mode", "concat"),
         scatter_reduce=cfg.get("scatter_reduce", "sum"),
+        bev_pool_factor=cfg.get("bev_pool_factor", 0),
+        max_attn_tokens=cfg.get("max_attn_tokens", 0),
     )
     print(f"  epoch  : {epoch}")
     print(f"  params : {sum(p.numel() for p in wrapper.parameters()):,}")

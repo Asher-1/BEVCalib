@@ -272,18 +272,19 @@ class DrInferBackend:
         t_xfer1 = time.perf_counter()
 
         engine.inference(B)
-        t_infer1 = time.perf_counter()
 
         pred_T_np = np.zeros([B, 4, 4], dtype=np.float32)
         engine.copy_output_device_data_to_host_from_layer(
-            "pred_T", 0, self.dr.MODEL_FLOAT, pred_T_np, True
+            "pred_T", 0, self.dr.MODEL_DATA_TYPE.MODEL_FLOAT, pred_T_np, True
         )
         result = torch.from_numpy(pred_T_np).to(self.device)
         torch.cuda.synchronize()
         t_end = time.perf_counter()
 
-        transfer_ms = (t_xfer1 - t_xfer0) * 1000.0 + (t_end - t_infer1) * 1000.0
-        infer_ms = (t_infer1 - t_xfer1) * 1000.0
+        infer_ms = engine.get_infer_time()
+        total_ms = (t_end - t_xfer0) * 1000.0
+        transfer_ms = total_ms - infer_ms
+
         self.last_timing = {"infer_ms": infer_ms, "transfer_ms": transfer_ms}
         return result
 
@@ -608,6 +609,9 @@ def _load_backends(cfg, device, mode):
     to_bev_mode = cfg.get("to_bev_mode", "concat")
     scatter_reduce = cfg.get("scatter_reduce", "sum")
 
+    bev_pool_factor = cfg.get("bev_pool_factor", 0)
+    max_attn_tokens = cfg.get("max_attn_tokens", 0)
+
     wrapper, epoch = load_bevcalib_inference(
         ckpt_path=cfg["ckpt_path"],
         device=device,
@@ -619,6 +623,8 @@ def _load_backends(cfg, device, mode):
         voxel_mode=voxel_mode,
         to_bev_mode=to_bev_mode,
         scatter_reduce=scatter_reduce,
+        bev_pool_factor=bev_pool_factor,
+        max_attn_tokens=max_attn_tokens,
     )
     print(f"  epoch: {epoch}")
 
