@@ -1,0 +1,119 @@
+# V16 全量训练 PyTorch 泛化评估配置 (16节点云服务器)
+#
+# 对应训练配置: batch8_train_all_v16.yaml
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v16.yaml
+#   多卡并行:
+#     ... --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v16"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v16"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # 0. 终极配置: Pitch3 + 双模式pitch增强
+  - label: "v16-ultimate"
+    dir_name: "model_small_5deg_v16_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-ultimate"
+    mode_desc: "V16: Pitch3+StepLR+dual_pitch (终极)"
+
+  # 1. sign_flip only
+  - label: "v16-pitch3-signflip"
+    dir_name: "model_small_5deg_v16_pitch3_signflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-pitch3-signflip"
+    mode_desc: "V16: Pitch3+sign_flip(0.15)"
+
+  # 2. 纯 Aug 对照
+  - label: "v16-pitch3-aug"
+    dir_name: "model_small_5deg_v16_pitch3_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-pitch3-aug"
+    mode_desc: "V16: Pitch3+Aug (无pitch增强, 对照)"
+
+  # 3. Cosine 终极配置
+  - label: "v16-cosine-ultimate"
+    dir_name: "model_small_5deg_v16_cosine_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-cosine-ultimate"
+    mode_desc: "V16: Cosine+Pitch3+dual_pitch"
+
+  # 4. 终极配置 bs=8
+  - label: "v16-ultimate-bs8"
+    dir_name: "model_small_5deg_v16_ultimate_bs8"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-ultimate-bs8"
+    mode_desc: "V16: 终极bs=8 (降batch缓解收敛)"
+
+  # 5. Cosine + bs=8
+  - label: "v16-cosine-ultimate-bs8"
+    dir_name: "model_small_5deg_v16_cosine_ultimate_bs8"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-cosine-ultimate-bs8"
+    mode_desc: "V16: Cosine+bs=8 (Cosine+小batch)"

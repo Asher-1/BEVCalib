@@ -1,0 +1,171 @@
+# BEVCalib V16 全量训练配置 — 最优策略 (DrInfer 兼容)
+#
+# V16 设计哲学:
+#   基于 V8~V14 完整评估 + V16 Quick 筛选结果, 全量训练最优配置
+#
+#   全量训练关键差异 (vs Quick):
+#     1. Pitch3 权重有效 (全量数据时 pitch-focused 损失收益显著)
+#     2. LR调度: Quick 的 Cosine 可能在全量下表现不同, 需要对照
+#     3. 预期: 整体 < 0.30°, Seq02 < 1.0° (改善 all-v8-z10-pitch3 的 1.076°)
+#
+# Baseline 参照:
+#   - all-v8-z10-pitch3 (全量冠军):  整体 0.251°, Seq02 1.076°
+#   - all-v6-champion:               整体 0.278°, Seq02 1.163°
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v16.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0              # Z=10 (10个Z-voxel)
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 16
+    learning_rate: 1e-4
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 16
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1               # 加速模式(默认): 缩放LR+warmup, epoch不变 → 实际加速
+    # ddp_auto_scale: 2             # 保步模式: 增epoch匹配总步数, 训练时间≈单机
+    ddp_reference_gpus: 8           # 超参参考GPU数 (Quick单机配置)
+    max_scaled_lr: 4e-4             # LR上限: V16消融验证最优区间 2e-4~4e-4
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 ===
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 (V16核心: 轻度增强 + 双模式pitch几何增强) ===
+    augment_pc_jitter: 0.02         # 点云高斯噪声 σ=0.02m
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1       # 颜色抖动 10%
+    augment_pitch_flip_prob: 0.0    # 模式1: X轴随机扰动 (per experiment)
+    augment_pitch_flip_max_deg: 2.0 # 扰动范围 ±2°
+    augment_pitch_sign_flip_prob: 0.0  # 模式2: 精确pitch符号反转 (per experiment)
+
+    # === 数据采样 ===
+    sample_step: 2                    # 每隔2帧取1帧, 增加训练数据量提升精度
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === DrInfer 兼容配置 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V16 全量训练: Quick筛选最优 + 双模式pitch增强 (旋转轴已修复)
+  # =========================================================================
+
+  # 0. 终极配置: 冠军基座 + 双模式pitch + Pitch3
+  - name: "v16_ultimate"
+    description: "V16: Pitch3+StepLR+Aug+dual_pitch (Quick最优全量化)"
+    dataset: "all"
+    version: "v16_ultimate"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.0
+
+  # 1. 冠军基座 + sign_flip only (对照: 隔离sign_flip效果)
+  - name: "v16_pitch3_signflip"
+    description: "V16: Pitch3+StepLR+Aug+sign_flip(0.15)"
+    dataset: "all"
+    version: "v16_pitch3_signflip"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.15
+
+  # 2. 冠军基座 + Aug only (无pitch增强对照)
+  - name: "v16_pitch3_aug"
+    description: "V16: Pitch3+StepLR+Aug (无pitch增强, 对照组)"
+    dataset: "all"
+    version: "v16_pitch3_aug"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. CosineAnnealing 对照: 终极配置换Cosine调度器
+  - name: "v16_cosine_ultimate"
+    description: "V16: Cosine+Pitch3+dual_pitch (对比StepLR效果)"
+    dataset: "all"
+    version: "v16_cosine_ultimate"
+    params:
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.0
+
+# ============================================================================
+# V16 全量训练矩阵
+# ============================================================================
+#
+#   实验                        | BS | LR调度  | Pitch3 | sign_flip | perturb   | 验证目标
+#   ----------------------------+----+---------+--------+-----------+-----------+-------------------
+#   0 v16_ultimate              | 16 | Step    | Yes    | 0.1       | 0.15, 2°  | 终极: 全部联合
+#   1 v16_pitch3_signflip       | 16 | Step    | Yes    | 0.15      | No        | sign_flip 单独
+#   2 v16_pitch3_aug            | 16 | Step    | Yes    | No        | No        | 纯aug对照
+#   3 v16_cosine_ultimate       | 16 | Cosine  | Yes    | 0.1       | 0.15, 2°  | LR调度对比
+# 预期目标:
+#   v16_ultimate:              整体 < 0.24°, Seq02 < 0.50° (StepLR + 双模式pitch)
+#   v16_pitch3_signflip:       整体 < 0.25°, Seq02 < 0.55° (sign_flip全量验证)
+#   v16_pitch3_aug:            整体 < 0.25°, Seq02 < 1.0°  (对照基线)
+#   v16_cosine_ultimate:       整体 < 0.24°, Seq02 < 0.48° (Cosine可能更优)
+#   v16_ultimate_bs8:          整体 < 0.23°, Seq02 < 0.45° (小batch+Step应有最好泛化)
+#   v16_cosine_ultimate_bs8:   整体 < 0.23°, Seq02 < 0.45° (Cosine+小batch双重优势)
+#
+# DDP Scaling 分析 (16机 128GPU, sample_step=2):
+#   训练帧数: ~65K (sample_step=2), 训练集80%=~52K
+#   bs=16: 全局batch=2048, ~25步/epoch, LR=1e-4×√16=4e-4 (max_scaled_lr上限)
+#   总步数: ~25步×400epoch=10,000步
+#   相比 sample_step=4: 数据量翻倍, 每epoch步数翻倍, 模型训练更充分

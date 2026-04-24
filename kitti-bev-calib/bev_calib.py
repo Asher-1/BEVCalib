@@ -326,14 +326,14 @@ class BEVCalib(nn.Module):
             bev_mask = cam_bev_mask.reshape(B, H * W).bool()
             max_valid_cnt = int(bev_mask.sum(dim=1).max().item()) # int, max number of valid points in a batch
             valid_counts = torch.zeros(B, dtype=torch.long, device=x.device)
-            masked_x = torch.zeros(B, max_valid_cnt, C).to(x.device)
-            padding_mask = torch.zeros(B, max_valid_cnt).to(x.device)
+            masked_x = torch.zeros(B, max_valid_cnt, C, device=x.device)
+            padding_mask = torch.zeros(B, max_valid_cnt, dtype=torch.bool, device=x.device)
             for i in range(B):
                 cnt = int(bev_mask[i].sum().item())
                 valid_counts[i] = cnt
                 masked_x[i, :cnt, :] = x[i, bev_mask[i]]
-                padding_mask[i, cnt:] = 1
-            x = self.transformer(masked_x, src_key_padding_mask=padding_mask.bool()) # B, max_valid_cnt, C
+                padding_mask[i, cnt:] = True
+            x = self.transformer(masked_x, src_key_padding_mask=padding_mask) # B, max_valid_cnt, C
             x_pooled = torch.zeros(B, C, device=x.device)
             for i in range(B):
                 cnt = valid_counts[i].item()

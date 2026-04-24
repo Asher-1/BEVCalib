@@ -44,7 +44,7 @@ class CustomDataset(Dataset):
     KITTI_SEQUENCES = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', 
                        '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']
     
-    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None, max_frames_per_seq=None):
+    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None, max_frames_per_seq=None, sample_step=None):
         # 使用 bev_settings 的体素化范围配置
         self.x_min, self.x_max = xbound[0], xbound[1]
         self.y_min, self.y_max = ybound[0], ybound[1]
@@ -79,6 +79,12 @@ class CustomDataset(Dataset):
         
         self.target_size = target_size  # (width, height) for pre-resized lookup
         self.max_frames_per_seq = max_frames_per_seq
+        self.sample_step = sample_step
+        if max_frames_per_seq and sample_step:
+            raise ValueError(
+                "max_frames_per_seq 和 sample_step 互斥，不可同时设置。"
+                f" 当前: max_frames_per_seq={max_frames_per_seq}, sample_step={sample_step}"
+            )
         self._resized_dir_name = None
         self._resized_K = {}  # pre-computed intrinsics for resized images
         if target_size is not None:
@@ -135,6 +141,8 @@ class CustomDataset(Dataset):
                 if self.max_frames_per_seq and full_count > self.max_frames_per_seq:
                     stride = full_count / self.max_frames_per_seq
                     seq_files = [seq_files[int(i * stride)] for i in range(self.max_frames_per_seq)]
+                elif self.sample_step and self.sample_step > 1:
+                    seq_files = seq_files[::self.sample_step]
                 
                 self.all_files.extend(seq_files)
                 frame_count = len(seq_files)
@@ -143,6 +151,8 @@ class CustomDataset(Dataset):
                     loaded_sequences.append(seq)
                     if self.max_frames_per_seq and full_count > self.max_frames_per_seq:
                         print(f"  ✓ 序列 {seq}: {frame_count} 帧 (均匀采样自 {full_count} 帧)")
+                    elif self.sample_step and self.sample_step > 1:
+                        print(f"  ✓ 序列 {seq}: {frame_count} 帧 (步长{self.sample_step}采样自 {full_count} 帧)")
                     else:
                         print(f"  ✓ 序列 {seq}: {frame_count} 帧")
             except Exception as e:

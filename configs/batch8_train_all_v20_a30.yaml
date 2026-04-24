@@ -1,0 +1,200 @@
+# BEVCalib V20 全量训练配置 — V6/V8 最优配置 + DRCV 后端 (A30)
+#
+# V20 设计哲学:
+#   将 V6/V8 历史最佳配置直接迁移到 DRCV 后端,
+#   验证 DRCV 是否能通过精确复现历史最优参数来恢复精度。
+#
+#   核心变更 (相比 V6/V8 原始):
+#     1. USE_DRCV_BACKEND=1 (强制 DRCV 后端)
+#     2. voxel_mode=scatter, scatter_reduce=mean (DRCV 默认体素化)
+#     3. sample_step=2 (更密采样, 约 65K 帧/epoch)
+#
+#   基座模型 (按泛化精度排名):
+#     1. all-v8-z10-pitch3:      0.251° (历史最佳, Z=10, Pitch3.0)
+#     2. v6-linear-baseline:     0.283° (V6 冠军, Z=5, 均匀权重)
+#     3. all-v8-z10-baseline:    0.296° (V8 基线, Z=10, 均匀权重)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v20_a30.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 (与 V6/V8 一致) ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 8
+    learning_rate: 1e-4
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1
+    ddp_reference_gpus: 16              # 16GPU×bs8=128 等效云版 8GPU×bs16=128, 保证 √缩放一致
+    max_scaled_lr: 4e-4             # LR上限: V16消融验证最优区间 2e-4~4e-4
+
+    # === 模型配置 (与 V6/V8 一致) ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 (与 V6/V8 一致) ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 (与 V6/V8 一致) ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 (与 V6/V8 一致) ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === LR 调度 (与 V6/V8 一致: StepLR) ===
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+    cosine_T0: 50
+    cosine_Tmult: 2
+
+    # === 训练扰动策略 (与 V6/V8 一致) ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 数据增强 (与 V6/V8 一致: 全关) ===
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.0
+
+    # === 数据采样 ===
+    max_frames_per_seq: 10000
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === DRCV 后端配置 (V20 强制) ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V20: V6/V8 最优配置 → DRCV 后端迁移 (3组)
+  # =========================================================================
+
+  # A. V8 最佳: Z=10 + Pitch3.0 + DRCV (★最高优先级)
+  #    原始: all-v8-z10-pitch3 = 0.251° (spconv, hard/sum)
+  #    V20: 切换到 DRCV (scatter/mean), 其他参数完全一致
+  - name: "v20_v8best_drcv"
+    description: "V20-A: V8最佳(Z=10+Pitch3.0) → DRCV后端 (★核心实验)"
+    dataset: "all"
+    version: "v20_v8best_drcv"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # B. V6 最佳: Z=5 + 均匀权重 + DRCV
+  #    原始: v6-linear-baseline = 0.283° (spconv, hard/sum, Z=5)
+  #    V20: Z=5 + DRCV, 验证 Z=5 在 DRCV 下的表现
+  - name: "v20_v6best_drcv"
+    description: "V20-B: V6最佳(Z=5+均匀权重) → DRCV后端"
+    dataset: "all"
+    version: "v20_v6best_drcv"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # C. V8 次佳: Z=10 + 均匀权重 + DRCV
+  #    原始: all-v8-z10-baseline = 0.296° (spconv, hard/sum)
+  #    V20: 隔离 Pitch 权重的影响 (与 V20-A 对比)
+  - name: "v20_v8second_drcv"
+    description: "V20-C: V8次佳(Z=10+均匀权重) → DRCV后端"
+    dataset: "all"
+    version: "v20_v8second_drcv"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # =========================================================================
+  # V20 A30 10度角度扰动变体
+  # =========================================================================
+
+  # D. V8 最佳 + 10度
+  - name: "v20_v8best_drcv_10deg"
+    description: "V20-D: V8最佳(Z=10+Pitch3.0) → DRCV + 10度"
+    dataset: "all"
+    version: "v20_v8best_drcv_10deg"
+    params:
+      angle_range_deg: 10
+      axis_weights: "1.0,3.0,1.0"
+
+  # E. V6 最佳 + 10度
+  - name: "v20_v6best_drcv_10deg"
+    description: "V20-E: V6最佳(Z=5+均匀权重) → DRCV + 10度"
+    dataset: "all"
+    version: "v20_v6best_drcv_10deg"
+    env:
+      BEV_ZBOUND_STEP: 4.0
+    params:
+      angle_range_deg: 10
+      axis_weights: "1.0,1.0,1.0"
+
+  # F. V8 次佳 + 10度
+  - name: "v20_v8second_drcv_10deg"
+    description: "V20-F: V8次佳(Z=10+均匀权重) → DRCV + 10度"
+    dataset: "all"
+    version: "v20_v8second_drcv_10deg"
+    params:
+      angle_range_deg: 10
+      axis_weights: "1.0,1.0,1.0"
+
+# ============================================================================
+# V20 A30 消融矩阵 (6组, 16节点 x 8GPU, bs=8)
+# ============================================================================
+#
+#   实验              | Z  | axis_wt | Backend | sample_step | 原始精度 | 目标
+#   ------------------+----+---------+---------+-------------+----------+---------------------------
+#   A v8best_drcv     | 10 | 1,3,1   | DRCV    | 2           | 0.251°   | DRCV下Pitch3.0效果
+#   B v6best_drcv     | 5  | 1,1,1   | DRCV    | 2           | 0.283°   | DRCV下Z=5效果
+#   C v8second_drcv   | 10 | 1,1,1   | DRCV    | 2           | 0.296°   | Pitch权重消融 (vs A)
+#
+# 全局等效 batch size: 8 * 8GPU * 16node = 1024
+# sample_step=2: 130K→65K帧/epoch (比 step=4 数据量翻倍)
+#
+# 关键对比:
+#   V20-A vs all-v8-z10-pitch3 (原始spconv): 量化 DRCV 后端影响
+#   V20-B vs v6-linear-baseline (原始spconv): 量化 Z=5 + DRCV 影响
+#   V20-A vs V20-C: 隔离 Pitch3.0 权重在 DRCV 下的效果
+#
+# 预期:
+#   若 DRCV 确实导致退步:
+#     A: ~0.40° (vs 原始 0.251°, 衰退 ~60%)
+#     B: ~0.45° (vs 原始 0.283°, 衰退 ~60%)
+#     C: ~0.42° (vs 原始 0.296°, 衰退 ~42%)
+#   若 sample_step=2 的数据量补偿能抵消 DRCV:
+#     A: ~0.30° (接近原始)
+#     B: ~0.33°
+#     C: ~0.35°

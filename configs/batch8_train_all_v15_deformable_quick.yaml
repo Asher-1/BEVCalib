@@ -1,0 +1,141 @@
+# BEVCalib V15 训练配置 — Deformable Attention 验证实验
+#
+# V15 设计目标:
+#   验证 Deformable Attention 相比标准 Transformer 的效果:
+#     1. 推理速度: deformable attention 避免全序列 O(S²) 注意力
+#        - 标准 Transformer: Q/K/V 均为 10000 tokens → attention (10000, 10000)
+#        - Deformable: Q=10000, K/V 降采样到 ~49 tokens → attention (10000, 49)
+#     2. 训练精度: 在相同 V8 基座上验证精度不退化
+#     3. DrInfer 导出: 验证 deformable ops (grid_sample, offset conv) 能正确导出
+#
+# Baseline: batch8_train_all_v8_quick.yaml
+# 变化: 仅增加 use_deformable: 1, scatter_reduce 使用 mean/sum 两组对照
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v15_deformable_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 8
+    learning_rate: 1e-4
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+    use_deformable: 1
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 学习率调度 ===
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 数据增强 ===
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500
+    eval_epoches: 50
+    grad_accum_steps: 2
+
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V15 Deformable 验证: scatter-mean 和 scatter-sum 各一组
+  # 对照: V8 scatter-mean/sum (标准 Transformer, 已有结果)
+  # =========================================================================
+
+  # 0. Deformable + scatter-mean + concat (对照: v8_scatter_mean)
+  - name: "v15_deformable_scatter_mean"
+    description: "V15: Deformable + scatter-mean + concat (对照 V8 标准Transformer)"
+    dataset: "all"
+    version: "v15_deformable_scatter_mean_quick"
+    params:
+      scatter_reduce: "mean"
+      axis_weights: "1.0,1.0,1.0"
+
+  # 1. Deformable + scatter-sum + concat (对照: v8_scatter_sum)
+  - name: "v15_deformable_scatter_sum"
+    description: "V15: Deformable + scatter-sum + concat (对照 V8 标准Transformer)"
+    dataset: "all"
+    version: "v15_deformable_scatter_sum_quick"
+    params:
+      scatter_reduce: "sum"
+      axis_weights: "1.0,1.0,1.0"
+
+  # 2. Z=10: 更细Z分层 → 减少 pitch-depth 混淆
+  - name: "v15_deformable_scatter_mean_z10"
+    description: "V15: Deformable + scatter-mean + concat (对照 V8 标准Transformer) + Z=10"
+    dataset: "all"
+    version: "v15_deformable_scatter_mean_z10_quick"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      scatter_reduce: "mean"
+      axis_weights: "1.0,1.0,1.0"
+# ============================================================================
+# V15 Deformable 消融矩阵
+# ============================================================================
+#
+#   实验                             | Deformable | scatter  | to_bev | 对照
+#   ---------------------------------+------------+----------+--------+------------------
+#   0 v15_deformable_scatter_mean    | Yes        | mean     | concat | v8_scatter_mean
+#   1 v15_deformable_scatter_sum     | Yes        | sum      | concat | v8_scatter_sum
+#
+# 关键指标:
+#   - 训练精度: val_loss, rotation_error 与 V8 对照比较
+#   - DrInfer 推理速度: 对比 V8 DrInfer (当前 mean=21.9ms, PyTorch=44.5ms)
+#   - DrInfer 导出: 验证 deformable ops 能正确 trace 和 convert
+#   - 精度一致性: DrInfer vs PyTorch rotation error delta

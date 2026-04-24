@@ -1,0 +1,162 @@
+# BEVCalib — spconv vs drcv 泛化验证实验
+#
+# 目的:
+#   验证假说: spconv 后端因 conv_out (3x3x3, stride-Z=2) 的信息瓶颈效应
+#   比 drcv (1x1, 无 Z 压缩) 具有更好的泛化能力。
+#
+# 实验设计:
+#   每个 drcv 配置对应一个 spconv 配置，仅 backend 不同，其余完全一致。
+#
+#   对照组 (drcv, 已有结果):
+#     v20-v8-z10-pitch-wt3-drcv:   drcv, z=10, wt=1:3:1, 无增强 → 1.200°
+#     v20-v6best-drcv:             drcv, z=5,  wt=1:1:1, 无增强 → 3.407°
+#     v16-ultimate:                drcv, z=10, wt=1:3:1, 全增强 → 0.913°
+#     v16-pitch3-signflip:         drcv, z=10, wt=1:3:1, signflip→ 2.062°
+#
+#   实验组 (spconv, 本配置):
+#     spconv_z10_wt3:              spconv, z=10, wt=1:3:1, 无增强
+#     spconv_z5_wt1:               spconv, z=5,  wt=1:1:1, 无增强
+#     spconv_z10_wt3_fullaug:      spconv, z=10, wt=1:3:1, 全增强
+#     spconv_z10_wt3_signflip:     spconv, z=10, wt=1:3:1, signflip
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_spconv_vs_drcv.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_spconv_vs_drcv.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0        # ← 关键: 使用 spconv 后端
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_intrinsic: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_sign_flip_prob: 0.0
+
+    sample_step: 2                   # 与 drcv 对照组一致
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # A. 无增强对照 — 与 drcv 无增强模型直接对比
+  # =========================================================================
+
+  # A1. spconv z=10 wt=1:3:1 → 对照 v20-v8-z10-pitch-wt3-drcv (drcv 1.200°)
+  - name: "spconv_z10_wt3"
+    description: "spconv z=10 wt=1:3:1 — 对照 drcv_z10_wt3 (1.200°)"
+    dataset: "all"
+    version: "spconv_z10_wt3"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # A2. spconv z=5 wt=1:1:1 → 对照 v20-v6best-drcv (drcv 3.407°)
+  - name: "spconv_z5_wt1"
+    description: "spconv z=5 wt=1:1:1 — 对照 drcv_z5_wt1 (3.407°)"
+    dataset: "all"
+    version: "spconv_z5_wt1"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # =========================================================================
+  # B. 有增强 — 与 drcv 增强模型对比
+  # =========================================================================
+
+  # B1. spconv z=10 wt=1:3:1 + 全量增强 → 对照 v16-ultimate (drcv 0.913°)
+  - name: "spconv_z10_wt3_fullaug"
+    description: "spconv z=10 wt=1:3:1 + 全增强 — 对照 v16-ultimate (0.913°)"
+    dataset: "all"
+    version: "spconv_z10_wt3_fullaug"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_color_jitter: 0.1
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_sign_flip_prob: 0.1
+
+  # B2. spconv z=10 wt=1:3:1 + signflip → 对照 v16-pitch3-signflip (drcv 2.062°)
+  - name: "spconv_z10_wt3_signflip"
+    description: "spconv z=10 wt=1:3:1 + signflip — 对照 v16-pitch3-signflip (2.062°)"
+    dataset: "all"
+    version: "spconv_z10_wt3_signflip"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pc_jitter: 0.02
+      augment_color_jitter: 0.1
+      augment_pitch_sign_flip_prob: 0.15
+
+# ============================================================================
+# 对照组映射
+# ============================================================================
+#
+# 实验               | Backend | Z  | Wt    | 增强      | 对照 (drcv)
+# -------------------|---------|----| ------|-----------|---------------------------
+# spconv_z10_wt3     | spconv  | 10 | 1:3:1 | 无        | v20-v8-z10-pitch-wt3-drcv (1.200°)
+# spconv_z5_wt1      | spconv  | 5  | 1:1:1 | 无        | v20-v6best-drcv (3.407°)
+# spconv_z10_wt3_fullaug | spconv | 10 | 1:3:1 | 全量  | v16-ultimate (0.913°)
+# spconv_z10_wt3_signflip| spconv | 10 | 1:3:1 | signflip| v16-pitch3-signflip (2.062°)
+#
+# 预期:
+#   如果假说成立 (spconv conv_out 提供更好的归纳偏置)，
+#   则 spconv 组的泛化误差应系统性低于对应的 drcv 对照组。

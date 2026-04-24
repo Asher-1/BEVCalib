@@ -42,8 +42,10 @@
 #   --augment_pc_dropout R   - Point cloud dropout ratio (default: 0.0)
 #   --augment_color_jitter S - Image color jitter strength (default: 0.0)
 #   --augment_intrinsic S    - Camera intrinsic augmentation strength (default: 0.0, e.g. 0.05=±5%)
-#   --augment_pitch_flip_prob P  - GT pitch flip augmentation probability (default: 0.0=disabled)
-#   --augment_pitch_flip_max_deg D - Max rotation for pitch flip in degrees (default: 6.0)
+#   --augment_pitch_flip_prob P  - GT pitch X-axis random perturbation probability (default: 0.0=disabled)
+#   --augment_pitch_flip_max_deg D - Max rotation for pitch perturbation in degrees (default: 2.0)
+#   --augment_pitch_sign_flip_prob P - GT pitch sign flip probability (default: 0.0=disabled)
+#   --sample_step N          - Sampling step (take every Nth frame), mutually exclusive with --max_frames_per_seq
 #   --eval_angle_range_deg D - Evaluation perturbation angle (default: same as training angle)
 #   --early_stopping_patience N - Early stopping patience in eval cycles (default: 0)
 #   --seed N                 - Global random seed for reproducibility (default: 42)
@@ -132,11 +134,13 @@ AUGMENT_PC_JITTER=""
 AUGMENT_PC_DROPOUT=""
 AUGMENT_COLOR_JITTER=""
 AUGMENT_INTRINSIC=""
+AUGMENT_INTRINSIC_CXCY=""
 EVAL_ANGLE_RANGE_DEG=""
 EARLY_STOPPING_PATIENCE=""
 SEED=""
 PRETRAIN_CKPT=""
 NUM_EPOCHS_OVERRIDE=""
+SAVE_CKPT_PER_EPOCHES=""
 NNODES="1"
 NODE_RANK="0"
 MASTER_ADDR=""
@@ -268,6 +272,8 @@ while [[ $# -gt 0 ]]; do
             ;;
         --axis_weights)
             AXIS_WEIGHTS="$2"; shift 2 ;;
+        --wd)
+            WEIGHT_DECAY="$2"; shift 2 ;;
         --lr_schedule)
             LR_SCHEDULE="$2"; shift 2 ;;
         --warmup_epochs)
@@ -296,10 +302,14 @@ while [[ $# -gt 0 ]]; do
             AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
         --augment_intrinsic)
             AUGMENT_INTRINSIC="$2"; shift 2 ;;
+        --augment_intrinsic_cxcy)
+            AUGMENT_INTRINSIC_CXCY="$2"; shift 2 ;;
         --augment_pitch_flip_prob)
             AUGMENT_PITCH_FLIP_PROB="$2"; shift 2 ;;
         --augment_pitch_flip_max_deg)
             AUGMENT_PITCH_FLIP_MAX_DEG="$2"; shift 2 ;;
+        --augment_pitch_sign_flip_prob)
+            AUGMENT_PITCH_SIGN_FLIP_PROB="$2"; shift 2 ;;
         --voxel_mode)
             VOXEL_MODE="$2"; shift 2 ;;
         --to_bev_mode)
@@ -308,6 +318,8 @@ while [[ $# -gt 0 ]]; do
             SCATTER_REDUCE="$2"; shift 2 ;;
         --eval_angle_range_deg)
             EVAL_ANGLE_RANGE_DEG="$2"; shift 2 ;;
+        --eval_trans_range)
+            EVAL_TRANS_RANGE="$2"; shift 2 ;;
         --early_stopping_patience)
             EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
         --seed)
@@ -316,6 +328,8 @@ while [[ $# -gt 0 ]]; do
             PRETRAIN_CKPT="$2"; shift 2 ;;
         --num_epochs)
             NUM_EPOCHS_OVERRIDE="$2"; shift 2 ;;
+        --save_ckpt_per_epoches)
+            SAVE_CKPT_PER_EPOCHES="$2"; shift 2 ;;
         --use_geodesic_loss)
             USE_GEODESIC_LOSS="$2"; shift 2 ;;
         --use_mlp_head)
@@ -334,16 +348,57 @@ while [[ $# -gt 0 ]]; do
             BEV_POOL_FACTOR="$2"; shift 2 ;;
         --max_frames_per_seq)
             MAX_FRAMES_PER_SEQ="$2"; shift 2 ;;
+        --sample_step)
+            SAMPLE_STEP="$2"; shift 2 ;;
         --eval_epoches)
             EVAL_EPOCHES="$2"; shift 2 ;;
         --grad_accum_steps)
             GRAD_ACCUM_STEPS="$2"; shift 2 ;;
+        --enable_vis)
+            ENABLE_VIS="$2"; shift 2 ;;
+        --vis_freq)
+            VIS_FREQ="$2"; shift 2 ;;
+        --validate_data)
+            VALIDATE_DATA="$2"; shift 2 ;;
+        --enable_ckpt_eval)
+            ENABLE_CKPT_EVAL="$2"; shift 2 ;;
+        --vis_samples)
+            VIS_SAMPLES="$2"; shift 2 ;;
+        --vis_points)
+            VIS_POINTS="$2"; shift 2 ;;
+        --vis_point_radius)
+            VIS_POINT_RADIUS="$2"; shift 2 ;;
+        --validate_sample_ratio)
+            VALIDATE_SAMPLE_RATIO="$2"; shift 2 ;;
+        --min_point_utilization)
+            MIN_POINT_UTILIZATION="$2"; shift 2 ;;
+        --min_valid_ratio)
+            MIN_VALID_RATIO="$2"; shift 2 ;;
+        --ddp_auto_scale)
+            DDP_AUTO_SCALE="$2"; shift 2 ;;
+        --ddp_reference_gpus)
+            DDP_REFERENCE_GPUS="$2"; shift 2 ;;
+        --max_scaled_lr)
+            MAX_SCALED_LR="$2"; shift 2 ;;
+        --data_balance)
+            DATA_BALANCE="$2"; shift 2 ;;
+        --target_width)
+            TARGET_WIDTH="$2"; shift 2 ;;
+        --target_height)
+            TARGET_HEIGHT="$2"; shift 2 ;;
         *)
             echo "❌ Unknown option: $1"
             exit 1
             ;;
     esac
 done
+
+# Mutual exclusion: max_frames_per_seq vs sample_step
+if [ -n "$MAX_FRAMES_PER_SEQ" ] && [ -n "$SAMPLE_STEP" ]; then
+    echo "❌ Error: --max_frames_per_seq 和 --sample_step 互斥，不可同时设置"
+    echo "  当前: max_frames_per_seq=$MAX_FRAMES_PER_SEQ, sample_step=$SAMPLE_STEP"
+    exit 1
+fi
 
 # Check if dataset_root is specified
 if [ -z "$DATASET_ROOT" ]; then
@@ -406,13 +461,22 @@ if [ -n "$LOG_SUFFIX" ]; then
     LOG_DIR="${LOG_DIR}_${LOG_SUFFIX}"
 fi
 
-# 检查实验输出目录是否已存在（跳过已完成的实验，仅 scratch 模式）
-if [ "${FORCE_RERUN:-0}" != "1" ] && [ "$MODE" = "scratch" ] && [ -d "$LOG_DIR" ] && [ -f "$LOG_DIR/train.log" ]; then
-    echo "⏭️  跳过训练: 输出目录已存在且包含训练日志"
-    echo "  路径: $LOG_DIR"
-    echo "  如需重新训练，请先删除该目录: rm -rf $LOG_DIR"
-    echo "  或使用 --force 参数强制重新训练"
-    exit 0
+# 检查实验是否已完成（基于 checkpoint 文件判断，兼容多机 DDP）
+# Worker 节点永远不跳过 — 必须加入 DDP 集群
+if [ "${FORCE_RERUN:-0}" != "1" ] && [ "$MODE" = "scratch" ] && [ "$NODE_RANK" = "0" ]; then
+    _CKPT_DIR="$LOG_DIR/checkpoint"
+    _HAS_CKPT=0
+    if [ -d "$_CKPT_DIR" ]; then
+        _CKPT_COUNT=$(find "$_CKPT_DIR" -name "*.pth" -type f 2>/dev/null | wc -l)
+        [ "$_CKPT_COUNT" -gt 0 ] && _HAS_CKPT=1
+    fi
+    if [ "$_HAS_CKPT" -eq 1 ]; then
+        echo "⏭️  跳过训练: 检测到已有 checkpoint 文件 (${_CKPT_COUNT}个)"
+        echo "  路径: $_CKPT_DIR"
+        echo "  如需重新训练，请先删除该目录: rm -rf $LOG_DIR"
+        echo "  或设置 FORCE_RERUN=1 强制重新训练"
+        exit 0
+    fi
 fi
 
 mkdir -p "$LOG_DIR"
@@ -471,7 +535,31 @@ _maybe_sep() {
 }
 _section_end() { _NEED_SEP=1; }
 
+_estimate_dataset_frames() {
+    local ds_root="$1" mfps="$2" sstep="$3"
+    _EST_RAW_FRAMES=0; _EST_SAMPLED_FRAMES=0; _EST_SEQ_COUNT=0
+    local seq_dir="$ds_root/sequences"
+    [ ! -d "$seq_dir" ] && return
+    for seq in "$seq_dir"/*/; do
+        local vdir="$seq/velodyne"
+        [ ! -d "$vdir" ] && continue
+        local n
+        n=$(find "$vdir" -maxdepth 1 -name "*.bin" 2>/dev/null | wc -l)
+        [ "$n" -eq 0 ] && continue
+        _EST_RAW_FRAMES=$(( _EST_RAW_FRAMES + n ))
+        _EST_SEQ_COUNT=$(( _EST_SEQ_COUNT + 1 ))
+        if [ -n "$mfps" ] && [ "$n" -gt "$mfps" ]; then
+            _EST_SAMPLED_FRAMES=$(( _EST_SAMPLED_FRAMES + mfps ))
+        elif [ -n "$sstep" ] && [ "$sstep" -gt 1 ]; then
+            _EST_SAMPLED_FRAMES=$(( _EST_SAMPLED_FRAMES + (n + sstep - 1) / sstep ))
+        else
+            _EST_SAMPLED_FRAMES=$(( _EST_SAMPLED_FRAMES + n ))
+        fi
+    done
+}
+
 _print_config_box() {
+_estimate_dataset_frames "$DATASET_ROOT" "$MAX_FRAMES_PER_SEQ" "$SAMPLE_STEP"
 echo ""
 _print_top
 _print_empty
@@ -484,14 +572,31 @@ _print_row "Dataset Path:"  "$DATASET_ROOT"
 _print_row "Mode:"          "$MODE"
 [ -n "$LOG_SUFFIX" ] && \
 _print_row "Version:"       "$LOG_SUFFIX"
+case $MODE in
+    finetune) _LABEL="${DATASET_NAME}_finetuned" ;;
+    *)        _LABEL="${DATASET_NAME}_${MODE}" ;;
+esac
+_print_row "Label:"         "$_LABEL"
+_print_row "Dataset Type:"  "CustomDataset (use_custom_dataset=1)"
+if [ -n "$TARGET_WIDTH" ] && [ -n "$TARGET_HEIGHT" ]; then
+    _print_row "Image Size:"    "${TARGET_WIDTH}x${TARGET_HEIGHT}"
+else
+    _print_row "Image Size:"    "640x360 (default custom 4K)"
+fi
 _section_end
 
 _maybe_sep
 _print_row "Batch Size:"    "$BATCH_SIZE"
 _print_row "Angle Range:"   "+/-${ANGLE_RANGE_DEG} deg"
 _print_row "Trans Range:"   "${TRANS_RANGE}m"
-[ -n "$LEARNING_RATE" ] && \
-_print_row "Learning Rate:" "$LEARNING_RATE"
+case $MODE in
+    scratch)  _EFF_LR="${LEARNING_RATE:-1e-4}" ;;
+    finetune) _EFF_LR="${LEARNING_RATE:-5e-5}" ;;
+    resume)   _EFF_LR="${LEARNING_RATE:-1e-4}" ;;
+    *)        _EFF_LR="${LEARNING_RATE:-1e-4}" ;;
+esac
+_print_row "Learning Rate:" "$_EFF_LR"
+_print_row "Weight Decay:"  "${WEIGHT_DECAY:-1e-4}"
 _print_row "Rotation Only:" "$([ "$ROTATION_ONLY" -eq 1 ] && echo 'yes (skip translation)' || echo 'no (optimize both)')"
 _section_end
 
@@ -505,6 +610,10 @@ _HAS_LR_SECTION=0
 if [ -n "$LR_SCHEDULE" ]; then
     _maybe_sep; _HAS_LR_SECTION=1
     _print_row "LR Schedule:"   "$LR_SCHEDULE"
+fi
+if [ -z "$LR_SCHEDULE" ] || [ "$LR_SCHEDULE" = "step" ]; then
+    [ "$_HAS_LR_SECTION" -eq 0 ] && { _maybe_sep; _HAS_LR_SECTION=1; }
+    _print_row "LR Step Size:"  "$_MODE_STEP_SIZE epochs"
 fi
 [ -n "$WARMUP_EPOCHS" ] && {
     [ "$_HAS_LR_SECTION" -eq 0 ] && { _maybe_sep; _HAS_LR_SECTION=1; }
@@ -539,30 +648,151 @@ _HAS_PERTURB=0
 [ "$_HAS_PERTURB" -eq 1 ] && _section_end
 
 _maybe_sep
-_AUG_STR=""
-[ -n "$AUGMENT_PC_JITTER" ] && [ "$AUGMENT_PC_JITTER" != "0" ] && [ "$AUGMENT_PC_JITTER" != "0.0" ] && \
-    _AUG_STR="${_AUG_STR}jitter=${AUGMENT_PC_JITTER} "
-[ -n "$AUGMENT_PC_DROPOUT" ] && [ "$AUGMENT_PC_DROPOUT" != "0" ] && [ "$AUGMENT_PC_DROPOUT" != "0.0" ] && \
-    _AUG_STR="${_AUG_STR}dropout=${AUGMENT_PC_DROPOUT} "
-[ -n "$AUGMENT_COLOR_JITTER" ] && [ "$AUGMENT_COLOR_JITTER" != "0" ] && [ "$AUGMENT_COLOR_JITTER" != "0.0" ] && \
-    _AUG_STR="${_AUG_STR}color=${AUGMENT_COLOR_JITTER} "
-[ -n "$AUGMENT_INTRINSIC" ] && [ "$AUGMENT_INTRINSIC" != "0" ] && [ "$AUGMENT_INTRINSIC" != "0.0" ] && \
-    _AUG_STR="${_AUG_STR}intrinsic=±${AUGMENT_INTRINSIC} "
+_AUG_ACTIVE=""
+_AUG_OFF=""
+[ -n "$AUGMENT_PC_JITTER" ] && {
+    if [ "$AUGMENT_PC_JITTER" != "0" ] && [ "$AUGMENT_PC_JITTER" != "0.0" ]; then
+        _AUG_ACTIVE="${_AUG_ACTIVE}jitter=${AUGMENT_PC_JITTER} "
+    else _AUG_OFF="${_AUG_OFF}jitter=off "; fi
+}
+[ -n "$AUGMENT_PC_DROPOUT" ] && {
+    if [ "$AUGMENT_PC_DROPOUT" != "0" ] && [ "$AUGMENT_PC_DROPOUT" != "0.0" ]; then
+        _AUG_ACTIVE="${_AUG_ACTIVE}pc_drop=${AUGMENT_PC_DROPOUT} "
+    else _AUG_OFF="${_AUG_OFF}pc_drop=off "; fi
+}
+[ -n "$AUGMENT_COLOR_JITTER" ] && {
+    if [ "$AUGMENT_COLOR_JITTER" != "0" ] && [ "$AUGMENT_COLOR_JITTER" != "0.0" ]; then
+        _AUG_ACTIVE="${_AUG_ACTIVE}color=${AUGMENT_COLOR_JITTER} "
+    else _AUG_OFF="${_AUG_OFF}color=off "; fi
+}
+[ -n "$AUGMENT_INTRINSIC" ] && {
+    if [ "$AUGMENT_INTRINSIC" != "0" ] && [ "$AUGMENT_INTRINSIC" != "0.0" ]; then
+        if [ -n "$AUGMENT_INTRINSIC_CXCY" ] && [ "$AUGMENT_INTRINSIC_CXCY" != "0" ] && [ "$AUGMENT_INTRINSIC_CXCY" != "0.0" ]; then
+            _AUG_ACTIVE="${_AUG_ACTIVE}intrinsic=±${AUGMENT_INTRINSIC}(cxcy=±${AUGMENT_INTRINSIC_CXCY}) "
+        else
+            _AUG_ACTIVE="${_AUG_ACTIVE}intrinsic=±${AUGMENT_INTRINSIC} "
+        fi
+    else _AUG_OFF="${_AUG_OFF}intrinsic=off "; fi
+}
 [ -n "$AUGMENT_PITCH_FLIP_PROB" ] && [ "$AUGMENT_PITCH_FLIP_PROB" != "0" ] && [ "$AUGMENT_PITCH_FLIP_PROB" != "0.0" ] && \
-    _AUG_STR="${_AUG_STR}pflip=${AUGMENT_PITCH_FLIP_PROB}(±${AUGMENT_PITCH_FLIP_MAX_DEG:-6}°)"
-_print_row "Augmentation:"  "${_AUG_STR:-disabled}"
+    _AUG_ACTIVE="${_AUG_ACTIVE}pperturb=${AUGMENT_PITCH_FLIP_PROB}(±${AUGMENT_PITCH_FLIP_MAX_DEG:-2}°) "
+[ -n "$AUGMENT_PITCH_SIGN_FLIP_PROB" ] && [ "$AUGMENT_PITCH_SIGN_FLIP_PROB" != "0" ] && [ "$AUGMENT_PITCH_SIGN_FLIP_PROB" != "0.0" ] && \
+    _AUG_ACTIVE="${_AUG_ACTIVE}psignflip=${AUGMENT_PITCH_SIGN_FLIP_PROB} "
+if [ -n "$_AUG_ACTIVE" ]; then
+    _print_row "Augmentation:"  "$_AUG_ACTIVE"
+    [ -n "$_AUG_OFF" ] && \
+    _print_row "  (disabled):"  "$_AUG_OFF"
+else
+    _print_row "Augmentation:"  "${_AUG_OFF:-disabled}"
+fi
 [ -n "$EARLY_STOPPING_PATIENCE" ] && [ "$EARLY_STOPPING_PATIENCE" != "0" ] && \
 _print_row "Early Stop:"    "patience=$EARLY_STOPPING_PATIENCE"
 _section_end
 
 _maybe_sep
+_print_row "Num Epochs:"    "$_MODE_EPOCHS"
+_print_row "Save Ckpt:"     "every ${_MODE_SAVE_CKPT} epochs"
+_print_row "Seed:"          "${SEED:-42}"
+[ -n "$PRETRAIN_CKPT" ] && \
+_print_row "Pretrain Ckpt:" "$PRETRAIN_CKPT"
+[ -n "$GRAD_ACCUM_STEPS" ] && [ "$GRAD_ACCUM_STEPS" != "1" ] && \
+_print_row "Grad Accum:"    "${GRAD_ACCUM_STEPS} steps"
+_print_row "Eval Freq:"     "every ${EVAL_EPOCHES:-50} epochs"
+[ -n "$EVAL_ANGLE_RANGE_DEG" ] && \
+_print_row "Eval Angle:"    "+/-${EVAL_ANGLE_RANGE_DEG} deg"
+[ -n "$EVAL_TRANS_RANGE" ] && \
+_print_row "Eval Trans:"    "${EVAL_TRANS_RANGE}m"
+_section_end
+
+_HAS_MODEL_ARCH=0
+_DEFORMABLE_VAL=${USE_DEFORMABLE:-0}
+_maybe_sep; _HAS_MODEL_ARCH=1
+_print_row "Deformable:"    "$([ "$_DEFORMABLE_VAL" != "0" ] && echo 'enabled' || echo 'disabled (standard attention)')"
+_print_row "Regress Head:"  "$([ "${USE_MLP_HEAD:-1}" = "1" ] && echo 'MLP (3-layer)' || echo 'Linear (single)')"
+_print_row "Geodesic Loss:" "$([ "${USE_GEODESIC_LOSS:-0}" = "1" ] && echo 'enabled' || echo 'disabled (quaternion)')"
+_print_row "BEV Encoder:"   "enabled (bev_encoder=1)"
+_print_row "Input Mode:"    "xyz_only (point cloud xyz coordinates)"
+_print_row "Scheduler:"     "enabled (scheduler=1)"
+[ -n "$BEV_POOL_FACTOR" ] && {
+    [ "$_HAS_MODEL_ARCH" -eq 0 ] && { _maybe_sep; _HAS_MODEL_ARCH=1; }
+    _print_row "BEV Pool:"      "factor=${BEV_POOL_FACTOR}"
+}
+_HAS_DEPTH=0
+[ -n "$USE_FOUNDATION_DEPTH" ] && [ "$USE_FOUNDATION_DEPTH" = "1" ] && {
+    [ "$_HAS_MODEL_ARCH" -eq 0 ] && { _maybe_sep; _HAS_MODEL_ARCH=1; }
+    _HAS_DEPTH=1
+    _DEPTH_STR="enabled"
+    [ -n "$DEPTH_MODEL_TYPE" ] && _DEPTH_STR="${_DEPTH_STR} (${DEPTH_MODEL_TYPE})"
+    [ -n "$FD_MODE" ] && _DEPTH_STR="${_DEPTH_STR} mode=${FD_MODE}"
+    _print_row "Found. Depth:"  "$_DEPTH_STR"
+    [ -n "$DEPTH_SUP_ALPHA" ] && \
+    _print_row "Depth Alpha:"   "$DEPTH_SUP_ALPHA"
+}
+[ "$_HAS_MODEL_ARCH" -eq 1 ] && _section_end
+
+_maybe_sep
 _print_row "Compute:"       "$COMPUTE_STR"
 _print_row "GPU:"           "${GPU_NAME} (${GPU_MEM}MB) x${AVAIL_GPUS}"
+if [ -n "$DDP_NGPUS" ]; then
+    _EFF_BS=$(( BATCH_SIZE * DDP_NGPUS * NNODES ))
+    _print_row "Eff. Batch:"    "${BATCH_SIZE} x ${DDP_NGPUS}gpu x ${NNODES}node = ${_EFF_BS}"
+fi
 _print_row "PyTorch:"       "$PYTORCH_VER"
 _print_row "CUDA:"          "$CUDA_VER"
 _print_row "torch.compile:" "$([ "$USE_COMPILE" -eq 1 ] && echo 'enabled' || echo 'disabled')"
 _print_row "BEV Z-Step:"    "${BEV_ZBOUND_STEP:-4.0}"
+if [ "${USE_DRCV_BACKEND:-0}" = "1" ]; then
+    _print_row "Sparse Conv:"   "drcv (USE_DRCV_BACKEND=1)"
+else
+    _print_row "Sparse Conv:"   "spconv (default)"
+fi
+[ "${HF_HUB_OFFLINE:-}" = "1" ] && \
+_print_row "HF Offline:"    "enabled"
+if [ -n "$DDP_NGPUS" ]; then
+    _DDP_SCALE_VAL="${DDP_AUTO_SCALE:-1}"
+    _REF_GPUS="${DDP_REFERENCE_GPUS:-8}"
+    _TOTAL_GPUS=$(( DDP_NGPUS * NNODES ))
+    case "$_DDP_SCALE_VAL" in
+        1) _SCALE_DESC="⚡加速 (√LR+warmup, epoch不变)" ;;
+        2) _SCALE_DESC="🔒保步 (增epoch匹配总步数)" ;;
+        0) _SCALE_DESC="disabled" ;;
+        *) _SCALE_DESC="unknown(${_DDP_SCALE_VAL})" ;;
+    esac
+    if [ "$_TOTAL_GPUS" -gt "$_REF_GPUS" ]; then
+        _SCALE_DESC="${_SCALE_DESC} [ref=${_REF_GPUS}→${_TOTAL_GPUS}GPU, 触发缩放]"
+    else
+        _SCALE_DESC="${_SCALE_DESC} [${_TOTAL_GPUS}GPU≤ref=${_REF_GPUS}, 不触发]"
+    fi
+    _print_row "DDP Scaling:"   "$_SCALE_DESC"
+    _print_row "  Ref GPUs:"   "${_REF_GPUS}"
+fi
 _section_end
+
+_HAS_SAMPLING=0
+if [ -n "$MAX_FRAMES_PER_SEQ" ]; then
+    _maybe_sep; _HAS_SAMPLING=1
+    _print_row "Sampling:"     "max_frames_per_seq=${MAX_FRAMES_PER_SEQ} (每序列均匀抽取)"
+fi
+if [ -n "$SAMPLE_STEP" ]; then
+    _maybe_sep; _HAS_SAMPLING=1
+    _print_row "Sampling:"     "sample_step=${SAMPLE_STEP} (每隔${SAMPLE_STEP}帧取1帧)"
+fi
+if [ "$_EST_RAW_FRAMES" -gt 0 ]; then
+    [ "$_HAS_SAMPLING" -eq 0 ] && { _maybe_sep; _HAS_SAMPLING=1; }
+    _print_row "  Sequences:"  "${_EST_SEQ_COUNT}"
+    _print_row "  Raw Frames:" "${_EST_RAW_FRAMES}"
+    _print_row "  After Sample:" "${_EST_SAMPLED_FRAMES} ($(( _EST_SAMPLED_FRAMES * 100 / _EST_RAW_FRAMES ))%)"
+    _EST_TRAIN_FRAMES=$(( _EST_SAMPLED_FRAMES * 4 / 5 ))
+    if [ -n "$DDP_NGPUS" ]; then
+        _G_BS=$(( BATCH_SIZE * DDP_NGPUS * NNODES ))
+        _STEPS=$(( _EST_TRAIN_FRAMES / _G_BS ))
+        _print_row "  Steps/Epoch:" "${_STEPS} (global_bs=${_G_BS}, train 80%=${_EST_TRAIN_FRAMES})"
+    else
+        _STEPS=$(( _EST_TRAIN_FRAMES / BATCH_SIZE ))
+        _print_row "  Steps/Epoch:" "${_STEPS} (bs=${BATCH_SIZE}, train 80%=${_EST_TRAIN_FRAMES})"
+    fi
+fi
+[ "$_HAS_SAMPLING" -eq 1 ] && _section_end
 
 _maybe_sep
 _print_row "Voxel Mode:"       "${VOXEL_MODE:-hard}"
@@ -574,8 +804,32 @@ if [ "$NNODES" -gt 1 ]; then
     _print_row "Node Rank:"     "$NODE_RANK"
     _print_row "Master:"        "${MASTER_ADDR}:${MASTER_PORT}"
     _print_row "RDZV Timeout:"  "${RDZV_TIMEOUT}s"
+    _print_row "NCCL IFNAME:"   "${NCCL_SOCKET_IFNAME:-auto}"
 fi
 _section_end
+
+_HAS_VIS=0
+[ -n "$ENABLE_VIS" ] && [ "$ENABLE_VIS" = "1" ] && {
+    _maybe_sep; _HAS_VIS=1
+    _VIS_STR="enabled"
+    [ -n "$VIS_FREQ" ] && _VIS_STR="${_VIS_STR} (freq=${VIS_FREQ})"
+    _print_row "Visualization:" "$_VIS_STR"
+    _print_row "  Vis Samples:" "${VIS_SAMPLES:-3}"
+    _print_row "  Vis Points:"  "${VIS_POINTS:-80000}"
+    _print_row "  Point Radius:" "${VIS_POINT_RADIUS:-1}"
+}
+[ -n "$VALIDATE_DATA" ] && [ "$VALIDATE_DATA" = "1" ] && {
+    [ "$_HAS_VIS" -eq 0 ] && { _maybe_sep; _HAS_VIS=1; }
+    _print_row "Validate Data:" "enabled"
+    _print_row "  Sample Ratio:" "${VALIDATE_SAMPLE_RATIO:-0.1} (采样验证比例)"
+    _print_row "  Min Pt Util:"  "${MIN_POINT_UTILIZATION:-0.5} (最低点云利用率)"
+    _print_row "  Min Valid:"    "${MIN_VALID_RATIO:-0.9} (最低有效帧比例)"
+}
+[ -n "$ENABLE_CKPT_EVAL" ] && [ "$ENABLE_CKPT_EVAL" = "1" ] && {
+    [ "$_HAS_VIS" -eq 0 ] && { _maybe_sep; _HAS_VIS=1; }
+    _print_row "Ckpt Eval:"     "enabled"
+}
+[ "$_HAS_VIS" -eq 1 ] && _section_end
 
 _maybe_sep
 _print_row "Log Directory:"     "$LOG_DIR"
@@ -588,6 +842,28 @@ _print_row "TensorBoard Port:"  "$TENSORBOARD_PORT"
 _print_bot
 echo ""
 }
+
+if [ -n "$DDP_NGPUS" ] && [ "$NNODES" -gt 1 ]; then
+    _EARLY_NCCL_IF=$(ip -4 route show default 2>/dev/null | awk '{print $5}' | head -1)
+    if [ -z "$_EARLY_NCCL_IF" ]; then
+        _EARLY_NCCL_IF=$(ip -4 addr show scope global 2>/dev/null | grep -oP '^\d+:\s+\K[^:@\s]+' | head -1)
+    fi
+    if [ -z "$_EARLY_NCCL_IF" ] && ip link show eth0 >/dev/null 2>&1; then
+        _EARLY_NCCL_IF="eth0"
+    fi
+    if [ -n "$_EARLY_NCCL_IF" ] && ip link show "$_EARLY_NCCL_IF" >/dev/null 2>&1; then
+        NCCL_SOCKET_IFNAME=$_EARLY_NCCL_IF
+    else
+        NCCL_SOCKET_IFNAME="^lo,docker0"
+    fi
+fi
+
+case $MODE in
+    scratch)  _MODE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-400}; _MODE_STEP_SIZE=80; _MODE_SAVE_CKPT=40 ;;
+    finetune) _MODE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-50};  _MODE_STEP_SIZE=20; _MODE_SAVE_CKPT=10 ;;
+    resume)   _MODE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-100}; _MODE_STEP_SIZE=20; _MODE_SAVE_CKPT=10 ;;
+    *)        _MODE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-400}; _MODE_STEP_SIZE=80; _MODE_SAVE_CKPT=40 ;;
+esac
 
 _CONFIG_OUTPUT=$(_print_config_box 2>&1)
 echo "$_CONFIG_OUTPUT"
@@ -613,33 +889,51 @@ fi
 echo "✓ Dataset found"
 echo ""
 
-# Check if bev_pool extension is compiled
-echo "Checking bev_pool CUDA extension..."
-BEV_POOL_DIR="./kitti-bev-calib/img_branch/bev_pool"
-BEV_POOL_SO=$(find "$BEV_POOL_DIR" -name "*.so" 2>/dev/null)
-
-if [ -z "$BEV_POOL_SO" ]; then
-    echo "⚠️  bev_pool CUDA extension not compiled"
-    echo "Compiling bev_pool extension..."
-    
-    cd "$BEV_POOL_DIR"
-    python setup.py build_ext --inplace
-    
-    if [ $? -ne 0 ]; then
-        echo ""
-        echo "❌ Error: Failed to compile bev_pool extension"
-        echo ""
-        echo "Please make sure:"
-        echo "  1. PyTorch is installed: pip install torch"
-        echo "  2. CUDA toolkit is installed and configured"
-        echo "  3. Run manually: cd $BEV_POOL_DIR && python setup.py build_ext --inplace"
-        exit 1
-    fi
-    
-    cd - > /dev/null
-    echo "✓ bev_pool extension compiled successfully"
+# Check if bev_pool extension is compiled (skip when using DRCV backend)
+if [ "${USE_DRCV_BACKEND:-0}" = "1" ]; then
+    echo "ℹ️  使用 DRCV 后端，跳过 bev_pool CUDA 扩展检查"
 else
-    echo "✓ bev_pool extension already compiled"
+    echo "Checking bev_pool CUDA extension..."
+    BEV_POOL_DIR="./kitti-bev-calib/img_branch/bev_pool"
+    BEV_POOL_SO=$(find "$BEV_POOL_DIR" -name "*.so" 2>/dev/null)
+
+    if [ -z "$BEV_POOL_SO" ]; then
+        if [ "$NODE_RANK" = "0" ] || [ -z "$DDP_NGPUS" ]; then
+            echo "⚠️  bev_pool CUDA extension not compiled"
+            echo "Compiling bev_pool extension..."
+            
+            cd "$BEV_POOL_DIR"
+            python setup.py build_ext --inplace
+            
+            if [ $? -ne 0 ]; then
+                echo ""
+                echo "❌ Error: Failed to compile bev_pool extension"
+                echo ""
+                echo "Please make sure:"
+                echo "  1. PyTorch is installed: pip install torch"
+                echo "  2. CUDA toolkit is installed and configured"
+                echo "  3. Run manually: cd $BEV_POOL_DIR && python setup.py build_ext --inplace"
+                exit 1
+            fi
+            
+            cd - > /dev/null
+            echo "✓ bev_pool extension compiled successfully"
+        else
+            echo "⏳ Worker 节点等待 Master 编译 bev_pool..."
+            _WAIT_COUNT=0
+            while [ -z "$(find "$BEV_POOL_DIR" -name '*.so' 2>/dev/null)" ]; do
+                sleep 2
+                _WAIT_COUNT=$((_WAIT_COUNT + 1))
+                if [ "$_WAIT_COUNT" -ge 60 ]; then
+                    echo "❌ 等待超时(120s): Master 未完成 bev_pool 编译"
+                    exit 1
+                fi
+            done
+            echo "✓ bev_pool extension ready (由 Master 编译)"
+        fi
+    else
+        echo "✓ bev_pool extension already compiled"
+    fi
 fi
 echo ""
 
@@ -678,9 +972,12 @@ OPTIM_FLAGS=""
 [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
 [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
 [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_intrinsic $AUGMENT_INTRINSIC"
+[ -n "$AUGMENT_INTRINSIC_CXCY" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_intrinsic_cxcy $AUGMENT_INTRINSIC_CXCY"
 [ -n "$AUGMENT_PITCH_FLIP_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pitch_flip_prob $AUGMENT_PITCH_FLIP_PROB"
 [ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
+[ -n "$AUGMENT_PITCH_SIGN_FLIP_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_pitch_sign_flip_prob $AUGMENT_PITCH_SIGN_FLIP_PROB"
 [ -n "$EVAL_ANGLE_RANGE_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --eval_angle_range_deg $EVAL_ANGLE_RANGE_DEG"
+[ -n "$EVAL_TRANS_RANGE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --eval_trans_range $EVAL_TRANS_RANGE"
 [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
 [ -n "$SEED" ] && OPTIM_FLAGS="$OPTIM_FLAGS --seed $SEED"
 [ -n "$PRETRAIN_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --pretrain_ckpt $PRETRAIN_CKPT"
@@ -691,11 +988,29 @@ OPTIM_FLAGS=""
 [ -n "$FD_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --fd_mode $FD_MODE"
 [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_FLAGS="$OPTIM_FLAGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
 [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_FLAGS="$OPTIM_FLAGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
+[ -n "$SAMPLE_STEP" ] && OPTIM_FLAGS="$OPTIM_FLAGS --sample_step $SAMPLE_STEP"
 [ -n "$EVAL_EPOCHES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --eval_epoches $EVAL_EPOCHES"
 [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --grad_accum_steps $GRAD_ACCUM_STEPS"
 [ -n "$VOXEL_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --voxel_mode $VOXEL_MODE"
 [ -n "$TO_BEV_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --to_bev_mode $TO_BEV_MODE"
 [ -n "$SCATTER_REDUCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --scatter_reduce $SCATTER_REDUCE"
+[ -n "$ENABLE_VIS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_vis $ENABLE_VIS"
+[ -n "$VIS_FREQ" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_freq $VIS_FREQ"
+[ -n "$VALIDATE_DATA" ] && OPTIM_FLAGS="$OPTIM_FLAGS --validate_data $VALIDATE_DATA"
+[ -n "$ENABLE_CKPT_EVAL" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_ckpt_eval $ENABLE_CKPT_EVAL"
+[ -n "$VIS_SAMPLES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_samples $VIS_SAMPLES"
+[ -n "$VIS_POINTS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_points $VIS_POINTS"
+[ -n "$VIS_POINT_RADIUS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_point_radius $VIS_POINT_RADIUS"
+[ -n "$VALIDATE_SAMPLE_RATIO" ] && OPTIM_FLAGS="$OPTIM_FLAGS --validate_sample_ratio $VALIDATE_SAMPLE_RATIO"
+[ -n "$MIN_POINT_UTILIZATION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --min_point_utilization $MIN_POINT_UTILIZATION"
+[ -n "$MIN_VALID_RATIO" ] && OPTIM_FLAGS="$OPTIM_FLAGS --min_valid_ratio $MIN_VALID_RATIO"
+[ -n "$DDP_AUTO_SCALE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --ddp_auto_scale $DDP_AUTO_SCALE"
+[ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
+[ -n "$MAX_SCALED_LR" ] && OPTIM_FLAGS="$OPTIM_FLAGS --max_scaled_lr $MAX_SCALED_LR"
+[ -n "$DATA_BALANCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --data_balance $DATA_BALANCE"
+[ -n "$WEIGHT_DECAY" ] && OPTIM_FLAGS="$OPTIM_FLAGS --wd $WEIGHT_DECAY"
+[ -n "$TARGET_WIDTH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --target_width $TARGET_WIDTH"
+[ -n "$TARGET_HEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --target_height $TARGET_HEIGHT"
 
 DEFORMABLE_VAL=${USE_DEFORMABLE:-0}
 [ -n "$BEV_POOL_FACTOR" ] && OPTIM_FLAGS="$OPTIM_FLAGS --bev_pool_factor $BEV_POOL_FACTOR"
@@ -706,24 +1021,24 @@ RESUME_EPOCHS=${NUM_EPOCHS_OVERRIDE:-100}
 
 if [ -n "$DDP_NGPUS" ]; then
     if [ "$NNODES" -gt 1 ]; then
-        # 检测NCCL使用的网络接口
-        # 优先级: 默认路由接口 > 任意有IP的非loopback接口 > 排除模式
+        # 检测网络接口 (NCCL + Gloo 分别设置)
+        # 优先级: 默认路由 > 全局scope接口 > eth0 > 排除模式(仅NCCL)
         DETECTED_IF=$(ip -4 route show default 2>/dev/null | awk '{print $5}' | head -1)
         if [ -z "$DETECTED_IF" ]; then
             DETECTED_IF=$(ip -4 addr show scope global 2>/dev/null | grep -oP '^\d+:\s+\K[^:@\s]+' | head -1)
         fi
-        if [ -n "$DETECTED_IF" ]; then
-            # 验证接口确实存在
-            if ip link show "$DETECTED_IF" >/dev/null 2>&1; then
-                export NCCL_SOCKET_IFNAME=$DETECTED_IF
-            else
-                export NCCL_SOCKET_IFNAME="^lo,docker0"
-            fi
-        else
-            # 无法检测具体接口，使用排除模式让NCCL自动选择
-            export NCCL_SOCKET_IFNAME="^lo,docker0"
+        if [ -z "$DETECTED_IF" ] && ip link show eth0 >/dev/null 2>&1; then
+            DETECTED_IF="eth0"
         fi
-        export GLOO_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME
+
+        if [ -n "$DETECTED_IF" ] && ip link show "$DETECTED_IF" >/dev/null 2>&1; then
+            export NCCL_SOCKET_IFNAME=$DETECTED_IF
+            export GLOO_SOCKET_IFNAME=$DETECTED_IF
+        else
+            # Gloo 不支持排除模式，不设置让它自动选择
+            export NCCL_SOCKET_IFNAME="^lo,docker0"
+            unset GLOO_SOCKET_IFNAME
+        fi
         export NCCL_DEBUG=INFO
         export NCCL_DEBUG_SUBSYS=INIT,NET
         export NCCL_BLOCKING_WAIT=1
@@ -737,6 +1052,57 @@ if [ -n "$DDP_NGPUS" ]; then
             IS_HOST=0
         fi
 
+        echo "Multi-node DDP: ${NNODES} nodes x ${DDP_NGPUS} GPUs/node, node_rank=$NODE_RANK"
+        echo "Master: ${MASTER_ADDR}:${MASTER_PORT}, rdzv_timeout=${RDZV_TIMEOUT}s"
+        echo "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-<unset>}"
+        echo "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-<unset>}"
+
+        # Pre-flight network diagnostics
+        echo ""
+        echo "[DDP] === 网络诊断 ==="
+        _LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        echo "[DDP] 本机IP: ${_LOCAL_IP:-unknown}"
+        echo "[DDP] Hostname: $(hostname 2>/dev/null || echo unknown)"
+        _DEFAULT_IF=$(ip -4 route show default 2>/dev/null | awk '{print $5}' | head -1)
+        echo "[DDP] 默认路由接口: ${_DEFAULT_IF:-<未检测到>}"
+        ip -4 addr show scope global 2>/dev/null | grep -E 'inet |^\d+:' | head -6
+
+        # DNS resolution check
+        _MASTER_IP=$(getent hosts "$MASTER_ADDR" 2>/dev/null | awk '{print $1}' | head -1)
+        if [ -z "$_MASTER_IP" ]; then
+            _MASTER_IP=$(python3 -c "import socket; print(socket.gethostbyname('$MASTER_ADDR'))" 2>/dev/null || true)
+        fi
+        if [ -n "$_MASTER_IP" ]; then
+            echo "[DDP] ✓ Master DNS: $MASTER_ADDR -> $_MASTER_IP"
+        else
+            echo "[DDP] ❌ 无法解析 Master 主机名: $MASTER_ADDR"
+            echo "[DDP]    可能原因: K8s headless service 未创建，或 DNS 传播延迟"
+            echo "[DDP]    尝试: kubectl get svc -l pytorch-job-name | grep headless"
+            echo "[DDP]    或者: --master_addr <master_pod_ip>"
+        fi
+
+        # Connectivity check (worker only)
+        if [ "$NODE_RANK" -ne 0 ]; then
+            _CONN_OK=0
+            for _TRY in 1 2 3; do
+                if timeout 5 bash -c "echo >/dev/tcp/$MASTER_ADDR/$MASTER_PORT" 2>/dev/null; then
+                    echo "[DDP] ✓ Master $MASTER_ADDR:$MASTER_PORT 可达 (尝试 $_TRY)"
+                    _CONN_OK=1
+                    break
+                fi
+                echo "[DDP] ⏳ Master 暂不可达 (尝试 $_TRY/3, 等待 5s...)"
+                sleep 5
+            done
+            if [ "$_CONN_OK" -eq 0 ]; then
+                echo "[DDP] ⚠️  Master $MASTER_ADDR:$MASTER_PORT 3次尝试后仍不可达"
+                echo "[DDP]    torchrun 将继续等待 (rdzv_timeout=${RDZV_TIMEOUT}s)"
+            fi
+        else
+            echo "[DDP] Master节点 → 等待 ${NNODES} 个节点加入..."
+        fi
+        echo "[DDP] === 诊断结束 ==="
+        echo ""
+
         LAUNCHER="torchrun \
             --nproc_per_node=$DDP_NGPUS \
             --nnodes=$NNODES \
@@ -744,10 +1110,7 @@ if [ -n "$DDP_NGPUS" ]; then
             --rdzv_backend=c10d \
             --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
             --rdzv_id=$RDZV_ID \
-            --rdzv_conf timeout=${RDZV_TIMEOUT},is_host=${IS_HOST}"
-        echo "Multi-node DDP: ${NNODES} nodes x ${DDP_NGPUS} GPUs/node, node_rank=$NODE_RANK"
-        echo "Master: ${MASTER_ADDR}:${MASTER_PORT}, rdzv_timeout=${RDZV_TIMEOUT}s"
-        echo "NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME"
+            --rdzv_conf join_timeout=${RDZV_TIMEOUT},close_timeout=${RDZV_TIMEOUT},is_host=${IS_HOST}"
     else
         LAUNCHER="torchrun --standalone --nproc_per_node=$DDP_NGPUS"
     fi
@@ -765,7 +1128,7 @@ case $MODE in
             --label ${DATASET_NAME}_scratch \
             --batch_size $BATCH_SIZE \
             --num_epochs $SCRATCH_EPOCHS \
-            --save_ckpt_per_epoches 40 \
+            --save_ckpt_per_epoches ${SAVE_CKPT_PER_EPOCHES:-50} \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
             --deformable $DEFORMABLE_VAL \
@@ -806,7 +1169,7 @@ case $MODE in
             --label ${DATASET_NAME}_finetuned \
             --batch_size $BATCH_SIZE \
             --num_epochs $FINETUNE_EPOCHS \
-            --save_ckpt_per_epoches 10 \
+            --save_ckpt_per_epoches 50 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
             --lr $LR_FINETUNE \
@@ -847,7 +1210,7 @@ case $MODE in
             --label ${DATASET_NAME}_resume \
             --batch_size $BATCH_SIZE \
             --num_epochs $RESUME_EPOCHS \
-            --save_ckpt_per_epoches 10 \
+            --save_ckpt_per_epoches 50 \
             --angle_range_deg $ANGLE_RANGE_DEG \
             --trans_range $TRANS_RANGE \
             --deformable $DEFORMABLE_VAL \

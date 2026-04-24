@@ -1,0 +1,87 @@
+# V15 Deformable Attention 泛化评估配置
+#
+# V15 实验: 验证 Deformable Attention 相比标准 Transformer 的效果
+# 对照: V8 scatter-mean/sum (标准 Transformer)
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v15_deformable.yaml
+#   多卡并行:
+#     ... --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v15_deformable_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v15_deformable_quick"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # === V15 Deformable Attention 实验 ===
+
+  # 0. Deformable + scatter-mean (对照 V8 scatter-mean)
+  - label: "v15-deformable-mean"
+    dir_name: "model_small_5deg_v15_deformable_scatter_mean_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    use_deformable: 1
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v15-deformable-mean"
+    mode_desc: "V15: Deformable + scatter-mean (对照 V8 标准Transformer)"
+
+  # 1. Deformable + scatter-sum (对照 V8 scatter-sum)
+  - label: "v15-deformable-sum"
+    dir_name: "model_small_5deg_v15_deformable_scatter_sum_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    use_deformable: 1
+    voxel_mode: "scatter"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v15-deformable-sum"
+    mode_desc: "V15: Deformable + scatter-sum (对照 V8 标准Transformer)"
+
+  # 2. Deformable + scatter-mean + Z=10 (更细Z分层)
+  - label: "v15-deformable-mean-z10"
+    dir_name: "model_small_5deg_v15_deformable_scatter_mean_z10_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    use_deformable: 1
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v15-deformable-mean-z10"
+    mode_desc: "V15: Deformable + scatter-mean + Z=10 (对照 V8+Z10)"
+
+# ============================================================================
+# V15 vs V8 对照矩阵
+# ============================================================================
+#
+#   实验                          | Deformable | scatter | Z  | 对照
+#   ------------------------------+------------+---------+----+-------------------
+#   v15-deformable-mean           | Yes        | mean    | 5  | v8-baseline
+#   v15-deformable-sum            | Yes        | sum     | 5  | v8-scatter-sum
+#   v15-deformable-mean-z10       | Yes        | mean    | 10 | v8-z10

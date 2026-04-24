@@ -1,0 +1,107 @@
+# V16 Full DrInfer 泛化评估配置 — 全量训练 StepLR vs Cosine + 双模式 Pitch 增强
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v16_full_drinfer.yaml
+#   多卡并行:
+#     ... --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v16_full_drinfer"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # === V16 Full 全量训练 (DrInfer + PyTorch 对照) ===
+
+  # 0. 终极配置: StepLR + Pitch3 + dual_pitch
+  - label: "v16-ultimate [DrInfer]"
+    dir_name: "model_small_5deg_v16_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-ultimate-drinfer"
+    mode_desc: "V16 Full: StepLR+Pitch3+sign_flip(0.1)+perturb(0.15,2deg)"
+
+  # 1. sign_flip only + Pitch3
+  - label: "v16-pitch3-signflip [DrInfer]"
+    dir_name: "model_small_5deg_v16_pitch3_signflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-pitch3-signflip-drinfer"
+    mode_desc: "V16 Full: StepLR+Pitch3+sign_flip(0.15)"
+
+  # 2. 纯 Aug 对照 (Pitch3, 无pitch增强)
+  - label: "v16-pitch3-aug [DrInfer]"
+    dir_name: "model_small_5deg_v16_pitch3_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-pitch3-aug-drinfer"
+    mode_desc: "V16 Full: StepLR+Pitch3+Aug (对照, 无pitch增强)"
+
+  # 3. CosineAnnealing 终极配置
+  - label: "v16-cosine-ultimate [DrInfer]"
+    dir_name: "model_small_5deg_v16_cosine_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-cosine-ultimate-drinfer"
+    mode_desc: "V16 Full: Cosine+Pitch3+sign_flip(0.1)+perturb(0.15,2deg)"

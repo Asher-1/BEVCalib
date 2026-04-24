@@ -57,15 +57,24 @@ class FullPreparationPipeline:
         """验证必要的脚本是否存在"""
         if self.args.mode in ['batch', 'single']:
             if self.args.mode == 'batch' and not self.batch_prepare_script.exists():
-                print(f"❌ 错误: {self.batch_prepare_script} 不存在")
-                sys.exit(1)
+                if self.args.dry_run:
+                    print(f"⚠️  [DRY-RUN] {self.batch_prepare_script} 不存在")
+                else:
+                    print(f"❌ 错误: {self.batch_prepare_script} 不存在")
+                    sys.exit(1)
             if self.args.mode == 'single' and not self.prepare_single_script.exists():
-                print(f"❌ 错误: {self.prepare_single_script} 不存在")
-                sys.exit(1)
+                if self.args.dry_run:
+                    print(f"⚠️  [DRY-RUN] {self.prepare_single_script} 不存在")
+                else:
+                    print(f"❌ 错误: {self.prepare_single_script} 不存在")
+                    sys.exit(1)
         
         if not self.resize_script.exists():
-            print(f"❌ 错误: {self.resize_script} 不存在")
-            sys.exit(1)
+            if self.args.dry_run:
+                print(f"⚠️  [DRY-RUN] {self.resize_script} 不存在")
+            else:
+                print(f"❌ 错误: {self.resize_script} 不存在")
+                sys.exit(1)
     
     def run(self):
         """运行完整流程"""
@@ -77,7 +86,9 @@ class FullPreparationPipeline:
         print(f"输出目录: {self.args.output_dir}")
         print(f"目标分辨率: {self.args.resize_width}×{self.args.resize_height}")
         if self.args.force_config:
-            print(f"⚠️  强制使用lidars.cfg外参（忽略bag中的lidar外参）")
+            print("⚠️  强制使用lidars.cfg外参（忽略bag中的lidar外参）")
+        if self.args.dry_run:
+            print("🔍 DRY-RUN 模式：只打印命令，不实际执行")
         print()
         
         # 步骤1: 数据准备
@@ -107,13 +118,49 @@ class FullPreparationPipeline:
         
         # 完成
         print("\n" + "=" * 80)
-        print("✅ 完整数据准备流程完成！")
+        if self.args.dry_run:
+            print("🔍 DRY-RUN 预览完成（未执行任何操作）")
+        else:
+            print("✅ 完整数据准备流程完成！")
         print("=" * 80)
         print(f"\n数据集位置: {self.args.output_dir}")
-        print(f"原始图像: sequences/*/image_2/")
-        print(f"Resize图像: sequences/*/image_2_{self.args.resize_width}x{self.args.resize_height}/")
-        print(f"\n下一步: 使用以下配置训练模型")
-        print(f"  --data_root {self.args.output_dir}")
+        if not self.args.skip_prepare:
+            print(f"原始图像: sequences/*/image_2/")
+            print(f"点云数据: sequences/*/velodyne/")
+        if not self.args.skip_resize:
+            print(f"Resize图像: sequences/*/image_2_{self.args.resize_width}x{self.args.resize_height}/")
+        
+        validate_script = self.script_dir.parent / "validation" / "validate_dataset.py"
+        validate_output = Path(self.args.output_dir) / "validation_results"
+        
+        step_num = 1
+        
+        if self.args.skip_resize:
+            print(f"\n{'─' * 60}")
+            print(f"📦 {step_num}. Resize 图像")
+            print(f"{'─' * 60}")
+            print(f"\n  python {Path(__file__).name} --mode resize-only \\")
+            print(f"      --dataset_root {self.args.output_dir} \\")
+            print(f"      --resize_width {self.args.resize_width} --resize_height {self.args.resize_height}")
+            step_num += 1
+        
+        print(f"\n{'─' * 60}")
+        print(f"📋 {step_num}. 验证数据集完整性")
+        print(f"{'─' * 60}")
+        print(f"\n  快速验证 (~17秒):")
+        print(f"    python {validate_script} quick {self.args.output_dir} \\")
+        print(f"        --output-dir {validate_output}")
+        print(f"\n  完整验证 (~15分钟):")
+        print(f"    python {validate_script} full {self.args.output_dir} \\")
+        print(f"        --output-dir {validate_output}")
+        print(f"\n  仅查看摘要:")
+        print(f"    python {validate_script} summary {self.args.output_dir}")
+        step_num += 1
+        
+        print(f"\n{'─' * 60}")
+        print(f"🚀 {step_num}. 验证通过后: 开始训练")
+        print(f"{'─' * 60}")
+        print(f"\n  --data_root {self.args.output_dir}")
         print(f"  --img_H {self.args.resize_height}")
         print(f"  --img_W {self.args.resize_width}")
         
@@ -132,7 +179,6 @@ class FullPreparationPipeline:
             "--output_base_dir", self.args.output_dir,
         ]
         
-        # 可选参数
         if self.args.camera_name:
             cmd.extend(["--camera_name", self.args.camera_name])
         if self.args.target_fps:
@@ -143,6 +189,10 @@ class FullPreparationPipeline:
             cmd.append("--force-config")
         
         print(f"\n执行命令:\n{' '.join(cmd)}\n")
+        
+        if self.args.dry_run:
+            print("[DRY-RUN] 跳过实际执行")
+            return True
         
         try:
             result = subprocess.run(cmd, check=True)
@@ -180,28 +230,37 @@ class FullPreparationPipeline:
         print("步骤 2/2: 图像 Resize（生成训练用的 resize 图像）")
         print("=" * 80)
         
-        # 检查数据是否存在
-        dataset_root = Path(self.args.output_dir if self.args.mode == 'resize-only' else self.args.output_dir)
+        dataset_root = Path(self.args.output_dir)
         seq_dir = dataset_root / "sequences"
         
-        if not seq_dir.exists():
-            print(f"❌ 未找到 sequences 目录: {seq_dir}")
-            print("   请先运行数据准备步骤")
-            return False
-        
-        # 统计需要 resize 的图像数量
-        image_count = 0
-        for seq in seq_dir.iterdir():
-            if seq.is_dir():
-                image_2_dir = seq / "image_2"
-                if image_2_dir.exists():
-                    image_count += len(list(image_2_dir.glob("*.png")))
-        
-        if image_count == 0:
-            print(f"❌ 未找到需要 resize 的图像")
-            return False
-        
-        print(f"\n找到 {image_count} 张图像需要 resize")
+        if self.args.dry_run:
+            if seq_dir.exists():
+                image_count = sum(
+                    len(list((seq / "image_2").glob("*.png")))
+                    for seq in seq_dir.iterdir()
+                    if seq.is_dir() and (seq / "image_2").exists()
+                )
+                print(f"\n找到 {image_count} 张图像需要 resize")
+            else:
+                print(f"\n[DRY-RUN] sequences 目录不存在: {seq_dir}")
+        else:
+            if not seq_dir.exists():
+                print(f"❌ 未找到 sequences 目录: {seq_dir}")
+                print("   请先运行数据准备步骤")
+                return False
+            
+            image_count = 0
+            for seq in seq_dir.iterdir():
+                if seq.is_dir():
+                    image_2_dir = seq / "image_2"
+                    if image_2_dir.exists():
+                        image_count += len(list(image_2_dir.glob("*.png")))
+            
+            if image_count == 0:
+                print("❌ 未找到需要 resize 的图像")
+                return False
+            
+            print(f"\n找到 {image_count} 张图像需要 resize")
         print(f"目标尺寸: {self.args.resize_width}×{self.args.resize_height}")
         print(f"并行工作进程: {self.args.resize_workers}\n")
         
@@ -216,6 +275,10 @@ class FullPreparationPipeline:
         ]
         
         print(f"执行命令:\n{' '.join(cmd)}\n")
+        
+        if self.args.dry_run:
+            print("[DRY-RUN] 跳过实际执行")
+            return True
         
         try:
             result = subprocess.run(cmd, check=True)
@@ -249,6 +312,12 @@ def main():
        --trips_file trips_list.txt \\
        --output_dir /data/bevcalib_training_data \\
        --skip-resize
+
+4. 预览模式（不实际执行）:
+   python run_full_preparation.py --mode batch \\
+       --trips_file trips_list.txt \\
+       --output_dir /data/bevcalib_training_data \\
+       --dry-run
 
 输出结构:
   output_dir/
@@ -310,6 +379,8 @@ def main():
                         help="跳过 resize 步骤，只运行数据准备")
     parser.add_argument("--skip-prepare", action="store_true",
                         help="跳过数据准备步骤，只运行 resize")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="预览模式，只打印将执行的命令，不实际运行")
     
     args = parser.parse_args()
     

@@ -87,48 +87,75 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
     last_angle = np.rad2deg(delta_rots[-1:].magnitude()[0]) if B > 0 else 0.0
     return T_new, last_angle, rand_magnitudes[-1] if B > 0 else 0.0
 
-def augment_gt_pitch_flip(T, prob=0.5, max_deg=6.0):
-    """Balance pitch distribution by applying random Y-axis rotation to GT extrinsics.
+def augment_gt_pitch_flip(T, prob=0.5, max_deg=6.0, sign_flip_prob=0.0):
+    """Balance pitch distribution via LiDAR Y-axis rotation of GT extrinsics.
 
-    The LiDAR→Camera rotation matrix has a "pitch sign" that depends on
-    camera mounting angle crossing the nominal -90° roll boundary. Training
-    data is often imbalanced (e.g. 66% positive vs 34% negative pitch sign),
-    causing systematic prediction bias.
+    The camera-LiDAR pitch angle manifests as the sign of R[0,1] and R[2,2]
+    in the LiDAR→Camera rotation matrix. Training data is often imbalanced
+    (e.g. most sequences have positive pitch, while Seq02/06 have negative),
+    causing systematic prediction bias on underrepresented mounting configs.
 
-    This augmentation rotates the GT around the LiDAR Y-axis (left) by a
-    random angle in [-max_deg, +max_deg]. A ~3° rotation is sufficient to
-    flip the pitch sign for typical extrinsics, so max_deg=6 ensures most
-    samples cross the boundary when selected.
+    Two complementary augmentation modes (applied independently per sample):
 
-    The rotation is applied to the GT BEFORE perturbation generation, so the
-    perturbed BEV and correction target stay consistent.
+    1. **Pitch perturbation** (prob, max_deg): random Y-axis rotation in
+       [-max_deg, +max_deg]. Adds geometric diversity around the existing
+       pitch distribution.
+
+    2. **Pitch sign flip** (sign_flip_prob): extracts the current pitch
+       angle from R and applies a rotation of -2*pitch, precisely negating
+       the pitch sign. This directly creates training samples that simulate
+       reversed camera mounting (like Seq02/06 from Seq00-like data).
+
+    Both are applied BEFORE perturbation generation, so the perturbed BEV
+    and correction target stay consistent.
 
     Parameters:
         T: np.ndarray, shape (B, 4, 4) — GT LiDAR→Camera transforms
-        prob: probability of applying the augmentation per sample
-        max_deg: maximum rotation angle in degrees
+        prob: probability of applying random pitch perturbation per sample
+        max_deg: maximum rotation angle in degrees for perturbation
+        sign_flip_prob: probability of explicitly flipping pitch sign
     Returns:
         T_aug: np.ndarray, shape (B, 4, 4) — augmented GT transforms
     """
-    if prob <= 0 or max_deg <= 0:
+    if prob <= 0 and sign_flip_prob <= 0:
         return T
     B = T.shape[0]
     T_aug = T.copy()
-    mask = np.random.rand(B) < prob
-    if not mask.any():
-        return T_aug
-    n_flip = mask.sum()
-    angles_deg = np.random.uniform(-max_deg, max_deg, n_flip)
-    angles_rad = np.deg2rad(angles_deg)
-    cos_a = np.cos(angles_rad)
-    sin_a = np.sin(angles_rad)
-    for idx, i in enumerate(np.where(mask)[0]):
-        Ry = np.array([
-            [ cos_a[idx], 0, sin_a[idx]],
-            [ 0,          1, 0         ],
-            [-sin_a[idx], 0, cos_a[idx]],
-        ])
-        T_aug[i, :3, :3] = T[i, :3, :3] @ Ry
+
+    if sign_flip_prob > 0:
+        flip_mask = np.random.rand(B) < sign_flip_prob
+        for i in np.where(flip_mask)[0]:
+            R = T_aug[i, :3, :3]
+            sy = np.sqrt(R[0, 0]**2 + R[1, 0]**2)
+            roll = np.arctan2(R[2, 1], R[2, 2])
+            pitch = np.arctan2(-R[2, 0], sy)
+            yaw = np.arctan2(R[1, 0], R[0, 0])
+            neg_pitch = -pitch
+            cr, sr = np.cos(roll), np.sin(roll)
+            cp, sp = np.cos(neg_pitch), np.sin(neg_pitch)
+            cy, sy_ = np.cos(yaw), np.sin(yaw)
+            Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+            Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+            Rz = np.array([[cy, -sy_, 0], [sy_, cy, 0], [0, 0, 1]])
+            T_aug[i, :3, :3] = Rz @ Ry @ Rx
+
+    if prob > 0 and max_deg > 0:
+        perturb_mask = np.random.rand(B) < prob
+        if perturb_mask.any():
+            n_perturb = perturb_mask.sum()
+            angles_rad = np.deg2rad(
+                np.random.uniform(-max_deg, max_deg, n_perturb)
+            )
+            cos_a = np.cos(angles_rad)
+            sin_a = np.sin(angles_rad)
+            for idx, i in enumerate(np.where(perturb_mask)[0]):
+                Ry = np.array([
+                    [ cos_a[idx], 0, sin_a[idx]],
+                    [ 0,          1, 0         ],
+                    [-sin_a[idx], 0, cos_a[idx]],
+                ])
+                T_aug[i, :3, :3] = T_aug[i, :3, :3] @ Ry
+
     return T_aug
 
 

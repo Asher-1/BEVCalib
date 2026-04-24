@@ -4,7 +4,7 @@
 #
 # 功能: 依次运行多组消融实验，每组完成后自动启动下一组
 #       通过YAML配置文件定义实验参数，支持所有start_training.sh选项
-#       自动跳过已完成的实验（输出目录已存在train.log）
+#       自动跳过已完成的实验（检测 checkpoint/*.pth 文件，兼容多机 DDP）
 #
 # 用法:
 #   bash batch_train.sh [options] [config_file]
@@ -350,8 +350,12 @@ _DETECT_NODE_RANK() {
     # 2. 环境变量 NODE_RANK (PyTorch Operator, 手动设置)
     [ -n "$NODE_RANK" ] && { echo "$NODE_RANK"; return; }
     # 3. 常见平台环境变量
-    [ -n "$RANK" ] && { echo "$RANK"; return; }
-    [ -n "$OMPI_COMM_WORLD_RANK" ] && { echo "$OMPI_COMM_WORLD_RANK"; return; }
+    # 注意: RANK 是全局进程 rank (0..world_size-1)，不是节点 rank
+    # OMPI_COMM_WORLD_NODE_RANK 是 OpenMPI 节点 rank
+    [ -n "$OMPI_COMM_WORLD_NODE_RANK" ] && { echo "$OMPI_COMM_WORLD_NODE_RANK"; return; }
+    [ -n "$LOCAL_WORLD_SIZE" ] && [ -n "$RANK" ] && [ -n "$LOCAL_RANK" ] && {
+        echo $(( RANK / LOCAL_WORLD_SIZE )); return
+    }
     # 4. hostname 模式
     local _hn
     _hn=$(hostname 2>/dev/null || echo "")
@@ -359,7 +363,8 @@ _DETECT_NODE_RANK() {
     if echo "$_hn" | grep -qE -- '-master-[0-9]+$'; then
         echo "0"; return
     elif echo "$_hn" | grep -qE -- '-worker-[0-9]+$'; then
-        echo "$_hn" | sed 's/.*worker-//' ; return
+        local _wid; _wid=$(echo "$_hn" | sed 's/.*worker-//')
+        echo $(( _wid + 1 )); return
     fi
     # 4b. 通用: *-N (如 bev-0, node-3, gpu-12)
     if echo "$_hn" | grep -qE '^[a-zA-Z]+-[0-9]+$'; then
@@ -494,13 +499,17 @@ OPTIM_PARAMS = [
     ('augment_pc_dropout', '--augment_pc_dropout'),
     ('augment_color_jitter', '--augment_color_jitter'),
     ('augment_intrinsic', '--augment_intrinsic'),
+    ('augment_intrinsic_cxcy', '--augment_intrinsic_cxcy'),
     ('augment_pitch_flip_prob', '--augment_pitch_flip_prob'),
     ('augment_pitch_flip_max_deg', '--augment_pitch_flip_max_deg'),
+    ('augment_pitch_sign_flip_prob', '--augment_pitch_sign_flip_prob'),
     ('eval_angle_range_deg', '--eval_angle'),
+    ('eval_trans_range', '--eval_trans_range'),
     ('early_stopping_patience', '--early_stopping_patience'),
     ('seed', '--seed'),
     ('pretrain_ckpt', '--pretrain_ckpt'),
     ('num_epochs', '--num_epochs'),
+    ('save_ckpt_per_epoches', '--save_ckpt_per_epoches'),
     ('use_geodesic_loss', '--use_geodesic_loss'),
     ('use_mlp_head', '--use_mlp_head'),
     ('use_deformable', '--use_deformable'),
@@ -513,8 +522,26 @@ OPTIM_PARAMS = [
     ('to_bev_mode', '--to_bev_mode'),
     ('scatter_reduce', '--scatter_reduce'),
     ('max_frames_per_seq', '--max_frames_per_seq'),
+    ('sample_step', '--sample_step'),
     ('eval_epoches', '--eval_epoches'),
     ('grad_accum_steps', '--grad_accum_steps'),
+    ('enable_vis', '--enable_vis'),
+    ('vis_freq', '--vis_freq'),
+    ('vis_samples', '--vis_samples'),
+    ('vis_points', '--vis_points'),
+    ('vis_point_radius', '--vis_point_radius'),
+    ('validate_data', '--validate_data'),
+    ('validate_sample_ratio', '--validate_sample_ratio'),
+    ('min_point_utilization', '--min_point_utilization'),
+    ('min_valid_ratio', '--min_valid_ratio'),
+    ('enable_ckpt_eval', '--enable_ckpt_eval'),
+    ('ddp_auto_scale', '--ddp_auto_scale'),
+    ('ddp_reference_gpus', '--ddp_reference_gpus'),
+    ('max_scaled_lr', '--max_scaled_lr'),
+    ('data_balance', '--data_balance'),
+    ('wd', '--wd'),
+    ('target_width', '--target_width'),
+    ('target_height', '--target_height'),
 ]
 for yaml_key, cli_flag in OPTIM_PARAMS:
     val = params.get(yaml_key)
@@ -686,12 +713,16 @@ PYTHON_INFO
         continue
     fi
     
-    # 检查实验输出目录是否已存在（跳过已完成的实验）
-    if [ "$FORCE_RERUN" -eq 0 ] && [ -d "$EXPERIMENT_LOG_DIR" ] && [ -f "$EXPERIMENT_LOG_DIR/train.log" ]; then
+    # 检查实验是否已完成（基于 checkpoint 文件判断，兼容多机 DDP）
+    # Worker 节点永远不跳过 — 必须加入 DDP 集群
+    _EXP_CKPT_DIR="$EXPERIMENT_LOG_DIR/checkpoint"
+    if [ "$FORCE_RERUN" -eq 0 ] && [ "$_IS_MASTER" -eq 1 ] && \
+       [ -d "$_EXP_CKPT_DIR" ] && [ "$(find "$_EXP_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ]; then
+        _N_CKPT=$(find "$_EXP_CKPT_DIR" -name '*.pth' -type f | wc -l)
         SKIPPED=$((SKIPPED + 1))
         log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
-        log "  原因: 输出目录已存在且包含训练日志"
-        log "  路径: $EXPERIMENT_LOG_DIR"
+        log "  原因: 检测到已有 checkpoint 文件 (${_N_CKPT}个)"
+        log "  路径: $_EXP_CKPT_DIR"
         log "  如需重新训练，请删除该目录或使用 --force 参数"
         continue
     fi

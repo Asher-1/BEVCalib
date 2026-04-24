@@ -1,0 +1,156 @@
+# BEVCalib V17 全量训练配置 — 16节点 A30 版 (bs=8)
+#
+# V17 设计哲学:
+#   sign-flip 基座 + 可变 perturb + pitch loss 消融
+#   A30 GPU 版本: batch_size=8, nnodes=16
+#
+# Baseline 参照:
+#   - v16-sign-flip (Quick):  整体 0.458°, Seq02 1.003°
+#   - all-v8-z10-pitch3 (全量冠军): 整体 0.251°, Seq02 1.076°
+#   - all-v6-champion:        整体 0.278°, Seq02 1.163°
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v17_a30.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0              # Z=10
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 8
+    learning_rate: 1e-4
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 16
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1               # 1=加速(√LR+warmup,epoch不变), 2=保步, 0=禁用
+    ddp_reference_gpus: 8           # 超参参考GPU数 (Quick单机配置)
+    max_scaled_lr: 4e-4             # LR上限: V16消融验证最优区间 2e-4~4e-4
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 ===
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 (V17: sign-flip 基座 + 可变 perturb) ===
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.15   # sign-flip 基座
+
+    # === 数据采样 ===
+    sample_step: 4                       # 每隔4帧取1帧, 130K→33K帧
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === DrInfer 兼容配置 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V17 全量训练 (A30 16节点版): sign-flip 基座 + perturb 强度消融
+  # =========================================================================
+
+  # 0. sign-flip + 弱 perturb (Quick 推荐首选)
+  - name: "v17_weak_perturb"
+    description: "V17: sign_flip(0.15) + perturb(0.10, 1.5°) 弱融合"
+    dataset: "all"
+    version: "v17_weak_perturb"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_flip_max_deg: 1.5
+
+  # 1. sign-flip + 弱 perturb + Pitch1.5 (温和 pitch 强化)
+  - name: "v17_weak_perturb_pitch15"
+    description: "V17: sign_flip(0.15) + perturb(0.10, 1.5°) + Pitch1.5"
+    dataset: "all"
+    version: "v17_weak_pitch15"
+    params:
+      axis_weights: "1.0,1.5,1.0"
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_flip_max_deg: 1.5
+
+  # 2. sign-flip only 对照
+  - name: "v17_signflip_only"
+    description: "V17: sign_flip(0.15) 对照 (无perturb)"
+    dataset: "all"
+    version: "v17_signflip_only"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 3. Cosine 调度器 + 弱 perturb (对比 StepLR)
+  - name: "v17_cosine_weak_perturb"
+    description: "V17: Cosine + sign_flip(0.15) + perturb(0.10, 1.5°)"
+    dataset: "all"
+    version: "v17_cosine_weak"
+    params:
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_flip_max_deg: 1.5
+
+# ============================================================================
+# V17 全量训练矩阵 (4组, A30 16节点 x 8GPU, bs=8)
+# ============================================================================
+#
+#   实验                    | LR调度 | sign_flip | perturb     | Pitch loss | 验证目标
+#   ------------------------+--------+-----------+-------------+------------+-------------------
+#   0 v17_weak_perturb      | Step   | 0.15      | 0.10, 1.5°  | 1x         | ★推荐配置
+#   1 v17_weak_pitch15      | Step   | 0.15      | 0.10, 1.5°  | 1.5x       | pitch 强化
+#   2 v17_signflip_only     | Step   | 0.15      | No          | 1x         | 对照基线
+#   3 v17_cosine_weak       | Cosine | 0.15      | 0.10, 1.5°  | 1x         | LR调度对比
+#
+# 全局等效 batch size: 8 * 8GPU * 16node = 1024
+# sample_step=4: 130K→33K帧, 每epoch约32步

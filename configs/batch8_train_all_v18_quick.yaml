@@ -1,0 +1,173 @@
+# BEVCalib V18 Quick 训练配置 — Pitch 泛化突破
+#
+# V18 设计哲学:
+#   基于 V16+V17 全量评估的定量分析, 聚焦解决 Pitch 维度泛化瓶颈:
+#
+#   核心发现 (V16 5模型 + V17 6模型):
+#     1. v16-sign-flip 仍是全局冠军 (0.458°), V17 未超越
+#     2. Seq 00/02 误差 ~1.0° 是所有模型的共性瓶颈
+#     3. Pitch (Y轴) 误差占 Seq 00/02 总误差 80%+
+#     4. 测试集与训练集 Seq 00/02 外参差异大 (不同车辆/安装)
+#     5. v17-weak-pitch3 在 Seq 00 最优 (0.94°), sign-flip 整体最优
+#     6. Pitch loss 权重 3.0 对 Seq 00 有帮助但可能过强
+#
+#   V18 策略:
+#     A. sign-flip 强化 + Pitch 聚焦 (以 v16-sign-flip 为基座)
+#     B. 大角度 + Pitch 强化 (以 v17-angle8-weak 为基座)
+#     C. 混合增强 + 更高 per-axis 扰动
+#     D. Cosine + sign-flip + Pitch 聚焦 (调度器对照)
+#
+# Baseline 参照 (Mean Rot → Seq00 / Seq02):
+#   - v16-sign-flip:    0.458° → 0.909° / 1.003°
+#   - v17-angle8-weak:  0.491° → 1.054° / 1.099°
+#   - v17-weak-pitch3:  0.492° → 0.942° / 0.975°
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v18_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 16
+    learning_rate: 2e-4                 # V16 LR消融验证: 2e-4 优于 1e-4 (0.15° vs 0.17°)
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1
+    ddp_reference_gpus: 8
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 (V18默认: Cosine) ===
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 50
+    cosine_Tmult: 2
+    warmup_epochs: 10
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 (V18: 强化 sign-flip + Pitch 聚焦) ===
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.20   # V18: 从0.15提升到0.20
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    # === DrInfer 兼容配置 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V18 消融矩阵: Pitch 泛化突破
+  # =========================================================================
+
+  # A. sign-flip 强化 + Pitch 聚焦 (★首选方案)
+  #    基座: v16-sign-flip, 强化 sign-flip 概率 + Pitch loss 权重
+  - name: "v18_signflip_pitch_focus"
+    description: "V18-A: sign_flip(0.20) + Pitch2.0 聚焦 (首选)"
+    dataset: "all"
+    version: "v18_signflip_pitch_focus_quick"
+    params:
+      augment_pitch_sign_flip_prob: 0.20
+      axis_weights: "1.0,2.0,1.0"
+
+  # B. 大角度 + Pitch 强化
+  #    基座: v17-angle8-weak, 叠加 Pitch loss
+  - name: "v18_angle8_pitch"
+    description: "V18-B: 8deg + sign_flip(0.20) + Pitch2.5"
+    dataset: "all"
+    version: "v18_angle8_pitch_quick"
+    params:
+      angle_range_deg: 8
+      augment_pitch_sign_flip_prob: 0.20
+      axis_weights: "1.0,2.5,1.0"
+
+  # C. 混合增强 + 高 per-axis 扰动
+  #    sign-flip + perturb + 更高 per_axis_prob
+  - name: "v18_hybrid_aug"
+    description: "V18-C: sign_flip(0.20) + perturb(0.15,2.5°) + per_axis(0.5)"
+    dataset: "all"
+    version: "v18_hybrid_aug_quick"
+    params:
+      augment_pitch_sign_flip_prob: 0.20
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.5
+      per_axis_prob: 0.5
+      axis_weights: "1.0,2.0,1.0"
+
+  # D. StepLR + sign-flip + Pitch (调度器消融)
+  #    V16 用 Cosine, 这里对比 StepLR
+  - name: "v18_step_signflip_pitch"
+    description: "V18-D: StepLR + sign_flip(0.20) + Pitch2.0 (调度器对照)"
+    dataset: "all"
+    version: "v18_step_signflip_pitch_quick"
+    params:
+      lr_schedule: step
+      warmup_epochs: 5
+      augment_pitch_sign_flip_prob: 0.20
+      axis_weights: "1.0,2.0,1.0"
+
+# ============================================================================
+# V18 Quick 消融矩阵 (4组, 全部使用 DRCV 后端)
+# ============================================================================
+#
+#   实验                       | sign_flip | Pitch loss | angle | Backend  | Z   | LR调度  | 目标
+#   ---------------------------+-----------+------------+-------+----------+-----+---------+------------------------
+#   A signflip_pitch_focus     | 0.20      | 2.0x       | 5°    | DRCV     | 10  | Cosine  | DRCV+Pitch聚焦
+#   B angle8_pitch             | 0.20      | 2.5x       | 8°    | DRCV     | 10  | Cosine  | 大角度+强Pitch
+#   C hybrid_aug               | 0.20      | 2.0x       | 5°    | DRCV     | 10  | Cosine  | 混合增强上限
+#   D step_signflip_pitch      | 0.20      | 2.0x       | 5°    | DRCV     | 10  | Step    | 调度器对照

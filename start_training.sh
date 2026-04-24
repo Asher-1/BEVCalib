@@ -38,8 +38,10 @@
 #   --augment_pc_dropout R 点云随机丢弃比例 (默认: 0.0)
 #   --augment_color_jitter S 图像色彩抖动强度 (默认: 0.0)
 #   --augment_intrinsic S  相机内参随机扰动强度 (默认: 0.0, e.g. 0.05=±5%)
-#   --augment_pitch_flip_prob P  GT pitch翻转增强概率 (默认: 0.0=禁用)
-#   --augment_pitch_flip_max_deg D  pitch翻转最大旋转角 (默认: 6.0°)
+#   --augment_pitch_flip_prob P  GT pitch X轴随机扰动概率 (默认: 0.0=禁用)
+#   --augment_pitch_flip_max_deg D  pitch扰动最大旋转角 (默认: 2.0°)
+#   --augment_pitch_sign_flip_prob P  GT pitch符号翻转概率 (默认: 0.0=禁用, 精确反转pitch角)
+#   --sample_step N         采样步长 (每隔N帧取1帧, 与--max_frames_per_seq互斥)
 #   --early_stopping_patience N 早停耐心值 (默认: 0=禁用)
 #   --seed N               全局随机种子 (默认: 42)
 #   --pretrain_ckpt PATH   预训练权重路径 (用于refine/finetune训练)
@@ -250,11 +252,13 @@ AUGMENT_PC_JITTER=""
 AUGMENT_PC_DROPOUT=""
 AUGMENT_COLOR_JITTER=""
 AUGMENT_INTRINSIC=""
+AUGMENT_INTRINSIC_CXCY=""
 EVAL_ANGLE=""
 EARLY_STOPPING_PATIENCE=""
 SEED=""
 PRETRAIN_CKPT=""
 NUM_EPOCHS=""
+SAVE_CKPT_PER_EPOCHES=""
 EVAL_EPOCHES=""
 GRAD_ACCUM_STEPS=""
 ENABLE_TB=1
@@ -346,10 +350,14 @@ while [[ $# -gt 0 ]]; do
             AUGMENT_COLOR_JITTER="$2"; shift 2 ;;
         --augment_intrinsic)
             AUGMENT_INTRINSIC="$2"; shift 2 ;;
+        --augment_intrinsic_cxcy)
+            AUGMENT_INTRINSIC_CXCY="$2"; shift 2 ;;
         --augment_pitch_flip_prob)
             AUGMENT_PITCH_FLIP_PROB="$2"; shift 2 ;;
         --augment_pitch_flip_max_deg)
             AUGMENT_PITCH_FLIP_MAX_DEG="$2"; shift 2 ;;
+        --augment_pitch_sign_flip_prob)
+            AUGMENT_PITCH_SIGN_FLIP_PROB="$2"; shift 2 ;;
         --voxel_mode)
             VOXEL_MODE="$2"; shift 2 ;;
         --to_bev_mode)
@@ -358,6 +366,8 @@ while [[ $# -gt 0 ]]; do
             SCATTER_REDUCE="$2"; shift 2 ;;
         --eval_angle)
             EVAL_ANGLE="$2"; shift 2 ;;
+        --eval_trans_range)
+            EVAL_TRANS_RANGE="$2"; shift 2 ;;
         --early_stopping_patience)
             EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
         --seed)
@@ -366,6 +376,8 @@ while [[ $# -gt 0 ]]; do
             PRETRAIN_CKPT="$2"; shift 2 ;;
         --num_epochs)
             NUM_EPOCHS="$2"; shift 2 ;;
+        --save_ckpt_per_epoches)
+            SAVE_CKPT_PER_EPOCHES="$2"; shift 2 ;;
         --use_geodesic_loss)
             USE_GEODESIC_LOSS="$2"; shift 2 ;;
         --use_mlp_head)
@@ -384,10 +396,46 @@ while [[ $# -gt 0 ]]; do
             DEPTH_MODEL_TYPE="$2"; shift 2 ;;
         --max_frames_per_seq)
             MAX_FRAMES_PER_SEQ="$2"; shift 2 ;;
+        --sample_step)
+            SAMPLE_STEP="$2"; shift 2 ;;
         --eval_epoches)
             EVAL_EPOCHES="$2"; shift 2 ;;
         --grad_accum_steps)
             GRAD_ACCUM_STEPS="$2"; shift 2 ;;
+        --enable_vis)
+            ENABLE_VIS="$2"; shift 2 ;;
+        --vis_freq)
+            VIS_FREQ="$2"; shift 2 ;;
+        --validate_data)
+            VALIDATE_DATA="$2"; shift 2 ;;
+        --enable_ckpt_eval)
+            ENABLE_CKPT_EVAL="$2"; shift 2 ;;
+        --vis_samples)
+            VIS_SAMPLES="$2"; shift 2 ;;
+        --vis_points)
+            VIS_POINTS="$2"; shift 2 ;;
+        --vis_point_radius)
+            VIS_POINT_RADIUS="$2"; shift 2 ;;
+        --validate_sample_ratio)
+            VALIDATE_SAMPLE_RATIO="$2"; shift 2 ;;
+        --min_point_utilization)
+            MIN_POINT_UTILIZATION="$2"; shift 2 ;;
+        --min_valid_ratio)
+            MIN_VALID_RATIO="$2"; shift 2 ;;
+        --ddp_auto_scale)
+            DDP_AUTO_SCALE="$2"; shift 2 ;;
+        --ddp_reference_gpus)
+            DDP_REFERENCE_GPUS="$2"; shift 2 ;;
+        --max_scaled_lr)
+            MAX_SCALED_LR="$2"; shift 2 ;;
+        --data_balance)
+            DATA_BALANCE="$2"; shift 2 ;;
+        --wd)
+            WEIGHT_DECAY="$2"; shift 2 ;;
+        --target_width)
+            TARGET_WIDTH="$2"; shift 2 ;;
+        --target_height)
+            TARGET_HEIGHT="$2"; shift 2 ;;
         --force)
             export FORCE_RERUN=1
             shift
@@ -858,12 +906,17 @@ if [ "$USE_DDP" -eq 1 ]; then
     LOG_SUFFIX="small_${DDP_ANGLE}deg_${VERSION}"
     DDP_LOG_DIR="./logs/${DATASET_NAME}/model_${LOG_SUFFIX}"
     
-    # 检查实验输出目录是否已存在（跳过已完成的实验）
-    if [ "${FORCE_RERUN:-0}" != "1" ] && [ -d "$DDP_LOG_DIR" ] && [ -f "$DDP_LOG_DIR/train.log" ]; then
-        echo "⏭️  跳过训练: 输出目录已存在且包含训练日志"
-        echo "  路径: $DDP_LOG_DIR"
-        echo "  如需重新训练，请删除该目录或使用 --force 参数"
-        exit 0
+    # 检查实验是否已完成（基于 checkpoint 文件判断，兼容多机 DDP）
+    # Worker 节点永远不跳过 — 必须加入 DDP 集群
+    if [ "${FORCE_RERUN:-0}" != "1" ] && [ "${NODE_RANK:-0}" = "0" ]; then
+        _CKPT_DIR="$DDP_LOG_DIR/checkpoint"
+        if [ -d "$_CKPT_DIR" ] && [ "$(find "$_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ]; then
+            _N_CKPT=$(find "$_CKPT_DIR" -name '*.pth' -type f | wc -l)
+            echo "⏭️  跳过训练: 检测到已有 checkpoint 文件 (${_N_CKPT}个)"
+            echo "  路径: $_CKPT_DIR"
+            echo "  如需重新训练，请删除该目录或使用 --force 参数"
+            exit 0
+        fi
     fi
     
     mkdir -p "$DDP_LOG_DIR"
@@ -873,14 +926,24 @@ if [ "$USE_DDP" -eq 1 ]; then
         MULTI_NODE_ARGS="--nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
         echo "[DDP] 多机模式: ${NNODES}机 x ${DDP_NGPUS}GPU, node_rank=${NODE_RANK}"
         echo "[DDP] Master: ${MASTER_ADDR}:${MASTER_PORT}, rendezvous超时: ${RDZV_TIMEOUT}s"
+        echo "[DDP] 本机: $(hostname 2>/dev/null), IP=$(hostname -I 2>/dev/null | awk '{print $1}')"
 
-        # 多机网络连通性检查
+        # DNS 解析验证
+        _RESOLVED=$(getent hosts "$MASTER_ADDR" 2>/dev/null | awk '{print $1}' | head -1)
+        if [ -n "$_RESOLVED" ]; then
+            echo "[DDP] ✓ DNS: $MASTER_ADDR -> $_RESOLVED"
+        else
+            echo "[DDP] ⚠️  DNS 解析失败: $MASTER_ADDR"
+            echo "[DDP]    请确认 K8s headless service 正确创建"
+        fi
+
         if [ "$NODE_RANK" -ne 0 ]; then
             echo "[DDP] Worker节点 → 检查Master连通性..."
-            if timeout 5 bash -c "echo >/dev/tcp/$MASTER_ADDR/$MASTER_PORT" 2>/dev/null; then
+            if timeout 10 bash -c "echo >/dev/tcp/$MASTER_ADDR/$MASTER_PORT" 2>/dev/null; then
                 echo "[DDP] ✓ Master $MASTER_ADDR:$MASTER_PORT 可达"
             else
-                echo "[DDP] ⚠️  Master $MASTER_ADDR:$MASTER_PORT 暂不可达 (Master可能尚未启动，将等待 ${RDZV_TIMEOUT}s)"
+                echo "[DDP] ⚠️  Master $MASTER_ADDR:$MASTER_PORT 暂不可达 (Master可能尚未启动)"
+                echo "[DDP]    torchrun 将等待 ${RDZV_TIMEOUT}s"
             fi
         else
             echo "[DDP] Master节点 → 等待 ${NNODES} 个节点加入 (超时: ${RDZV_TIMEOUT}s)"
@@ -912,13 +975,17 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
     [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
     [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic $AUGMENT_INTRINSIC"
+    [ -n "$AUGMENT_INTRINSIC_CXCY" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic_cxcy $AUGMENT_INTRINSIC_CXCY"
     [ -n "$AUGMENT_PITCH_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_prob $AUGMENT_PITCH_FLIP_PROB"
     [ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
+    [ -n "$AUGMENT_PITCH_SIGN_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_sign_flip_prob $AUGMENT_PITCH_SIGN_FLIP_PROB"
     [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
+    [ -n "$EVAL_TRANS_RANGE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_trans_range $EVAL_TRANS_RANGE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
+    [ -n "$SAVE_CKPT_PER_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --save_ckpt_per_epoches $SAVE_CKPT_PER_EPOCHES"
     [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
     [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
     [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
@@ -928,11 +995,29 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$FD_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --fd_mode $FD_MODE"
     [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
+    [ -n "$SAMPLE_STEP" ] && OPTIM_ARGS="$OPTIM_ARGS --sample_step $SAMPLE_STEP"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
     [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
     [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
     [ -n "$TO_BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --to_bev_mode $TO_BEV_MODE"
     [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
+    [ -n "$ENABLE_VIS" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_vis $ENABLE_VIS"
+    [ -n "$VIS_FREQ" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_freq $VIS_FREQ"
+    [ -n "$VIS_SAMPLES" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_samples $VIS_SAMPLES"
+    [ -n "$VIS_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_points $VIS_POINTS"
+    [ -n "$VIS_POINT_RADIUS" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_point_radius $VIS_POINT_RADIUS"
+    [ -n "$VALIDATE_DATA" ] && OPTIM_ARGS="$OPTIM_ARGS --validate_data $VALIDATE_DATA"
+    [ -n "$VALIDATE_SAMPLE_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --validate_sample_ratio $VALIDATE_SAMPLE_RATIO"
+    [ -n "$MIN_POINT_UTILIZATION" ] && OPTIM_ARGS="$OPTIM_ARGS --min_point_utilization $MIN_POINT_UTILIZATION"
+    [ -n "$MIN_VALID_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --min_valid_ratio $MIN_VALID_RATIO"
+    [ -n "$ENABLE_CKPT_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_ckpt_eval $ENABLE_CKPT_EVAL"
+    [ -n "$DDP_AUTO_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_auto_scale $DDP_AUTO_SCALE"
+    [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
+    [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
+    [ -n "$DATA_BALANCE" ] && OPTIM_ARGS="$OPTIM_ARGS --data_balance $DATA_BALANCE"
+    [ -n "$WEIGHT_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --wd $WEIGHT_DECAY"
+    [ -n "$TARGET_WIDTH" ] && OPTIM_ARGS="$OPTIM_ARGS --target_width $TARGET_WIDTH"
+    [ -n "$TARGET_HEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --target_height $TARGET_HEIGHT"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
@@ -992,13 +1077,16 @@ else
     GPU0_LOG_DIR="./logs/${DATASET_NAME}/model_small_10deg_${VERSION}"
     GPU1_LOG_DIR="./logs/${DATASET_NAME}/model_small_5deg_${VERSION}"
     
-    # 检查实验输出目录是否已存在（跳过已完成的实验）
-    if [ "${FORCE_RERUN:-0}" != "1" ] && \
-       [ -d "$GPU0_LOG_DIR" ] && [ -f "$GPU0_LOG_DIR/train.log" ] && \
-       [ -d "$GPU1_LOG_DIR" ] && [ -f "$GPU1_LOG_DIR/train.log" ]; then
-        echo "⏭️  跳过训练: 两组实验的输出目录均已存在"
-        echo "  GPU0: $GPU0_LOG_DIR"
-        echo "  GPU1: $GPU1_LOG_DIR"
+    # 检查实验是否已完成（基于 checkpoint 文件判断）
+    _GPU0_CKPT_DIR="$GPU0_LOG_DIR/checkpoint"
+    _GPU1_CKPT_DIR="$GPU1_LOG_DIR/checkpoint"
+    _GPU0_HAS_CKPT=0; _GPU1_HAS_CKPT=0
+    [ -d "$_GPU0_CKPT_DIR" ] && [ "$(find "$_GPU0_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ] && _GPU0_HAS_CKPT=1
+    [ -d "$_GPU1_CKPT_DIR" ] && [ "$(find "$_GPU1_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ] && _GPU1_HAS_CKPT=1
+    if [ "${FORCE_RERUN:-0}" != "1" ] && [ "$_GPU0_HAS_CKPT" -eq 1 ] && [ "$_GPU1_HAS_CKPT" -eq 1 ]; then
+        echo "⏭️  跳过训练: 两组实验均已有 checkpoint 文件"
+        echo "  GPU0: $_GPU0_CKPT_DIR"
+        echo "  GPU1: $_GPU1_CKPT_DIR"
         echo "  如需重新训练，请删除对应目录或使用 --force 参数"
         exit 0
     fi
@@ -1028,13 +1116,17 @@ else
     [ -n "$AUGMENT_PC_DROPOUT" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pc_dropout $AUGMENT_PC_DROPOUT"
     [ -n "$AUGMENT_COLOR_JITTER" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_color_jitter $AUGMENT_COLOR_JITTER"
     [ -n "$AUGMENT_INTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic $AUGMENT_INTRINSIC"
+    [ -n "$AUGMENT_INTRINSIC_CXCY" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_intrinsic_cxcy $AUGMENT_INTRINSIC_CXCY"
     [ -n "$AUGMENT_PITCH_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_prob $AUGMENT_PITCH_FLIP_PROB"
     [ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
+    [ -n "$AUGMENT_PITCH_SIGN_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_sign_flip_prob $AUGMENT_PITCH_SIGN_FLIP_PROB"
     [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
+    [ -n "$EVAL_TRANS_RANGE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_trans_range $EVAL_TRANS_RANGE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
+    [ -n "$SAVE_CKPT_PER_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --save_ckpt_per_epoches $SAVE_CKPT_PER_EPOCHES"
     [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
     [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
     [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
@@ -1044,11 +1136,29 @@ else
     [ -n "$FD_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --fd_mode $FD_MODE"
     [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
+    [ -n "$SAMPLE_STEP" ] && OPTIM_ARGS="$OPTIM_ARGS --sample_step $SAMPLE_STEP"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
     [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
     [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
     [ -n "$TO_BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --to_bev_mode $TO_BEV_MODE"
     [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
+    [ -n "$ENABLE_VIS" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_vis $ENABLE_VIS"
+    [ -n "$VIS_FREQ" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_freq $VIS_FREQ"
+    [ -n "$VIS_SAMPLES" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_samples $VIS_SAMPLES"
+    [ -n "$VIS_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_points $VIS_POINTS"
+    [ -n "$VIS_POINT_RADIUS" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_point_radius $VIS_POINT_RADIUS"
+    [ -n "$VALIDATE_DATA" ] && OPTIM_ARGS="$OPTIM_ARGS --validate_data $VALIDATE_DATA"
+    [ -n "$VALIDATE_SAMPLE_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --validate_sample_ratio $VALIDATE_SAMPLE_RATIO"
+    [ -n "$MIN_POINT_UTILIZATION" ] && OPTIM_ARGS="$OPTIM_ARGS --min_point_utilization $MIN_POINT_UTILIZATION"
+    [ -n "$MIN_VALID_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --min_valid_ratio $MIN_VALID_RATIO"
+    [ -n "$ENABLE_CKPT_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_ckpt_eval $ENABLE_CKPT_EVAL"
+    [ -n "$DDP_AUTO_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_auto_scale $DDP_AUTO_SCALE"
+    [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
+    [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
+    [ -n "$DATA_BALANCE" ] && OPTIM_ARGS="$OPTIM_ARGS --data_balance $DATA_BALANCE"
+    [ -n "$WEIGHT_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --wd $WEIGHT_DECAY"
+    [ -n "$TARGET_WIDTH" ] && OPTIM_ARGS="$OPTIM_ARGS --target_width $TARGET_WIDTH"
+    [ -n "$TARGET_HEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --target_height $TARGET_HEIGHT"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"

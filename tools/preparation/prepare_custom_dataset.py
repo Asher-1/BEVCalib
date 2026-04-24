@@ -3769,6 +3769,20 @@ class BEVCalibDatasetPreparer:
         segment_boundaries = []
         if hasattr(self, 'bag_segments') and self.bag_segments:
             segment_boundaries = self.bag_segments  # [(start_ts, end_ts), ...]
+            
+            # 检测 bag 元数据时间 vs 消息 header 时间偏移
+            if self.image_metadata and segment_boundaries:
+                data_median_ts = self.image_metadata[len(self.image_metadata) // 2].timestamp
+                seg_range_min = segment_boundaries[0][0]
+                seg_range_max = segment_boundaries[-1][1]
+                if data_median_ts < seg_range_min - 3600 or data_median_ts > seg_range_max + 3600:
+                    offset = data_median_ts - (seg_range_min + seg_range_max) / 2
+                    print(f"\n⚠️  检测到 bag 元数据时间与消息 header 时间不一致")
+                    print(f"    bag段时间范围: [{seg_range_min:.3f}, {seg_range_max:.3f}]")
+                    print(f"    数据中位时间戳: {data_median_ts:.3f} (偏移 {offset:.0f}s)")
+                    print(f"    → 跳过 bag 连续组过滤，改用 pose gap 检查保证精度")
+                    segment_boundaries = []
+            
             if len(segment_boundaries) > 1:
                 print(f"\n🔍 基于bag文件分组，共 {len(segment_boundaries)} 个连续时间段:")
                 for i, (seg_start, seg_end) in enumerate(segment_boundaries):

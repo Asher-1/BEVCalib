@@ -1,0 +1,113 @@
+# V20 A30（16 节点）全量泛化评估配置
+#
+# 对应训练配置: batch8_train_all_v20_a30.yaml
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v20_a30.yaml
+#   多卡并行:
+#     ... --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v20"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v20_a30"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  - label: "v20-a30-v8best"
+    dir_name: "model_small_5deg_v20_v8best_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v20-a30-v8best"
+    mode_desc: "V8最佳"
+
+  - label: "v20-a30-v6best"
+    dir_name: "model_small_5deg_v20_v6best_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v20-a30-v6best"
+    mode_desc: "V6最佳(Z=5)"
+
+  - label: "v20-a30-v8second"
+    dir_name: "model_small_5deg_v20_v8second_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v20-a30-v8second"
+    mode_desc: "V8次佳"
+
+  - label: "v20-a30-v8best-10deg"
+    dir_name: "model_small_5deg_v20_v8best_drcv_10deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 10
+    z_voxels: 10
+    version: "v20-a30-v8best-10deg"
+    mode_desc: "10度"
+
+  - label: "v20-a30-v6best-10deg"
+    dir_name: "model_small_5deg_v20_v6best_drcv_10deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 10
+    z_voxels: 5
+    version: "v20-a30-v6best-10deg"
+    mode_desc: "10度+Z=5"
+
+  - label: "v20-a30-v8second-10deg"
+    dir_name: "model_small_5deg_v20_v8second_drcv_10deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 10
+    z_voxels: 10
+    version: "v20-a30-v8second-10deg"
+    mode_desc: "10度"

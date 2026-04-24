@@ -1,0 +1,105 @@
+# BEVCalib V21 Quick — 本地快速验证配置
+#
+# 用途: 单机 8GPU 快速迭代, 验证 V21 增强策略是否正常工作
+# 预计时间: ~15-30 分钟 (取决于 GPU 型号)
+#
+# 使用方法:
+#   bash batch_train.sh configs/quick_v21_generalization.yaml
+#   bash batch_train.sh --dry-run configs/quick_v21_generalization.yaml
+#
+# 与云服务器版的区别:
+#   - 每序列仅采样 200 帧 (vs 10000)
+#   - 单机 8GPU (vs 16节点 128GPU)
+#   - 100 epochs (vs 400)
+#   - batch_size=8 + grad_accum=2 (有效 bs=128 vs 2048)
+#   - 评估频率 10 epochs (vs 50)
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 5
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 3
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    # V21 增强 (与云版完全一致)
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.03
+    augment_intrinsic_cxcy: 0.03
+
+    # Quick 参数
+    max_frames_per_seq: 500
+    num_epochs: 400
+    eval_epoches: 50
+    early_stopping_patience: 30
+    seed: 42
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # Quick 1: V21 完整增强 (对标云版 v21_generalize_full)
+  - name: "v21_quick_full"
+    description: "V21 Quick: 完整增强本地验证"
+    dataset: "all"
+    version: "v21_quick_full"
+
+  # Quick 2: 无增强基线 (对照组, 验证增强是否有正面效果)
+  - name: "v21_quick_no_aug"
+    description: "V21 Quick 对照: 无任何增强"
+    dataset: "all"
+    version: "v21_quick_no_aug"
+    params:
+      augment_pitch_sign_flip_prob: 0.0
+      augment_pitch_flip_prob: 0.0
+      augment_color_jitter: 0.0
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_intrinsic: 0.0
+      augment_intrinsic_cxcy: 0.0

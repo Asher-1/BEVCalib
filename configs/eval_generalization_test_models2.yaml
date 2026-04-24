@@ -1,0 +1,166 @@
+# test_models2 子目录实验 — 泛化评估
+#
+# 包含 8 个模型:
+#   - v16 系列 (4个): 大规模 DDP 训练 + 数据增强消融
+#   - v20 系列 (4个): v8/v6 recipe 对比, pitch_wt3 消融, z5/z10 消融
+#
+# 重要: models_dir 必须是 `logs/all_training_data`（不要写成 `.../test_models2`），
+# 否则 os.path.basename(MODELS_DIR) 会变成 `test_models2`，checkpoint 会错误指向
+# `.../test_models2_scratch/checkpoint/`（不存在）。正确 scratch 目录名为
+# `all_training_data_scratch`，因此 dir_name 使用 `test_models2/<run_name>`。
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_test_models2.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_test_models2.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/all_training_data"
+output_dir: "logs/evaluations/generalization_eval_test_models2_all_data"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+
+models:
+  # ============================================================================
+  # v16 系列: 大规模 DDP + 数据增强消融
+  # 共同特征: z=10, drcv, scatter/mean/concat, axis_loss wt=1:3:1
+  # ============================================================================
+
+  # v16-ultimate: 全量增强 (jitter+color+pitch_flip+sign_flip), L20×128GPU DDP
+  - label: "v16-ultimate"
+    dir_name: "test_models2/model_small_5deg_v16_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16"
+    mode_desc: "L20×128GPU DDP, pitch_flip=0.15+sign_flip=0.1, jitter+color, wt=1:3:1, sample_step=2"
+
+  # v16-pitch3-signflip: sign_flip only (无pitch_flip), L20×8GPU
+  - label: "v16-pitch3-signflip"
+    dir_name: "test_models2/model_small_5deg_v16_pitch3_signflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16"
+    mode_desc: "L20×8GPU, sign_flip=0.15 only (无pitch_flip), wt=1:3:1, sample_step=2"
+
+  # v16-a30-ultimate: 全量增强, A30×8GPU, sample_step=3
+  - label: "v16-a30-ultimate"
+    dir_name: "test_models2/model_small_5deg_v16_a30_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-a30"
+    mode_desc: "A30×8GPU DDP, pitch_flip=0.15+sign_flip=0.1, wt=1:3:1, sample_step=3"
+
+  # model_small_5deg_v20_v8_z10_drcv
+  - label: "model_small_5deg_v20_v8_z10_drcv"
+    dir_name: "test_models2/model_small_5deg_v20_v8_z10_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-l20"
+    mode_desc: "L20×128GPU DDP, wt=1:3:1, sample_step=2"
+
+  # ============================================================================
+  # v20 系列: v8/v6 recipe 对比 + z 消融 + pitch_wt3 消融
+  # 共同特征: scatter/mean/concat, 无数据增强
+  # ============================================================================
+
+  # v20-v8recipe-z10: spconv, z=10, axis_wt=1:1:1
+  - label: "v20-v8recipe-z10"
+    dir_name: "test_models2/model_small_5deg_v20_v8recipe_z10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v20"
+    mode_desc: "spconv, z=10, wt=1:1:1, max_frames=10000, 无增强"
+
+  # v20-v8-z10-pitch-wt3-drcv: drcv, z=10, axis_wt=1:3:1
+  - label: "v20-v8-z10-pitch-wt3-drcv"
+    dir_name: "test_models2/model_small_5deg_v20_v8_z10_pitch_wt3_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v20"
+    mode_desc: "drcv, z=10, wt=1:3:1, sample_step=2, 无增强"
+
+  # v20-v6best-drcv: drcv, z=5, axis_wt=1:1:1 (v6最佳配方)
+  - label: "v20-v6best-drcv"
+    dir_name: "test_models2/model_small_5deg_v20_v6best_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v20"
+    mode_desc: "drcv, z=5 (v6best recipe), wt=1:1:1, sample_step=2, 无增强"
+
+  # v20-v8recipe-pitch-wt3: spconv, z=5, axis_wt=1:3:1
+  - label: "v20-v8recipe-pitch-wt3"
+    dir_name: "test_models2/model_small_5deg_v20_v8recipe_pitch_wt3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v20"
+    mode_desc: "spconv, z=5, wt=1:3:1, max_frames=10000, 无增强"

@@ -15,6 +15,7 @@ import sys
 import re
 import subprocess
 import json
+import time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -371,8 +372,37 @@ def _resolve_perturbation_from_ckpt(args, checkpoint):
               f"per_axis_prob={args.per_axis_prob} (从checkpoint恢复)")
 
 
+def _format_elapsed(seconds):
+    """Format elapsed seconds to human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m{s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m}m{s}s"
+
+
+def _build_eval_custom_dataset(data_folder, args):
+    """CustomDataset for eval: same sampling rules as training (mutually exclusive)."""
+    _ss = getattr(args, "eval_sample_step", None)
+    _mf = getattr(args, "eval_max_frames_per_seq", None)
+    if _ss is not None and _mf is not None:
+        raise ValueError(
+            "eval_sample_step 与 eval_max_frames_per_seq 互斥，不可同时设置。"
+            f" 当前: eval_sample_step={_ss}, eval_max_frames_per_seq={_mf}"
+        )
+    return CustomDataset(
+        data_folder=data_folder,
+        auto_detect=True,
+        sample_step=_ss,
+        max_frames_per_seq=_mf,
+    )
+
+
 def evaluate_checkpoint(args):
     """评估指定的 checkpoint"""
+    _eval_t0 = time.time()
     
     print("=" * 80)
     print(f"评估 Checkpoint: {args.ckpt_path}")
@@ -380,7 +410,12 @@ def evaluate_checkpoint(args):
         print(f"输出目录: {args.output_dir}")
     print("=" * 80)
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        print("\n[FATAL] CUDA 不可用! 稀疏卷积要求 GPU。")
+        print(f"  CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}")
+        print("  请确认: 1) 机器有 GPU  2) CUDA_VISIBLE_DEVICES 未设为空")
+        sys.exit(1)
+    device = torch.device("cuda")
     
     # 加载 checkpoint
     print(f"\n1. 加载 checkpoint...")
@@ -472,34 +507,7 @@ def evaluate_checkpoint(args):
     
     # 加载数据集
     print(f"\n3. 加载数据集...")
-    dataset = CustomDataset(
-        data_folder=args.dataset_root,
-        auto_detect=True
-    )
-    
-    # 构建 sample index → sequence 映射表
-    seq_boundaries = []
-    if hasattr(dataset, 'all_files') and dataset.all_files:
-        cur_seq = None
-        cur_start = 0
-        for i, fpath in enumerate(dataset.all_files):
-            seq_id = fpath.split('/')[0]
-            if seq_id != cur_seq:
-                if cur_seq is not None:
-                    seq_boundaries.append((cur_seq, cur_start, i - 1))
-                cur_seq = seq_id
-                cur_start = i
-        if cur_seq is not None:
-            seq_boundaries.append((cur_seq, cur_start, len(dataset.all_files) - 1))
-        print(f"   序列边界映射:")
-        for seq_id, s, e in seq_boundaries:
-            print(f"     Seq {seq_id}: samples {s} - {e} ({e - s + 1} 帧)")
-
-    def _get_sequence_for_sample(sample_idx):
-        for seq_id, s, e in seq_boundaries:
-            if s <= sample_idx <= e:
-                return seq_id
-        return "unknown"
+    dataset = _build_eval_custom_dataset(args.dataset_root, args)
     
     # 根据 use_full_dataset 决定是否使用全量数据
     if args.use_full_dataset:
@@ -512,6 +520,58 @@ def evaluate_checkpoint(args):
         generator = torch.Generator().manual_seed(114514)
         _, eval_dataset = random_split(dataset, [train_size, val_size], generator=generator)
         print(f"   ✓ 验证集: {len(eval_dataset)} 个样本 (80/20划分, seed=114514, 与训练一致)")
+
+    # 构建 eval loader index → sequence 映射表
+    # 对 Subset (random_split), loader index 和全局 all_files index 不同,
+    # 需要通过 Subset.indices 做映射
+    _global_seq_boundaries = []  # (seq_id, start, end) in global all_files order
+    _eval_idx_to_seq = {}        # eval loader index → seq_id
+    seq_boundaries = []          # (seq_id, start, end) in eval order (for charts/report)
+
+    if hasattr(dataset, 'all_files') and dataset.all_files:
+        cur_seq = None
+        cur_start = 0
+        for i, fpath in enumerate(dataset.all_files):
+            seq_id = fpath.split('/')[0]
+            if seq_id != cur_seq:
+                if cur_seq is not None:
+                    _global_seq_boundaries.append((cur_seq, cur_start, i - 1))
+                cur_seq = seq_id
+                cur_start = i
+        if cur_seq is not None:
+            _global_seq_boundaries.append((cur_seq, cur_start, len(dataset.all_files) - 1))
+
+        is_subset = hasattr(eval_dataset, 'indices')
+        if is_subset:
+            subset_indices = list(eval_dataset.indices)
+            for loader_idx, global_idx in enumerate(subset_indices):
+                fpath = dataset.all_files[global_idx]
+                _eval_idx_to_seq[loader_idx] = fpath.split('/')[0]
+        else:
+            for loader_idx, fpath in enumerate(dataset.all_files):
+                _eval_idx_to_seq[loader_idx] = fpath.split('/')[0]
+
+        # Build seq_boundaries in eval order for charts
+        cur_seq = None
+        cur_start = 0
+        for loader_idx in range(len(eval_dataset)):
+            sid = _eval_idx_to_seq.get(loader_idx, "unknown")
+            if sid != cur_seq:
+                if cur_seq is not None:
+                    seq_boundaries.append((cur_seq, cur_start, loader_idx - 1))
+                cur_seq = sid
+                cur_start = loader_idx
+        if cur_seq is not None:
+            seq_boundaries.append((cur_seq, cur_start, len(eval_dataset) - 1))
+
+        print(f"   序列映射 ({'Subset→全局索引' if is_subset else '全量直接'}):")
+        from collections import Counter
+        seq_counts = Counter(_eval_idx_to_seq.values())
+        for sid, cnt in sorted(seq_counts.items()):
+            print(f"     Seq {sid}: {cnt} 帧")
+
+    def _get_sequence_for_sample(sample_idx):
+        return _eval_idx_to_seq.get(sample_idx, "unknown")
     
     collate_fn = make_collate_fn((args.target_width, args.target_height))
     val_loader = DataLoader(
@@ -754,16 +814,38 @@ def evaluate_checkpoint(args):
             header = f"{'Seq':<6} {'Samples':>8} {'Rot Mean':>10} {'Rot Std':>10} {'Rot Med':>10} {'Rot P95':>10} {'Rot Max':>10} {'Roll':>8} {'Pitch':>8} {'Yaw':>8}"
             f.write(f"  {header}\n")
             f.write(f"  {'-'*len(header)}\n")
+            seq_means = {'rot': [], 'roll': [], 'pitch': [], 'yaw': []}
             for sb_seq, sb_s, sb_e in seq_boundaries:
                 mask = seq_arr == sb_seq
                 n = int(mask.sum())
                 if n == 0:
                     continue
                 sr = rot_arr[mask]
+                seq_means['rot'].append(np.mean(sr))
+                seq_means['roll'].append(np.mean(roll_arr[mask]))
+                seq_means['pitch'].append(np.mean(pitch_arr[mask]))
+                seq_means['yaw'].append(np.mean(yaw_arr[mask]))
                 f.write(f"  {sb_seq:<6} {n:>8} {np.mean(sr):>10.4f} {np.std(sr):>10.4f} "
                         f"{np.median(sr):>10.4f} {np.percentile(sr, 95):>10.4f} {np.max(sr):>10.4f} "
                         f"{np.mean(roll_arr[mask]):>8.4f} {np.mean(pitch_arr[mask]):>8.4f} {np.mean(yaw_arr[mask]):>8.4f}\n")
             f.write("\n")
+
+            if seq_means['rot']:
+                macro_rot = np.mean(seq_means['rot'])
+                macro_roll = np.mean(seq_means['roll'])
+                macro_pitch = np.mean(seq_means['pitch'])
+                macro_yaw = np.mean(seq_means['yaw'])
+                f.write("  Macro-Averaged (equal weight per sequence):\n")
+                f.write(f"    Rot: {macro_rot:.6f}° "
+                        f"(Roll:{macro_roll:.4f}° "
+                        f"Pitch:{macro_pitch:.4f}° "
+                        f"Yaw:{macro_yaw:.4f}°)\n")
+                f.write(f"    Micro (sample-level): {avg_errors['rot_error']:.6f}°\n")
+                f.write(f"    Macro (sequence-level): {macro_rot:.6f}°\n")
+                use_macro = getattr(args, 'data_balance', 0) > 0
+                primary = "Macro" if use_macro else "Micro"
+                primary_val = macro_rot if use_macro else avg_errors['rot_error']
+                f.write(f"    PRIMARY_METRIC: {primary} {primary_val:.6f}°\n\n")
         f.write("\n" + "="*80 + "\n")
 
     # ========== 生成评估可视化图表 ==========
@@ -773,10 +855,12 @@ def evaluate_checkpoint(args):
                           sample_sequences=sample_sequences,
                           seq_boundaries=seq_boundaries)
 
+    _eval_elapsed = time.time() - _eval_t0
     print(f"\n✓ 评估完成！")
     print(f"   - 评估样本数: {sample_count}")
     print(f"   - 输出目录: {eval_dir}")
     print(f"   - 外参文件: {extrinsics_file}")
+    print(f"   - 总耗时: {_format_elapsed(_eval_elapsed)}")
     print("=" * 80)
 
 
@@ -1059,6 +1143,7 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
 
 def compare_checkpoints(args):
     """Compare two checkpoints on the same test data with identical perturbations."""
+    _cmp_t0 = time.time()
 
     label_a = args.label_a
     label_b = args.label_b
@@ -1069,7 +1154,11 @@ def compare_checkpoints(args):
     print(f"  数据集: {args.dataset_root}")
     print("=" * 80)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        print("\n[FATAL] CUDA 不可用! 稀疏卷积要求 GPU。")
+        print(f"  CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}")
+        sys.exit(1)
+    device = torch.device("cuda")
 
     # Auto-detect rotation_only from checkpoint A (same logic as evaluate_checkpoint)
     if args.rotation_only == -1:
@@ -1099,7 +1188,7 @@ def compare_checkpoints(args):
     print(f"   [{label_b}] epoch={epoch_b}")
 
     print(f"\n2. 加载数据集...")
-    dataset = CustomDataset(data_folder=args.dataset_root, auto_detect=True)
+    dataset = _build_eval_custom_dataset(args.dataset_root, args)
     if args.use_full_dataset:
         eval_dataset = dataset
         print(f"   全量: {len(eval_dataset)} 样本")
@@ -1282,10 +1371,12 @@ def compare_checkpoints(args):
     _generate_comparison_charts(errors_a, errors_b, label_a, label_b,
                                 eval_dir, sample_count, args, rotation_only)
 
+    _cmp_elapsed = time.time() - _cmp_t0
     print(f"\n{'='*80}")
     print(f"对比完成! {sample_count} 样本")
     print(f"  输出: {eval_dir}")
     print(f"  摘要: {summary_path}")
+    print(f"  总耗时: {_format_elapsed(_cmp_elapsed)}")
     print(f"{'='*80}")
 
 
@@ -1766,6 +1857,7 @@ def _generate_feishu_report(all_stats, output_dir, args):
 
 def multi_eval_and_report(args):
     """Evaluate all models on test data via subprocesses and generate report."""
+    _multi_t0 = time.time()
     models_dir = args.models_dir
     output_dir = args.output_dir or "logs/multi_eval_test_data"
     os.makedirs(output_dir, exist_ok=True)
@@ -1810,6 +1902,7 @@ def multi_eval_and_report(args):
             print(f"   ckpt: {ckpt_path}")
             print(f"   BEV_ZBOUND_STEP={mcfg['bev_zbound_step']}, rotation_only={mcfg['rotation_only']}")
 
+            _model_t0 = time.time()
             env = os.environ.copy()
             env["BEV_ZBOUND_STEP"] = mcfg["bev_zbound_step"]
 
@@ -1835,6 +1928,10 @@ def multi_eval_and_report(args):
                 cmd += ["--angle_range_deg", str(args.angle_range_deg)]
             if args.trans_range is not None:
                 cmd += ["--trans_range", str(args.trans_range)]
+            if getattr(args, 'eval_sample_step', None) is not None:
+                cmd += ["--eval_sample_step", str(args.eval_sample_step)]
+            if getattr(args, 'eval_max_frames_per_seq', None) is not None:
+                cmd += ["--eval_max_frames_per_seq", str(args.eval_max_frames_per_seq)]
 
             proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
             if proc.returncode != 0:
@@ -1843,7 +1940,8 @@ def multi_eval_and_report(args):
                     for errline in proc.stderr.strip().split('\n')[-10:]:
                         print(f"      {errline}")
                 continue
-            print(f"   [OK] {label} 评估完成")
+            _model_elapsed = time.time() - _model_t0
+            print(f"   [OK] {label} 评估完成 (耗时: {_format_elapsed(_model_elapsed)})")
 
         stats = _parse_eval_stats(extrinsics_path)
         if stats:
@@ -1865,11 +1963,13 @@ def multi_eval_and_report(args):
     _generate_multi_charts(all_stats, output_dir)
     report_path = _generate_feishu_report(all_stats, output_dir, args)
 
+    _multi_elapsed = time.time() - _multi_t0
     print(f"\n{'='*80}")
     print(f"多模型泛化评估完成!")
     print(f"  评估模型数: {len(all_stats)}/{len(MULTI_EVAL_MODELS)}")
     print(f"  报告: {report_path}")
     print(f"  图表: {os.path.join(output_dir, 'charts')}/")
+    print(f"  总耗时: {_format_elapsed(_multi_elapsed)}")
     print(f"{'='*80}")
 
 
@@ -1904,6 +2004,11 @@ def main():
     parser.add_argument("--target_height", type=int, default=360, help="目标图像高度")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--max_batches", type=int, default=0, help="最多评估的batch数（0表示全部）")
+    parser.add_argument("--eval_sample_step", type=int, default=None,
+                       help="测试数据采样步长 (每隔N帧取1帧, None=使用全部帧)")
+    parser.add_argument("--eval_max_frames_per_seq", type=int, default=None,
+                       help="测试集每序列最多保留帧数 (均匀下采样, 与训练 --max_frames_per_seq 语义一致；"
+                            "与 eval_sample_step 互斥, None=不限制)")
     parser.add_argument("--validate_sample_ratio", type=float, default=0.2,
                        help="验证集比例（默认0.2，与训练时80/20划分一致）")
     parser.add_argument("--use_full_dataset", action='store_true', default=False,
@@ -1944,6 +2049,9 @@ def main():
                        choices=["replace", "replace_v1", "replace_v2", "dual_path", "supervision"],
                        help="Foundation Depth mode (default: replace). "
                             "replace_v2=SpatialAligner, dual_path=fusion, supervision=aux loss")
+    parser.add_argument("--data_balance", type=int, default=0,
+                       help="Balanced evaluation mode (0=micro only, 1/2=macro primary). "
+                            "When >0, PRIMARY_METRIC uses macro-averaged (per-sequence equal weight).")
     
     args = parser.parse_args()
 
@@ -1994,6 +2102,10 @@ def _delegate_to_drinfer(args):
             cmd.extend([f"--{param}", str(val)])
     if hasattr(args, 'use_mlp_head') and args.use_mlp_head >= 0:
         cmd.extend(["--use_mlp_head", str(args.use_mlp_head)])
+    if getattr(args, 'eval_sample_step', None) is not None:
+        cmd.extend(["--eval_sample_step", str(args.eval_sample_step)])
+    if getattr(args, 'eval_max_frames_per_seq', None) is not None:
+        cmd.extend(["--eval_max_frames_per_seq", str(args.eval_max_frames_per_seq)])
 
     print(f"[backend=drinfer] Delegating to: {' '.join(cmd[:4])}...")
     os.execv(sys.executable, cmd)

@@ -1,0 +1,94 @@
+# V21 泛化评估配置 — 训练域 (all_training_data)
+#
+# 与 eval_generalization_v21.yaml 相同模型, 换训练域数据集
+# 目的: 对比 V21 增强对训练域精度的影响
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/all_training_data"
+output_dir: "logs/evaluations/generalization_eval_v21_all_data"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v21-full"
+    dir_name: "model_small_5deg_v21_generalize_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v21-full"
+    mode_desc: "V21 完整增强"
+
+  - label: "v21-no-intr"
+    dir_name: "model_small_5deg_v21_generalize_no_intr"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v21-no-intr"
+    mode_desc: "V21 消融: 无内参增强"
+
+  - label: "v21-strong"
+    dir_name: "model_small_5deg_v21_generalize_strong"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v21-strong"
+    mode_desc: "V21 强化"
+
+  - label: "v21-z10"
+    dir_name: "model_small_5deg_v21_generalize_z10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v21-z10"
+    mode_desc: "V21: Z10+完整增强"
+
+  - label: "v20-baseline"
+    dir_name: "model_small_5deg_v20_v8recipe_z5_5deg_pitch_wt3_no_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v20-baseline"
+    mode_desc: "V20 对照: 无增强"

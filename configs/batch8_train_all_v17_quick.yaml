@@ -1,0 +1,194 @@
+# BEVCalib V17 Quick 训练配置 — 优化 Seq02 + 整体精度平衡
+#
+# V17 设计哲学:
+#   基于 V8/V11/V16 完整评估数据, 重点解决 Seq02 瓶颈:
+#
+#   核心发现 (来自 V16 Quick + V11 Mean 评估):
+#     1. sign_flip(0.15) 整体最优 (0.458°), Seq02 也改善 (1.003° vs v6: 1.163°)
+#     2. perturb 对 Seq02 改善最大 (0.942°), 但整体较差 (0.558°)
+#     3. 弱 perturb + sign_flip 可能兼顾两者
+#     4. pitch3 loss 在 dual 模式下反伤整体 (0.568° vs 0.494°)
+#
+#   V17 策略:
+#     - 保持 sign_flip 基座 (V16 验证整体最优)
+#     - 探索不同强度 perturb 的叠加效果 (弱/中/强)
+#     - 消融 pitch loss 权重 (1.0/1.5/3.0)
+#     - 增加扰动范围探索 (5deg vs 8deg)
+#
+# Baseline 参照:
+#   - v16-sign-flip (Quick):  整体 0.458°, Seq02 1.003°
+#   - v16-perturb (Quick):    整体 0.558°, Seq02 0.942°
+#   - all-v6-champion:        整体 0.278°, Seq02 1.163°
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v17_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0              # Z=10 (confirmed best)
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 16
+    learning_rate: 2e-4                 # V16 LR消融验证: 2e-4 优于 1e-4 (0.15° vs 0.17°)
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1               # 单机不触发 (8GPU≤ref=8), 多机时自动生效
+    ddp_reference_gpus: 8
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 ===
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 50
+    cosine_Tmult: 2
+    warmup_epochs: 10
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 (V17: sign-flip 基座 + 可变 perturb) ===
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.15   # sign-flip 基座
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500              # 每seq最多500帧 (Quick模式)
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    # === DrInfer 兼容配置 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V17 消融矩阵: sign-flip 基座 + perturb 强度消融 + pitch loss 消融
+  # =========================================================================
+
+  # 0. sign-flip only 对照 (复现 v16-sign-flip)
+  - name: "v17_signflip_only"
+    description: "V17: sign_flip(0.15) 对照 (无perturb)"
+    dataset: "all"
+    version: "v17_signflip_only_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+  # 1. sign-flip + 弱 perturb (推荐首选)
+  - name: "v17_weak_perturb"
+    description: "V17: sign_flip(0.15) + perturb(0.10, 1.5°) 弱融合"
+    dataset: "all"
+    version: "v17_weak_perturb_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_flip_max_deg: 1.5
+
+  # 2. sign-flip + 中等 perturb
+  - name: "v17_mid_perturb"
+    description: "V17: sign_flip(0.15) + perturb(0.15, 2°) 中等融合"
+    dataset: "all"
+    version: "v17_mid_perturb_quick"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.0
+
+  # 3. sign-flip + 弱 perturb + Pitch1.5 loss (温和 pitch 强化)
+  - name: "v17_weak_perturb_pitch15"
+    description: "V17: sign_flip(0.15) + perturb(0.10, 1.5°) + Pitch1.5"
+    dataset: "all"
+    version: "v17_weak_pitch15_quick"
+    params:
+      axis_weights: "1.0,1.5,1.0"
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_flip_max_deg: 1.5
+
+  # 4. sign-flip + 弱 perturb + Pitch3 loss
+  - name: "v17_weak_perturb_pitch3"
+    description: "V17: sign_flip(0.15) + perturb(0.10, 1.5°) + Pitch3"
+    dataset: "all"
+    version: "v17_weak_pitch3_quick"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_flip_max_deg: 1.5
+
+  # 5. 更大扰动范围: 8度训练 (探索泛化上限)
+  - name: "v17_angle8_weak_perturb"
+    description: "V17: 8deg + sign_flip(0.15) + perturb(0.10, 1.5°)"
+    dataset: "all"
+    version: "v17_angle8_weak_quick"
+    params:
+      angle_range_deg: 8
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_flip_max_deg: 1.5
+
+# ============================================================================
+# V17 Quick 消融矩阵 (6组)
+# ============================================================================
+#
+#   实验                    | sign_flip | perturb(p,deg)| Pitch loss | angle | 目标
+#   ------------------------+-----------+---------------+------------+-------+----------
+#   0 signflip_only         | 0.15      | No            | 1x         | 5°    | v16对照
+#   1 weak_perturb          | 0.15      | 0.10, 1.5°    | 1x         | 5°    | ★推荐首选
+#   2 mid_perturb           | 0.15      | 0.15, 2.0°    | 1x         | 5°    | 中等融合
+#   3 weak_perturb_pitch15  | 0.15      | 0.10, 1.5°    | 1.5x       | 5°    | 温和pitch
+#   4 weak_perturb_pitch3   | 0.15      | 0.10, 1.5°    | 3x         | 5°    | 强pitch
+#   5 angle8_weak_perturb   | 0.15      | 0.10, 1.5°    | 1x         | 8°    | 大角度
+#
+# 预期目标:
+#   signflip_only:          整体 ~0.46°, Seq02 ~1.00° (复现v16-signflip)
+#   weak_perturb:           整体 ~0.45°, Seq02 ~0.90° (兼顾两者)
+#   mid_perturb:            整体 ~0.48°, Seq02 ~0.85° (perturb稍强)
+#   weak_perturb_pitch15:   整体 ~0.44°, Seq02 ~0.88° (温和pitch加持)
+#   weak_perturb_pitch3:    整体 ~0.47°, Seq02 ~0.92° (pitch3可能过强)
+#   angle8_weak_perturb:    整体 ~0.50°, Seq02 ~0.80° (大角度扩泛化)

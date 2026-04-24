@@ -1,0 +1,172 @@
+# BEVCalib V16 多机加速训练配置
+#
+# DDP 加速模式 (ddp_auto_scale=1):
+#   - epoch 保持不变 (400), 只缩放 LR 和 warmup
+#   - 更多 GPU → 每 epoch 更快完成 → 实际加速
+#   - LR 按 √(GPU比) 缩放, warmup 适当增加
+#
+# 预期加速效果 (数据集 ~32K帧, batch=16):
+#
+#   配置            | 全局batch |  步/epoch | 训练时间 | 加速比
+#   ----------------+-----------+-----------+----------+-------
+#   参考 (8GPU)     |       128 |       203 |  ~11.3h  |  1.0x
+#   8机 (64GPU)     |     1,024 |        25 |   ~1.4h  |  8.1x
+#   16机 (128GPU)   |     2,048 |        12 |   ~0.7h  | 16.9x
+#   32机 (256GPU)   |     4,096 |         6 |   ~0.3h  | 33.8x
+#
+# 原理: 大 batch 梯度方差更低 → 更大 LR → 相同 epoch 收敛
+#
+# 如果加速模式效果不佳:
+#   1. ddp_auto_scale: 2  → 保步模式 (增 epoch 匹配总步数, 无加速)
+#   2. ddp_auto_scale: 0  → 禁用自动缩放, 手动调参
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v16_speedup.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 16
+    learning_rate: 1e-4
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1                       # 修改此值适配你的集群: 4/8/16/32
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    # === DDP 自动缩放 ===
+    ddp_auto_scale: 1               # 1=加速(默认), 2=保步, 0=禁用
+    ddp_reference_gpus: 8           # 超参参考: Quick单机8GPU
+    max_scaled_lr: 4e-4             # LR上限: V16消融验证最优区间 2e-4~4e-4
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 ===
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 ===
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.0
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 800
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    # === DrInfer 兼容配置 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V16 加速训练实验矩阵 (与 batch8_train_all_v16.yaml 相同实验)
+  # =========================================================================
+
+  # 0. 终极配置: Pitch3 + 双模式pitch增强
+  - name: "v16_ultimate_fast"
+    description: "V16加速: Pitch3+StepLR+dual_pitch (Quick最优)"
+    dataset: "all"
+    version: "v16_ultimate_fast"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.0
+
+  # 1. sign_flip 对照
+  - name: "v16_pitch3_signflip_fast"
+    description: "V16加速: Pitch3+sign_flip(0.15)"
+    dataset: "all"
+    version: "v16_pitch3_signflip_fast"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.15
+
+  # 2. 纯 Aug 对照 (无pitch增强)
+  - name: "v16_pitch3_aug_fast"
+    description: "V16加速: Pitch3+Aug (无pitch增强, 对照组)"
+    dataset: "all"
+    version: "v16_pitch3_aug_fast"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. Cosine 调度器对照
+  - name: "v16_cosine_ultimate_fast"
+    description: "V16加速: Cosine+Pitch3+dual_pitch"
+    dataset: "all"
+    version: "v16_cosine_ultimate_fast"
+    params:
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.0
+
+# ============================================================================
+# 实验矩阵
+# ============================================================================
+#
+#   实验                        | LR调度  | Pitch3 | sign_flip | perturb
+#   ----------------------------+---------+--------+-----------+----------
+#   0 v16_ultimate_fast         | Step    | Yes    | 0.1       | 0.15, 2°
+#   1 v16_pitch3_signflip_fast  | Step    | Yes    | 0.15      | No
+#   2 v16_pitch3_aug_fast       | Step    | Yes    | No        | No
+#   3 v16_cosine_ultimate_fast  | Cosine  | Yes    | 0.1       | 0.15, 2°
+#
+# 所有实验使用相同的加速策略, 通过 version 后缀 "_fast" 区分输出目录
+# 可与 batch8_train_all_v16.yaml 的结果直接对比

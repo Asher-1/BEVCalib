@@ -1,0 +1,106 @@
+# BEVCalib — V8 泛化最佳模型 (v8-z10) 复现训练
+#
+# 依据 logs/evaluations/generalization_eval_all_v8/GENERALIZATION_REPORT.md:
+#   排名第一: v8-z10 — Mean Rot 0.231° — Z=10 + 均匀 axis 权重 + Linear+StepLR+无 aug
+#
+# 本配置在结构与超参对齐上参考 configs/batch8_train_all_v20.yaml（Cloud 布局、sample_step、无增强），
+# 但与 V20 刻意相反的两点（按你的实验需求）:
+#   1) 不使用 DRCV 后端 — USE_DRCV_BACKEND=0（走原始 SPConv 稀疏卷积路径）
+#   2) 不进行 DDP 学习率缩放 — ddp_auto_scale=0（多机仍 DDP，但 LR 维持基座 learning_rate）
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v8best_z10_spconv_noscale.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v8best_z10_spconv_noscale.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0          # Z=10（与 eval 报告 v8-z10 一致）
+    USE_DRCV_BACKEND: 0           # 不使用 DRCV（SPConv）
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4           # 基座 LR；ddp_auto_scale=0 时全局各 GPU 使用该值（不 √N 缩放）
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 16
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    ddp_auto_scale: 0               # 禁用 LR 缩放（等价于不按 GPU 数放大/缩小 LR）
+    # max_scaled_lr 在 ddp_auto_scale=0 时不参与缩放逻辑，无需设置
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.0
+
+    # 与 V20 对齐：更密采样（原 ALL V8 训练未必用 step=2，此处按 V20 参考）
+    sample_step: 2
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # 泛化榜 #1：v8-z10 — Z=10 + axis 均匀权重
+  - name: "v8best_z10_spconv_noscale"
+    description: "V8泛化最佳 v8-z10 复现：Z10+1,1,1+SPConv+不调LRScale（对照 V20 布局）"
+    dataset: "all"
+    version: "v8best_z10_spconv_noscale"
+    params:
+      axis_weights: "1.0,1.0,1.0"
+
+# ============================================================================
+# 说明
+# ============================================================================
+#
+# | 项 | 本配置 |
+# | --- | --- |
+# | 对应泛化条目 | v8-z10（GENERALIZATION_REPORT 排名第一） |
+# | Z | BEV_ZBOUND_STEP=2.0 → 10 个 Z voxel |
+# | axis_weights | 1,1,1（与 batch8_train_all_v8.yaml 中 v8_z10 一致） |
+# | 后端 | USE_DRCV_BACKEND=0 |
+# | LR | ddp_auto_scale=0 → 不按 world_size 缩放 |
+# | 采样 | sample_step=2（与 batch8_train_all_v20.yaml 一致，便于对照） |
+#
+# 若需严格复刻「当年 ALL V8 训练」的采样密度，可将 sample_step 改为 4 或去掉以使用全帧
+# （视你当时 batch8_train_all_v8 实际 launch 参数而定）。

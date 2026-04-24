@@ -1,0 +1,170 @@
+# BEVCalib V18 全量训练配置 — 云服务器 GPU 版 (bs=16, 16节点)
+#
+# V18 设计哲学:
+#   Pitch 泛化突破。基于 V6~V17 全量评估分析:
+#   - 全部使用 DRCV 后端 (部署必须)
+#   - 聚焦 sign-flip 强化 + Pitch loss 聚焦策略
+#
+# Baseline 参照:
+#   - all-v8-z10-pitch3:     整体 0.251°, Seq00 0.164°, Seq02 0.927°
+#   - v16-sign-flip (Quick): 整体 0.458°, Seq00 0.909°, Seq02 1.003°
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v18.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 16
+    learning_rate: 1e-4
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 16
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1               # 加速模式: 缩放LR+warmup, epoch不变
+    # ddp_auto_scale: 2             # 保步模式: 增epoch匹配总步数
+    ddp_reference_gpus: 8           # 超参参考GPU数
+    max_scaled_lr: 4e-4             # LR上限: V16消融验证最优区间 2e-4~4e-4
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 (V18默认: Cosine) ===
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 50
+    cosine_Tmult: 2
+    warmup_epochs: 10
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 (V18: 强化 sign-flip + Pitch 聚焦) ===
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.20
+
+    # === 数据采样 ===
+    sample_step: 4
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === DrInfer 兼容配置 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V18 全量训练: Pitch 泛化突破 + 后端消融 (6组)
+  # =========================================================================
+
+  # A. sign-flip 强化 + Pitch 聚焦 (★DRCV 首选)
+  - name: "v18_signflip_pitch_focus"
+    description: "V18-A: sign_flip(0.20) + Pitch2.0 聚焦 (DRCV首选)"
+    dataset: "all"
+    version: "v18_signflip_pitch_focus"
+    params:
+      axis_weights: "1.0,2.0,1.0"
+
+  # B. 大角度 + Pitch 强化
+  - name: "v18_angle8_pitch"
+    description: "V18-B: 8deg + sign_flip(0.20) + Pitch2.5"
+    dataset: "all"
+    version: "v18_angle8_pitch"
+    params:
+      angle_range_deg: 8
+      axis_weights: "1.0,2.5,1.0"
+
+  # C. 混合增强 + 高 per-axis 扰动
+  - name: "v18_hybrid_aug"
+    description: "V18-C: sign_flip(0.20) + perturb(0.15,2.5°) + per_axis(0.5)"
+    dataset: "all"
+    version: "v18_hybrid_aug"
+    params:
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.5
+      per_axis_prob: 0.5
+      axis_weights: "1.0,2.0,1.0"
+
+  # D. StepLR + sign-flip + Pitch (调度器消融)
+  - name: "v18_step_signflip_pitch"
+    description: "V18-D: StepLR + sign_flip(0.20) + Pitch2.0 (调度器对照)"
+    dataset: "all"
+    version: "v18_step_signflip_pitch"
+    params:
+      lr_schedule: step
+      warmup_epochs: 5
+      axis_weights: "1.0,2.0,1.0"
+
+  # =========================================================================
+  # bs=8 变体 — 减小全局batch缓解大batch收敛风险
+  # =========================================================================
+
+  # E. DRCV首选 bs=8 (对照: 全局batch 1024→512)
+  - name: "v18_signflip_pitch_bs8"
+    description: "V18-E: A方案 bs=8 (降batch缓解收敛风险)"
+    dataset: "all"
+    version: "v18_signflip_pitch_bs8"
+    params:
+      batch_size: 8
+      axis_weights: "1.0,2.0,1.0"
+
+# ============================================================================
+# V18 云服务器训练矩阵 (5组, 16节点 x 8GPU, 全部 DRCV)
+# ============================================================================
+#
+#   实验                       | BS | LR调度 | sign_flip | Pitch | Backend | Z  | 目标
+#   ---------------------------+----+--------+-----------+-------+---------+----+-------------------
+#   A signflip_pitch_focus     | 16 | Cosine | 0.20      | 2.0x  | DRCV    | 10 | DRCV+Pitch聚焦
+#   B angle8_pitch             | 16 | Cosine | 0.20      | 2.5x  | DRCV    | 10 | 大角度+强Pitch
+#   C hybrid_aug               | 16 | Cosine | 0.20      | 2.0x  | DRCV    | 10 | 混合增强上限
+#   D step_signflip_pitch      | 16 | Step   | 0.20      | 2.0x  | DRCV    | 10 | 调度器对照
+#   E signflip_pitch_bs8       |  8 | Cosine | 0.20      | 2.0x  | DRCV    | 10 | 小batch对照
+#
+# DDP Scaling:
+#   bs=16: 全局batch=16×8GPU×16node=2048, sample_step=4 → ~16步/epoch
+#   bs=8:  全局batch=8×8GPU×16node=1024,  sample_step=4 → ~32步/epoch

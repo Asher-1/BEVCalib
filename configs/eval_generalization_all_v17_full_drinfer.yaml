@@ -1,0 +1,136 @@
+# V17 全量 DrInfer 泛化评估配置 — StepLR vs Cosine + Pitch 消融
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v17_full_drinfer.yaml
+#   多卡并行:
+#     ... --parallel -1
+#   快速评估 (每隔4帧采样):
+#     ... --eval_sample_step 4
+#
+# 前置步骤 (DrInfer 模型导出):
+#   对每个模型运行:
+#     python utils/torch2drinfer.py --config configs/drinfer_config_v17_<name>.yaml
+#   或参照 drinfer_config_v17_weak_perturb.yaml 模板修改 ckpt_path 和 export_dir
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v17_full_drinfer"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # === V17 全量训练 (DrInfer + PyTorch 对照) ===
+
+  # 0. 弱 perturb (推荐)
+  - label: "v17-weak-perturb [DrInfer]"
+    dir_name: "model_small_5deg_v17_weak_perturb"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-perturb-drinfer"
+    mode_desc: "V17 Full: StepLR+sign_flip(0.15)+perturb(0.10,1.5°)"
+
+  # 1. 弱 perturb + Pitch1.5
+  - label: "v17-weak-pitch15 [DrInfer]"
+    dir_name: "model_small_5deg_v17_weak_pitch15"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-pitch15-drinfer"
+    mode_desc: "V17 Full: StepLR+sign_flip(0.15)+perturb(0.10,1.5°)+Pitch1.5"
+
+  # 2. sign-flip only 对照
+  - label: "v17-signflip-only [DrInfer]"
+    dir_name: "model_small_5deg_v17_signflip_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-signflip-only-drinfer"
+    mode_desc: "V17 Full: StepLR+sign_flip(0.15) 对照 (无perturb)"
+
+  # 3. Cosine + 弱 perturb
+  - label: "v17-cosine-weak [DrInfer]"
+    dir_name: "model_small_5deg_v17_cosine_weak"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-cosine-weak-drinfer"
+    mode_desc: "V17 Full: Cosine+sign_flip(0.15)+perturb(0.10,1.5°)"
+
+  # === 历史冠军 (对照) ===
+
+  - label: "all-v6-champion [DrInfer]"
+    dir_name: "model_small_5deg_v6_champion"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "all-v6-champion-drinfer"
+    mode_desc: "ALL V6 泛化冠军 0.278°"

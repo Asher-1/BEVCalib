@@ -1,0 +1,244 @@
+# BEVCalib V16 LR 消融配置 — 快速验证最佳 LR/Schedule/Warmup
+#
+# 目标:
+#   单机 8GPU + Quick 数据 (max_frames=500) 快速验证
+#   找到最佳 LR + Schedule + Warmup 组合, 再应用到多机训练
+#
+# 设计原理:
+#   单机 8GPU, global batch=128, max_frames=500 → ~42步/epoch
+#   快速跑完 12 组消融, 找出最优超参趋势
+#   最优配置可直接用于 batch8_train_all_v16.yaml (多机全量训练)
+#
+# 消融维度:
+#   1. LR: 1e-4 / 2e-4 / 3e-4 / 5e-4
+#   2. Schedule: Step vs Cosine
+#   3. Warmup: 5 / 10 / 20 epochs
+#   4. Batch Size: 16 vs 8
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v16_lr_ablation.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    batch_size: 16
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1                         # 单机 8GPU
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0                 # 禁用自动缩放, 手动探索最优LR
+    ddp_reference_gpus: 8
+    use_compile: false
+    rotation_only: true
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1
+    augment_pitch_flip_prob: 0.15
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.1
+    axis_weights: "1.0,3.0,1.0"
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500
+    eval_epoches: 50
+    grad_accum_steps: 1
+    early_stopping_patience: 30
+    seed: 42
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # Part 1: Step Schedule + LR 消融 (基于 v16_ultimate 配置)
+  # =========================================================================
+
+  # 0. 基线: 不缩放, 使用参考 LR (预期: 欠拟合, 作为下界参照)
+  - name: "v16_lr_1e4_step"
+    description: "LR消融: Step+1e-4 (参考LR, 无缩放)"
+    dataset: "all"
+    version: "v16_lr_1e4_step"
+    params:
+      learning_rate: 1e-4
+      warmup_epochs: 5
+
+  # 1. LR=2e-4 (√缩放附近偏低)
+  - name: "v16_lr_2e4_step"
+    description: "LR消融: Step+2e-4 (偏保守)"
+    dataset: "all"
+    version: "v16_lr_2e4_step"
+    params:
+      learning_rate: 2e-4
+      warmup_epochs: 8
+
+  # 2. LR=3e-4 (接近 √缩放理论值 2.83e-4)
+  - name: "v16_lr_3e4_step"
+    description: "LR消融: Step+3e-4 (≈√缩放理论值)"
+    dataset: "all"
+    version: "v16_lr_3e4_step"
+    params:
+      learning_rate: 3e-4
+      warmup_epochs: 10
+
+  # 3. LR=5e-4 (激进, 测试上界)
+  - name: "v16_lr_5e4_step"
+    description: "LR消融: Step+5e-4 (激进探索)"
+    dataset: "all"
+    version: "v16_lr_5e4_step"
+    params:
+      learning_rate: 5e-4
+      warmup_epochs: 15
+
+  # =========================================================================
+  # Part 2: Cosine Schedule + LR 消融 (Cosine 对大 batch 更友好)
+  # =========================================================================
+
+  # 4. Cosine + LR=2e-4
+  - name: "v16_lr_2e4_cosine"
+    description: "LR消融: Cosine+2e-4 (保守+平滑衰减)"
+    dataset: "all"
+    version: "v16_lr_2e4_cosine"
+    params:
+      learning_rate: 2e-4
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+
+  # 5. Cosine + LR=3e-4 (理论最优点)
+  - name: "v16_lr_3e4_cosine"
+    description: "LR消融: Cosine+3e-4 (理论最优)"
+    dataset: "all"
+    version: "v16_lr_3e4_cosine"
+    params:
+      learning_rate: 3e-4
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+
+  # 6. Cosine + LR=5e-4
+  - name: "v16_lr_5e4_cosine"
+    description: "LR消融: Cosine+5e-4 (激进+平滑衰减)"
+    dataset: "all"
+    version: "v16_lr_5e4_cosine"
+    params:
+      learning_rate: 5e-4
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 15
+
+  # =========================================================================
+  # Part 3: 小 Batch + 最优 LR 候选 (bs=8, 全局512, 每epoch ~12步)
+  # =========================================================================
+
+  # 7. bs=8 + LR=2e-4 + Step
+  - name: "v16_bs8_lr_2e4_step"
+    description: "LR消融: bs=8+Step+2e-4 (小batch基线)"
+    dataset: "all"
+    version: "v16_bs8_lr_2e4_step"
+    params:
+      batch_size: 8
+      learning_rate: 2e-4
+      warmup_epochs: 8
+
+  # 8. bs=8 + LR=3e-4 + Step
+  - name: "v16_bs8_lr_3e4_step"
+    description: "LR消融: bs=8+Step+3e-4"
+    dataset: "all"
+    version: "v16_bs8_lr_3e4_step"
+    params:
+      batch_size: 8
+      learning_rate: 3e-4
+      warmup_epochs: 10
+
+  # 9. bs=8 + LR=3e-4 + Cosine (预期最优候选)
+  - name: "v16_bs8_lr_3e4_cosine"
+    description: "LR消融: bs=8+Cosine+3e-4 (★最优候选)"
+    dataset: "all"
+    version: "v16_bs8_lr_3e4_cosine"
+    params:
+      batch_size: 8
+      learning_rate: 3e-4
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+
+  # =========================================================================
+  # Part 4: 长 Warmup 探索 (大 batch 需要更多 warmup)
+  # =========================================================================
+
+  # 10. LR=3e-4 + 长 warmup 20 epochs
+  - name: "v16_lr_3e4_warmup20"
+    description: "LR消融: Step+3e-4+warmup=20 (长热身)"
+    dataset: "all"
+    version: "v16_lr_3e4_warmup20"
+    params:
+      learning_rate: 3e-4
+      warmup_epochs: 20
+
+  # 11. 自动缩放对照: ddp_auto_scale=1 (与手动最优对比)
+  - name: "v16_auto_scale"
+    description: "LR消融: auto_scale=1 (√缩放自动模式, 对照)"
+    dataset: "all"
+    version: "v16_auto_scale"
+    params:
+      learning_rate: 1e-4
+      ddp_auto_scale: 1
+      warmup_epochs: 5
+
+# ============================================================================
+# V16 LR 消融矩阵 (12 组, 8机 64GPU)
+# ============================================================================
+#
+#   #  | 实验名                  | BS | LR    | Schedule | Warmup | 全局BS | 步/ep | 目标
+#   ---+-------------------------+----+-------+----------+--------+--------+-------+----------
+#   0  | v16_lr_1e4_step         | 16 | 1e-4  | Step     | 5      | 128    | ~42   | 下界基线
+#   1  | v16_lr_2e4_step         | 16 | 2e-4  | Step     | 8      | 128    | ~42   | 偏保守
+#   2  | v16_lr_3e4_step         | 16 | 3e-4  | Step     | 10     | 128    | ~42   | 中等
+#   3  | v16_lr_5e4_step         | 16 | 5e-4  | Step     | 15     | 128    | ~42   | 上界激进
+#   4  | v16_lr_2e4_cosine       | 16 | 2e-4  | Cosine   | 10     | 128    | ~42   | 保守Cosine
+#   5  | v16_lr_3e4_cosine       | 16 | 3e-4  | Cosine   | 10     | 128    | ~42   | ★重点候选
+#   6  | v16_lr_5e4_cosine       | 16 | 5e-4  | Cosine   | 15     | 128    | ~42   | 激进Cosine
+#   7  | v16_bs8_lr_2e4_step     | 8  | 2e-4  | Step     | 8      | 64     | ~85   | 小batch基线
+#   8  | v16_bs8_lr_3e4_step     | 8  | 3e-4  | Step     | 10     | 64     | ~85   | 小batch Step
+#   9  | v16_bs8_lr_3e4_cosine   | 8  | 3e-4  | Cosine   | 10     | 64     | ~85   | ★最优候选
+#   10 | v16_lr_3e4_warmup20     | 16 | 3e-4  | Step     | 20     | 128    | ~42   | 长warmup
+#   11 | v16_auto_scale          | 16 | auto  | Step     | auto   | 128    | ~42   | √缩放对照
+#
+# 分析策略:
+#   1. Part1 找到 Step schedule 最优 LR → 与 √缩放 2.83e-4 对比
+#   2. Part2 找到 Cosine schedule 最优 LR → 与 Step 对比
+#   3. Part3 验证 bs=8 (更多梯度噪声) 是否优于 bs=16
+#   4. Part4 测试长 warmup 是否能补偿大 batch 的初始不稳定
+#   5. 实验 11 是 auto_scale 对照, 看自动方案 vs 手动最优差距
+#
+# 预期最优候选: #5 或 #9 (Cosine + 适中LR, 更好泛化)

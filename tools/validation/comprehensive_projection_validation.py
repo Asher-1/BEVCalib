@@ -246,15 +246,34 @@ def validate_sequence(dataset_root, sequence, output_base_dir):
     }
     
     if results:
-        stats['summary'] = {
-            'avg_visible_ratio': sum(r['visible_ratio'] for r in results) / len(results),
+        avg_ratio = sum(r['visible_ratio'] for r in results) / len(results)
+        zero_frac = zero_visible_count / len(sample_frames) if sample_frames else 1.0
+        if avg_ratio < 0.05 or zero_frac > 0.5:
+            _status = 'warn'
+            _reason_parts = []
+            if avg_ratio < 0.05:
+                _reason_parts.append(f"平均可见率过低({avg_ratio*100:.1f}%<5%)")
+            if zero_frac > 0.5:
+                _reason_parts.append(f"零点帧过多({zero_visible_count}/{len(sample_frames)}>{50}%)")
+            _reason = "; ".join(_reason_parts)
+        else:
+            _status = 'ok'
+            _reason = None
+        _summary = {
+            'avg_visible_ratio': avg_ratio,
             'avg_depth': sum(r['depth_mean'] for r in results) / len(results),
             'min_depth': min(r['depth_min'] for r in results),
             'max_depth': max(r['depth_max'] for r in results),
-            'status': 'ok',
+            'status': _status,
         }
-        print(f"\n  ✅ 序列 {sequence} 验证完成: {len(results)}/{len(sample_frames)} 帧成功")
-        print(f"  平均可见率: {stats['summary']['avg_visible_ratio']*100:.1f}%")
+        if _reason:
+            _summary['reason'] = _reason
+        stats['summary'] = _summary
+        if _status == 'ok':
+            print(f"\n  ✅ 序列 {sequence} 验证完成: {len(results)}/{len(sample_frames)} 帧成功")
+        else:
+            print(f"\n  ⚠️  序列 {sequence} 投影质量不佳: {_reason}")
+        print(f"  平均可见率: {avg_ratio*100:.1f}%")
     else:
         stats['summary'] = {
             'avg_visible_ratio': 0.0,

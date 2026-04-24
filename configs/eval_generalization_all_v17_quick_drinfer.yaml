@@ -1,0 +1,159 @@
+# V17 Quick DrInfer 泛化评估配置 — sign-flip 基座 + perturb 强度消融
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v17_quick_drinfer.yaml
+#   多卡并行:
+#     ... --parallel -1
+#   快速评估 (每隔4帧采样):
+#     ... --eval_sample_step 4
+#
+# 前置步骤 (DrInfer 模型导出):
+#   对每个模型运行:
+#     python utils/torch2drinfer.py --config configs/drinfer_config_v17_<name>.yaml
+#   或参照 drinfer_config_v17_weak_perturb_quick.yaml 模板修改 ckpt_path 和 export_dir
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+# 训练后需将模型目录整理到此路径:
+#   mkdir -p logs/all_training_data/v17_quick
+#   mv logs/all_training_data/model_small_*v17*quick logs/all_training_data/v17_quick/
+models_dir: "logs/all_training_data/v17_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v17_quick_drinfer"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # === V17 Quick sign-flip 基座 + perturb 消融 (DrInfer + PyTorch 对照) ===
+
+  # 0. sign-flip only 对照
+  - label: "v17-signflip-only [DrInfer]"
+    dir_name: "model_small_5deg_v17_signflip_only_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-signflip-only-drinfer"
+    mode_desc: "V17: sign_flip(0.15) 对照 (无perturb)"
+
+  # 1. sign-flip + 弱 perturb (推荐)
+  - label: "v17-weak-perturb [DrInfer]"
+    dir_name: "model_small_5deg_v17_weak_perturb_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-perturb-drinfer"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.10,1.5°) 弱融合"
+
+  # 2. sign-flip + 中等 perturb
+  - label: "v17-mid-perturb [DrInfer]"
+    dir_name: "model_small_5deg_v17_mid_perturb_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-mid-perturb-drinfer"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.15,2°) 中等融合"
+
+  # 3. sign-flip + 弱 perturb + Pitch1.5
+  - label: "v17-weak-pitch15 [DrInfer]"
+    dir_name: "model_small_5deg_v17_weak_pitch15_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-pitch15-drinfer"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.10,1.5°)+Pitch1.5"
+
+  # 4. sign-flip + 弱 perturb + Pitch3
+  - label: "v17-weak-pitch3 [DrInfer]"
+    dir_name: "model_small_5deg_v17_weak_pitch3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-pitch3-drinfer"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.10,1.5°)+Pitch3"
+
+  # 5. 8度扰动 + 弱 perturb
+  - label: "v17-angle8-weak [DrInfer]"
+    dir_name: "model_small_8deg_v17_angle8_weak_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 8
+    z_voxels: 10
+    version: "v17-angle8-weak-drinfer"
+    mode_desc: "V17: 8deg+sign_flip(0.15)+perturb(0.10,1.5°)"

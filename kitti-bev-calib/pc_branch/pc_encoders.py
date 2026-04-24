@@ -26,6 +26,7 @@ if USE_DRCV:
         SparseResBlock,
     )
     _SPARSE_NORM_CFG = dict(type="SparseBN1d", eps=1e-3, momentum=0.01)
+    print("USE_DRCV: True in pc_encoders.py")
 else:
     import spconv.pytorch as spconv
 

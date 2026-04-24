@@ -8,9 +8,9 @@
 #     --config configs/eval_generalization_all_v8.yaml
 
 bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
-models_dir: "logs/all_training_data/v8_quick"
+models_dir: "logs/all_training_data/v8_quick_mean"
 test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
-output_dir: "logs/evaluations/generalization_eval_all_v8_quick"
+output_dir: "logs/evaluations/generalization_eval_all_v8_quick_mean"
 eval_script: "evaluate_checkpoint.py"
 
 eval_params:

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torch.cuda.amp import autocast, GradScaler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -82,6 +82,84 @@ def stratified_split_by_sequence(dataset, train_ratio=0.8, seed=114514):
         split_stats[seq_id] = (n_train, len(indices) - n_train, len(indices))
     
     return Subset(dataset, train_indices), Subset(dataset, val_indices), split_stats
+
+
+def build_balanced_weights(subset, dataset, mode=1):
+    """Build per-sample weights for balanced sampling across sequences.
+    
+    mode=1 (full): each sequence gets equal total weight 1/N.
+      → weight_i = 1 / (N * count_of_seq(i))
+    mode=2 (sqrt): softer balance using sqrt(1/count).
+      → weight_i = sqrt(1 / count_of_seq(i)) / Z   (Z = normalization constant)
+    """
+    all_files = dataset.all_files
+    seq_counts = defaultdict(int)
+    sample_seqs = []
+    
+    indices = subset.indices if hasattr(subset, 'indices') else range(len(subset))
+    for idx in indices:
+        real_idx = idx
+        if hasattr(subset, 'dataset') and hasattr(subset.dataset, 'indices'):
+            real_idx = subset.dataset.indices[idx]
+        entry = all_files[real_idx]
+        seq_id = entry.split('/')[0]
+        seq_counts[seq_id] += 1
+        sample_seqs.append(seq_id)
+    
+    num_seqs = len(seq_counts)
+    weights = []
+    if mode == 2:
+        raw = {s: math.sqrt(1.0 / c) for s, c in seq_counts.items()}
+        z = sum(raw[s] * seq_counts[s] for s in seq_counts)
+        for seq_id in sample_seqs:
+            weights.append(raw[seq_id] / z)
+    else:
+        for seq_id in sample_seqs:
+            weights.append(1.0 / (num_seqs * seq_counts[seq_id]))
+    
+    return weights, seq_counts
+
+
+class DistributedBalancedSampler(torch.utils.data.Sampler):
+    """Distributed sampler with per-sequence balanced (weighted) sampling.
+    
+    Combines DistributedSampler's shard logic with WeightedRandomSampler's
+    weighted sampling so each GPU sees a balanced, non-overlapping subset.
+    
+    Algorithm per epoch:
+      1. Build weighted sample pool (all ranks use same seed → same order)
+      2. Shard the pool: rank k takes indices k, k+world_size, k+2*world_size, ...
+    """
+
+    def __init__(self, weights, num_samples, num_replicas=None, rank=None, seed=0):
+        if num_replicas is None:
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            rank = dist.get_rank()
+        self.weights = torch.as_tensor(weights, dtype=torch.double)
+        self.total_size = num_samples
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = seed
+        self.epoch = 0
+        self.num_samples_per_replica = int(math.ceil(self.total_size / self.num_replicas))
+        self.padded_total = self.num_samples_per_replica * self.num_replicas
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+        indices = torch.multinomial(self.weights, self.padded_total, replacement=True, generator=g).tolist()
+        assert len(indices) == self.padded_total
+        per_rank = indices[self.rank::self.num_replicas]
+        return iter(per_rank[:self.num_samples_per_replica])
+
+    def __len__(self):
+        return self.num_samples_per_replica
+
+
 from visualization import (
     compute_batch_pose_errors,
     visualize_batch_projection,
@@ -91,6 +169,7 @@ from visualization import (
 
 import sys
 import io
+import math
 from contextlib import contextmanager
 
 _tprint_log_file = None
@@ -208,12 +287,12 @@ def _apply_color_jitter(imgs_tensor, strength):
     return imgs_tensor
 
 
-def _augment_intrinsics(intrinsic_matrix, strength):
+def _augment_intrinsics(intrinsic_matrix, strength, cx_cy_strength=None):
     """Randomly perturb camera intrinsic matrix to improve robustness to unseen cameras.
 
     Augmentation strategy:
       - fx, fy scaled by same random factor (preserves aspect ratio)
-      - cx, cy independently offset by a smaller factor
+      - cx, cy independently offset (separate strength to match actual cross-vehicle variation)
       - K[2,2] = 1 is preserved
 
     The frustum geometry in LSS's get_geometry() depends on inv(K), so varying K
@@ -221,17 +300,21 @@ def _augment_intrinsics(intrinsic_matrix, strength):
 
     Args:
         intrinsic_matrix: (B, 3, 3) tensor on device
-        strength: max relative deviation, e.g. 0.05 means ±5%
+        strength: max relative deviation for fx/fy, e.g. 0.05 means ±5%
+        cx_cy_strength: max relative deviation for cx/cy (default: same as strength)
     Returns:
         augmented (B, 3, 3) tensor (same device, same dtype)
     """
+    if cx_cy_strength is None:
+        cx_cy_strength = strength
+
     B = intrinsic_matrix.shape[0]
     dev = intrinsic_matrix.device
     K = intrinsic_matrix.clone()
 
     focal_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * strength
-    cx_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * strength * 0.5
-    cy_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * strength * 0.5
+    cx_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * cx_cy_strength
+    cy_scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * cx_cy_strength
 
     K[:, 0, 0] *= focal_scale       # fx
     K[:, 1, 1] *= focal_scale       # fy
@@ -286,6 +369,7 @@ def parse_args():
     parser.add_argument("--min_point_utilization", type=float, default=0.5, help="最低点云利用率阈值 (0.0-1.0)")
     parser.add_argument("--min_valid_ratio", type=float, default=0.9, help="最低有效帧比例阈值 (0.0-1.0)")
     parser.add_argument("--max_frames_per_seq", type=int, default=None, help="每个序列最大帧数 (均匀采样), None=使用全部帧")
+    parser.add_argument("--sample_step", type=int, default=None, help="采样步长 (每隔N帧取1帧), 与max_frames_per_seq互斥")
     # 可视化参数
     parser.add_argument("--vis_freq", type=int, default=40, help="训练可视化频率 (每多少个batch可视化一次)")
     parser.add_argument("--vis_samples", type=int, default=3, help="每次可视化的样本数")
@@ -356,19 +440,37 @@ def parse_args():
     parser.add_argument("--augment_color_jitter", type=float, default=0.0,
                         help="Image color jitter strength (0=disabled)")
     parser.add_argument("--augment_intrinsic", type=float, default=0.0,
-                        help="Camera intrinsic augmentation strength: max relative deviation for fx/fy/cx/cy (e.g. 0.05=±5%%, 0=disabled)")
+                        help="Camera intrinsic augmentation strength: max relative deviation for fx/fy (e.g. 0.05=±5%%, 0=disabled)")
+    parser.add_argument("--augment_intrinsic_cxcy", type=float, default=0.0,
+                        help="Separate cx/cy augmentation strength (0=use same as --augment_intrinsic)")
     parser.add_argument("--augment_pitch_flip_prob", type=float, default=0.0,
-                        help="GT pitch flip augmentation probability (0=disabled). "
-                             "When > 0, randomly rotates GT around LiDAR Y-axis to "
-                             "balance the positive/negative pitch distribution.")
-    parser.add_argument("--augment_pitch_flip_max_deg", type=float, default=6.0,
-                        help="Max rotation angle (degrees) for GT pitch flip augmentation")
+                        help="GT pitch perturbation probability (0=disabled). "
+                             "Random Y-axis (pitch) rotation in [-max_deg, +max_deg].")
+    parser.add_argument("--augment_pitch_flip_max_deg", type=float, default=2.0,
+                        help="Max rotation angle (degrees) for pitch perturbation")
+    parser.add_argument("--augment_pitch_sign_flip_prob", type=float, default=0.0,
+                        help="GT pitch sign flip probability (0=disabled). "
+                             "Precisely negates the pitch angle to simulate "
+                             "reversed camera mounting (e.g. Seq02/06).")
     parser.add_argument("--early_stopping_patience", type=int, default=0,
                         help="Early stopping patience in epochs (0=disabled)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Global random seed for reproducibility (default: 42)")
     parser.add_argument("--grad_accum_steps", type=int, default=1,
                         help="Gradient accumulation steps (1=disabled, >1=accumulate N micro-batches per optimizer step)")
+    parser.add_argument("--ddp_auto_scale", type=int, default=1,
+                        help="Auto-scale hyperparams for large-scale DDP. "
+                             "0=disabled, 1=speedup (scale LR+warmup, keep epochs → actual speedup), "
+                             "2=preserve_steps (scale epochs to match total steps, no speedup)")
+    parser.add_argument("--ddp_reference_gpus", type=int, default=8,
+                        help="Reference GPU count the hyperparameters were tuned for (default: 8)")
+    parser.add_argument("--max_scaled_lr", type=float, default=4e-4,
+                        help="Max learning rate after DDP auto-scaling (0=unlimited). "
+                             "Recommended: 4e-4 based on V16 LR ablation (2e-4@8GPU ≈ 4e-4@128GPU)")
+    parser.add_argument("--data_balance", type=int, default=0,
+                        help="Per-sequence balanced sampling mode (0=off, 1=full, 2=sqrt). "
+                             "1: each sequence equal probability (1/N). "
+                             "2: softer sqrt(1/count) balance, less oversampling of small seqs.")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True):
@@ -556,7 +658,8 @@ def main():
     with capture_prints(is_main):
         if args.use_custom_dataset:
             dataset = CustomDataset(dataset_root, target_size=target_size,
-                                    max_frames_per_seq=args.max_frames_per_seq)
+                                    max_frames_per_seq=args.max_frames_per_seq,
+                                    sample_step=args.sample_step)
         else:
             if is_main:
                 print("使用 KittiDataset")
@@ -635,11 +738,139 @@ def main():
     train_dataset = PreprocessedDataset(train_dataset, target_size, crop=False)
     val_dataset = PreprocessedDataset(val_dataset, target_size, crop=False)
 
+    # ── DDP Auto-Scaling ──────────────────────────────────────────────────
+    # Mode 0: disabled — no scaling, use original hyperparams as-is
+    # Mode 1: speedup (DEFAULT) — scale LR + warmup only, keep epochs same → ACTUAL SPEEDUP
+    #         Based on large-batch training theory (Goyal et al. 2017):
+    #         larger batch → more stable gradients → can use higher LR → same epochs, fewer steps
+    # Mode 2: preserve_steps — scale epochs to match total steps exactly (no speedup)
+    ddp_scaled = False
+    if use_ddp and args.ddp_auto_scale > 0:
+        ref_gpus = args.ddp_reference_gpus
+        if world_size > ref_gpus:
+            train_size = len(train_dataset)
+            ref_steps = train_size // (args.batch_size * ref_gpus)
+            actual_steps = train_size // (args.batch_size * world_size)
+            actual_steps = max(actual_steps, 1)
+
+            if actual_steps < ref_steps:
+                ddp_scaled = True
+                step_ratio = ref_steps / actual_steps
+                gpu_ratio = world_size / ref_gpus
+                scale_mode = args.ddp_auto_scale
+
+                orig = {
+                    'num_epochs': num_epochs,
+                    'lr': args.lr,
+                    'warmup_epochs': args.warmup_epochs,
+                    'step_size': args.step_size,
+                    'cosine_T0': args.cosine_T0,
+                    'early_stopping_patience': args.early_stopping_patience,
+                    'save_ckpt_per_epoches': args.save_ckpt_per_epoches,
+                    'eval_epoches': args.eval_epoches,
+                }
+
+                lr_mult = math.sqrt(gpu_ratio)
+                max_lr = getattr(args, 'max_scaled_lr', 0)
+
+                if scale_mode == 1:
+                    mode_name = "⚡ 加速模式 (speedup)"
+                    warmup_scaled = max(orig['warmup_epochs'],
+                                        min(int(orig['warmup_epochs'] * math.sqrt(step_ratio)),
+                                            int(num_epochs * 0.1)))
+                    scaled_lr = orig['lr'] * lr_mult
+                    if max_lr > 0 and scaled_lr > max_lr:
+                        lr_mult = max_lr / orig['lr']
+                        if is_main:
+                            tprint(f"   ⚠️  LR cap: {scaled_lr:.2e} → {max_lr:.2e} (max_scaled_lr={max_lr:.0e})")
+                        scaled_lr = max_lr
+                    args.lr = scaled_lr
+                    args.warmup_epochs = warmup_scaled
+                    # step_size, cosine_T0, patience, save_ckpt, eval: keep same (epoch-based schedule)
+
+                elif scale_mode == 2:
+                    mode_name = "🔒 保步模式 (preserve_steps)"
+                    num_epochs = int(num_epochs * step_ratio)
+                    scaled_lr = orig['lr'] * lr_mult
+                    if max_lr > 0 and scaled_lr > max_lr:
+                        if is_main:
+                            tprint(f"   ⚠️  LR cap: {scaled_lr:.2e} → {max_lr:.2e} (max_scaled_lr={max_lr:.0e})")
+                        scaled_lr = max_lr
+                    args.lr = scaled_lr
+                    args.warmup_epochs = max(1, int(orig['warmup_epochs'] * step_ratio))
+                    args.step_size = max(1, int(orig['step_size'] * step_ratio))
+                    args.cosine_T0 = max(1, int(orig['cosine_T0'] * step_ratio))
+                    if orig['early_stopping_patience'] > 0:
+                        args.early_stopping_patience = max(1, int(orig['early_stopping_patience'] * step_ratio))
+                    if orig['save_ckpt_per_epoches'] > 0:
+                        args.save_ckpt_per_epoches = max(1, int(orig['save_ckpt_per_epoches'] * step_ratio))
+                    args.eval_epoches = max(1, int(orig['eval_epoches'] * step_ratio))
+
+                if is_main:
+                    scaled_total = num_epochs * actual_steps
+                    ref_total = orig['num_epochs'] * ref_steps
+                    speedup = ref_total / scaled_total if scaled_total > 0 else 0
+                    tprint("=" * 80)
+                    tprint(f"🔄 DDP Auto-Scaling: {mode_name}")
+                    tprint(f"   {ref_gpus} GPUs → {world_size} GPUs (x{gpu_ratio:.0f})")
+                    tprint(f"   训练集: {train_size}, batch/GPU: {args.batch_size}, "
+                           f"全局batch: {args.batch_size * world_size}")
+                    tprint(f"   步数/epoch: {ref_steps} ({ref_gpus}GPU) → {actual_steps} ({world_size}GPU)")
+                    tprint(f"   {'参数':<25} {'原始':>12} {'缩放后':>12}")
+                    tprint(f"   {'─'*25} {'─'*12} {'─'*12}")
+                    tprint(f"   {'Epochs':<25} {orig['num_epochs']:>12} {num_epochs:>12}")
+                    lr_note = f"√{gpu_ratio:.0f}x"
+                    if max_lr > 0 and orig['lr'] * math.sqrt(gpu_ratio) > max_lr:
+                        lr_note += f", capped at {max_lr:.0e}"
+                    tprint(f"   {'Learning Rate':<25} {orig['lr']:>12.2e} {args.lr:>12.2e} ({lr_note})")
+                    tprint(f"   {'Warmup Epochs':<25} {orig['warmup_epochs']:>12} {args.warmup_epochs:>12}")
+                    if args.step_size != orig['step_size']:
+                        tprint(f"   {'LR Step Size':<25} {orig['step_size']:>12} {args.step_size:>12}")
+                    if num_epochs != orig['num_epochs']:
+                        tprint(f"   总步数: {scaled_total} (参考: {ref_total}, 偏差: "
+                               f"{abs(scaled_total-ref_total)/ref_total*100:.1f}%)")
+                    else:
+                        tprint(f"   总步数: {scaled_total} (参考: {ref_total})")
+                        tprint(f"   ⚡ 预期加速: ~{speedup:.1f}x "
+                               f"(每epoch {actual_steps}步×{num_epochs}ep, 大batch梯度更稳定)")
+                    if actual_steps <= 2:
+                        tprint(f"   ⚠️  每epoch仅{actual_steps}步, 建议减少到 "
+                               f"{ref_gpus}-{min(world_size, ref_gpus*4)} GPUs")
+                    tprint(f"   💡 --ddp_auto_scale 0=禁用, 1=加速(默认), 2=保步")
+                    tprint("=" * 80)
+
     num_workers = min(16, os.cpu_count() or 4)
     if is_main:
         tprint(f"DataLoader: num_workers={num_workers}, pin_memory=True, persistent_workers=True")
 
-    train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=args.seed) if use_ddp else None
+    balance_mode = args.data_balance > 0
+    train_sampler = None
+    _balance_active = False
+
+    raw_ds = train_dataset.dataset if hasattr(train_dataset, 'dataset') else train_dataset
+    orig_ds = raw_ds.dataset if hasattr(raw_ds, 'dataset') else raw_ds
+    can_balance = balance_mode and hasattr(orig_ds, 'all_files')
+
+    if can_balance:
+        balance_mode_int = args.data_balance
+        weights, bal_counts = build_balanced_weights(raw_ds, orig_ds, mode=balance_mode_int)
+        if use_ddp:
+            train_sampler = DistributedBalancedSampler(
+                weights, num_samples=len(weights), seed=args.seed)
+        else:
+            train_sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+        _balance_active = True
+        mode_name = {1: "full(1/N)", 2: "sqrt(1/√count)"}.get(balance_mode_int, "unknown")
+        if is_main:
+            tprint(f"📊 数据均衡采样已启用: mode={mode_name}, {len(bal_counts)} seqs, {'DDP' if use_ddp else '单机'}")
+            offset = 0
+            for sid, cnt in sorted(bal_counts.items()):
+                w_sample = weights[offset]
+                effective_ratio = w_sample * cnt * len(weights) * 100
+                tprint(f"   {sid}: {cnt} samples, eff_ratio={effective_ratio:.1f}%")
+                offset += cnt
+    elif use_ddp:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=args.seed)
 
     g = torch.Generator()
     g.manual_seed(args.seed)
@@ -658,6 +889,12 @@ def main():
         worker_init_fn=_worker_init_fn,
         generator=g,
     )
+    if is_main and balance_mode:
+        if _balance_active:
+            sampler_type = "DistributedBalancedSampler" if use_ddp else "WeightedRandomSampler"
+            tprint(f"   均衡采样: 已启用 ({sampler_type})")
+        else:
+            tprint(f"   均衡采样: 数据集无 all_files 属性, 降级为默认采样")
     
     val_loader = DataLoader(
         val_dataset,
@@ -799,11 +1036,18 @@ def main():
                f"effective batch size = {args.batch_size}×{world_size}GPU×{grad_accum_steps}accum = {effective_bs}")
     
     if is_main and args.augment_intrinsic > 0:
-        tprint(f"Intrinsic augmentation: ±{args.augment_intrinsic*100:.0f}% (fx/fy coupled, cx/cy ±{args.augment_intrinsic*50:.0f}%)")
+        _cxcy_str = getattr(args, 'augment_intrinsic_cxcy', 0.0)
+        if _cxcy_str > 0:
+            tprint(f"Intrinsic augmentation: fx/fy ±{args.augment_intrinsic*100:.0f}%, cx/cy ±{_cxcy_str*100:.0f}%")
+        else:
+            tprint(f"Intrinsic augmentation: fx/fy ±{args.augment_intrinsic*100:.0f}%, cx/cy ±{args.augment_intrinsic*100:.0f}%")
 
     if is_main and args.augment_pitch_flip_prob > 0:
-        tprint(f"GT pitch flip augmentation: prob={args.augment_pitch_flip_prob}, "
+        tprint(f"GT pitch perturbation (Y-axis): prob={args.augment_pitch_flip_prob}, "
                f"max_deg={args.augment_pitch_flip_max_deg}°")
+    if is_main and getattr(args, 'augment_pitch_sign_flip_prob', 0) > 0:
+        tprint(f"GT pitch sign flip: prob={args.augment_pitch_sign_flip_prob} "
+               f"(precisely negate pitch angle)")
 
     _identity_4x4 = torch.eye(4, device=device)
 
@@ -816,6 +1060,10 @@ def main():
         "angle_range_deg": args.eval_angle_range_deg if args.eval_angle_range_deg is not None else train_noise["angle_range_deg"],
         "trans_range": args.eval_trans_range if args.eval_trans_range is not None else train_noise["trans_range"],
     }
+
+    per_axis_weights_parsed = None
+    if args.per_axis_weights:
+        per_axis_weights_parsed = tuple(float(x) for x in args.per_axis_weights.split(','))
 
     global_step = 0
     
@@ -861,7 +1109,7 @@ def main():
     epoch_times = []
 
     for epoch in range(num_epochs):
-        if train_sampler is not None:
+        if train_sampler is not None and hasattr(train_sampler, 'set_epoch'):
             train_sampler.set_epoch(epoch)
         model.train()
         train_loss = {}
@@ -894,15 +1142,14 @@ def main():
 
             t_prep_start = time.time()
             gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
-            if args.augment_pitch_flip_prob > 0:
+            _sign_flip_p = getattr(args, 'augment_pitch_sign_flip_prob', 0.0)
+            if args.augment_pitch_flip_prob > 0 or _sign_flip_p > 0:
                 gt_T_to_camera_np = augment_gt_pitch_flip(
                     gt_T_to_camera_np,
                     prob=args.augment_pitch_flip_prob,
                     max_deg=args.augment_pitch_flip_max_deg,
+                    sign_flip_prob=_sign_flip_p,
                 )
-            per_axis_weights_parsed = None
-            if args.per_axis_weights:
-                per_axis_weights_parsed = tuple(float(x) for x in args.per_axis_weights.split(','))
             init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(
                 gt_T_to_camera_np,
                 angle_range_deg=train_noise["angle_range_deg"],
@@ -963,7 +1210,11 @@ def main():
             post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
             intrinsic_matrix = torch.from_numpy(np.array(intrinsics, dtype=np.float32)).to(device, non_blocking=True)
             if args.augment_intrinsic > 0:
-                intrinsic_matrix = _augment_intrinsics(intrinsic_matrix, args.augment_intrinsic)
+                _cxcy = getattr(args, 'augment_intrinsic_cxcy', 0.0)
+                intrinsic_matrix = _augment_intrinsics(
+                    intrinsic_matrix, args.augment_intrinsic,
+                    cx_cy_strength=_cxcy if _cxcy > 0 else None
+                )
             if _do_detailed_profile:
                 t_h2d_total += time.time() - t_h2d_start
             t_prep_total += time.time() - t_prep_start
@@ -1248,6 +1499,9 @@ def main():
                             angle_range_deg=eval_angle_range, 
                             trans_range=eval_trans_range,
                             rotation_only=rotation_only,
+                            distribution=args.perturb_distribution,
+                            per_axis_prob=args.per_axis_prob,
+                            per_axis_weights=per_axis_weights_parsed,
                         )
                         
                         resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
@@ -1413,7 +1667,10 @@ def main():
                         continue
                     imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
                     gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
-                    init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(gt_T_to_camera_np, angle_range_deg=eval_angle_range, trans_range=eval_trans_range, rotation_only=rotation_only)
+                    init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
+                        gt_T_to_camera_np, angle_range_deg=eval_angle_range, trans_range=eval_trans_range,
+                        rotation_only=rotation_only, distribution=args.perturb_distribution,
+                        per_axis_prob=args.per_axis_prob, per_axis_weights=per_axis_weights_parsed)
                     resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
                     if xyz_only_choise:
                         pcs_np = np.array(pcs)[:, :, :3]

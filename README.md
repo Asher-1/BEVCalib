@@ -298,7 +298,7 @@ bash train_universal.sh resume \
 python kitti-bev-calib/train_kitti.py \
         --log_dir ./logs/kitti \
         --dataset_root YOUR_PATH_TO_KITTI/kitti-odometry \
-        --save_ckpt_per_epoches 40 \
+        --save_ckpt_per_epoches 50 \
         --num_epochs 500 \
         --label 20_1.5 \
         --angle_range_deg 20 \

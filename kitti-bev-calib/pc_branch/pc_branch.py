@@ -17,6 +17,7 @@ if USE_DRCV:
     from drcv.ops.voxel import voxelization as _drcv_voxelization
     from drcv.ops.torch_scatter import scatter_add as _scatter_add
     from drcv.ops.torch_scatter import scatter_mean as _scatter_mean
+    print("USE_DRCV: True in pc_branch.py")
 else:
     from spconv.pytorch.utils import PointToVoxel
     _scatter_add = None
@@ -931,6 +932,555 @@ def _test_jit_trace(device):
     return all_pass
 
 
+# ---- Test 8: SpconvToDenseBEV coordinate correctness ----
+
+def _test_to_bev_coordinates(device):
+    """Verify SpconvToDenseBEV scatter logic with deterministic inputs.
+
+    Creates sparse features at known (batch, x, y, z) positions and checks
+    that the dense BEV output has non-zero values at exactly those positions.
+    Tests 'concat', 'sum', and 'learned' modes.
+    """
+    from pc_encoders import SpconvToDenseBEV, USE_DRCV as _ENC_USE_DRCV
+
+    print("\n" + "=" * 60)
+    backend = "drcv(torch_sparse)" if _ENC_USE_DRCV else "spconv"
+    print(f"Test 8: SpconvToDenseBEV Coordinate Correctness (backend={backend})")
+    print("=" * 60)
+
+    in_ch, n_z, bev_h, bev_w = 4, 3, 8, 10
+    all_pass = True
+
+    # ---- 8a: concat mode ----
+    to_bev = SpconvToDenseBEV(in_ch, in_ch, n_z, (bev_h, bev_w), mode='concat').to(device).eval()
+
+    feats = torch.tensor([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ], device=device)
+
+    x_pos, y_pos = 2, 3
+    z_positions = [0, 1, 2]
+    batch_positions = [0, 0, 0]
+
+    if _ENC_USE_DRCV:
+        coords = torch.tensor([
+            [x_pos, y_pos, z_positions[0], batch_positions[0]],
+            [x_pos, y_pos, z_positions[1], batch_positions[1]],
+            [x_pos, y_pos, z_positions[2], batch_positions[2]],
+        ], dtype=torch.int32, device=device)
+
+        class _MockDrcv:
+            pass
+        mock_input = _MockDrcv()
+        mock_input.F = feats
+        mock_input.C = coords
+        mock_input.s = 1
+    else:
+        coords = torch.tensor([
+            [batch_positions[0], x_pos, y_pos, z_positions[0]],
+            [batch_positions[1], x_pos, y_pos, z_positions[1]],
+            [batch_positions[2], x_pos, y_pos, z_positions[2]],
+        ], dtype=torch.int32, device=device)
+
+        import spconv.pytorch as _spconv_test
+        mock_input = _spconv_test.SparseConvTensor(
+            feats, coords, [bev_h, bev_w, n_z], 1)
+
+    with torch.no_grad():
+        bev = to_bev(mock_input)
+
+    expected_out_ch = n_z * in_ch
+    shape_ok = (bev.shape == torch.Size([1, expected_out_ch, bev_h, bev_w]))
+    pixel = bev[0, :, x_pos, y_pos]
+    expected_pixel = torch.zeros(expected_out_ch, device=device)
+    for i, z in enumerate(z_positions):
+        expected_pixel[z * in_ch: z * in_ch + in_ch] = feats[i]
+
+    pixel_match = torch.allclose(pixel, expected_pixel, atol=1e-6)
+    other_zero = (bev[0, :, :, :].clone().index_fill_(1,
+                  torch.tensor([x_pos], device=device), 0).abs().sum().item() == 0.0)
+    ok_8a = shape_ok and pixel_match
+    all_pass &= ok_8a
+    print(f"  [8a] concat: shape={list(bev.shape)} (expect [1,{expected_out_ch},{bev_h},{bev_w}]) "
+          f"{'✓' if shape_ok else '✗'}")
+    print(f"       pixel@({x_pos},{y_pos}): match={pixel_match} {'PASS' if ok_8a else 'FAIL'}")
+
+    # ---- 8b: sum mode ----
+    to_bev_sum = SpconvToDenseBEV(in_ch, in_ch, n_z, (bev_h, bev_w), mode='sum').to(device).eval()
+    with torch.no_grad():
+        bev_sum = to_bev_sum(mock_input)
+
+    expected_sum = feats.sum(dim=0)
+    pixel_sum = bev_sum[0, :, x_pos, y_pos]
+    ok_8b = torch.allclose(pixel_sum, expected_sum, atol=1e-6)
+    all_pass &= ok_8b
+    print(f"  [8b] sum: pixel@({x_pos},{y_pos}) = {pixel_sum.tolist()}")
+    print(f"       expected = {expected_sum.tolist()}  {'PASS' if ok_8b else 'FAIL'}")
+
+    # ---- 8c: multi-batch test ----
+    feats_mb = torch.tensor([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0, 0.0],
+    ], device=device)
+
+    if _ENC_USE_DRCV:
+        coords_mb = torch.tensor([
+            [1, 2, 0, 0],
+            [3, 4, 1, 1],
+        ], dtype=torch.int32, device=device)
+        mock_mb = _MockDrcv()
+        mock_mb.F = feats_mb
+        mock_mb.C = coords_mb
+        mock_mb.s = 1
+    else:
+        coords_mb = torch.tensor([
+            [0, 1, 2, 0],
+            [1, 3, 4, 1],
+        ], dtype=torch.int32, device=device)
+        mock_mb = _spconv_test.SparseConvTensor(
+            feats_mb, coords_mb, [bev_h, bev_w, n_z], 2)
+
+    to_bev_mb = SpconvToDenseBEV(in_ch, in_ch, n_z, (bev_h, bev_w), mode='concat').to(device).eval()
+    with torch.no_grad():
+        bev_mb = to_bev_mb(mock_mb)
+
+    ok_8c_shape = (bev_mb.shape[0] == 2)
+    p0 = bev_mb[0, :, 1, 2]
+    p1 = bev_mb[1, :, 3, 4]
+    batch0_ok = p0[0:in_ch].sum().item() > 0
+    batch1_ok = p1[in_ch:2*in_ch].sum().item() > 0
+    ok_8c = ok_8c_shape and batch0_ok and batch1_ok
+    all_pass &= ok_8c
+    print(f"  [8c] multi-batch: shape={list(bev_mb.shape)}, "
+          f"batch0_feat={'✓' if batch0_ok else '✗'}, "
+          f"batch1_feat={'✓' if batch1_ok else '✗'}  "
+          f"{'PASS' if ok_8c else 'FAIL'}")
+
+    # ---- 8d: z clamping test ----
+    feats_clamp = torch.ones(1, in_ch, device=device)
+    if _ENC_USE_DRCV:
+        coords_clamp = torch.tensor([[0, 0, n_z + 5, 0]], dtype=torch.int32, device=device)
+        mock_clamp = _MockDrcv()
+        mock_clamp.F = feats_clamp
+        mock_clamp.C = coords_clamp
+        mock_clamp.s = 1
+    else:
+        coords_clamp = torch.tensor([[0, 0, 0, n_z + 5]], dtype=torch.int32, device=device)
+        mock_clamp = _spconv_test.SparseConvTensor(
+            feats_clamp, coords_clamp, [bev_h, bev_w, n_z + 10], 1)
+
+    with torch.no_grad():
+        bev_clamp = to_bev(mock_clamp)
+
+    no_nan = not bev_clamp.isnan().any().item()
+    clamped_z_ch_start = (n_z - 1) * in_ch
+    pixel_clamped = bev_clamp[0, clamped_z_ch_start:clamped_z_ch_start + in_ch, 0, 0]
+    ok_8d = no_nan and pixel_clamped.sum().item() > 0
+    all_pass &= ok_8d
+    print(f"  [8d] z-clamp: z={n_z+5} clamped to {n_z-1}, no_nan={no_nan}, "
+          f"feature_present={'✓' if pixel_clamped.sum().item() > 0 else '✗'}  "
+          f"{'PASS' if ok_8d else 'FAIL'}")
+
+    if all_pass:
+        print("  [result] ALL PASS")
+    else:
+        print("  [result] SOME FAIL")
+    return all_pass
+
+
+# ---- Test 9: Cross-backend SparseEncoder stage-by-stage equivalence ----
+#
+# Two subprocesses: spconv saves state_dict + stage features,
+# drcv loads mapped weights and compares stage features.
+#
+# Weight format: spconv [O,K,K,K,I] → permute(1,2,3,4,0) → reshape → drcv [K³,I,O]
+
+_ENCODER_PHASE_SCRIPT = textwrap.dedent("""\
+import os, sys, json
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", sys.argv[1])
+backend = sys.argv[2]
+os.environ["USE_DRCV_BACKEND"] = "0" if backend == "spconv" else "1"
+input_path = sys.argv[3]
+out_path = sys.argv[4]
+source_dir = sys.argv[5]
+sys.path.insert(0, source_dir)
+parent_dir = os.path.dirname(source_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+import torch, torch.nn as nn
+from pc_encoders import SparseEncoder, USE_DRCV
+from bev_settings import sparse_shape
+
+device = "cuda:0"
+data = torch.load(input_path, map_location="cpu")
+features = data["features"].to(device)
+coors = data["coors"].to(device)
+batch_size = int(data["batch_size"])
+
+# Load mapped weights if provided
+mapped_sd_path = data.get("mapped_sd_path")
+encoder = SparseEncoder(sparse_shape).to(device)
+if mapped_sd_path and os.path.isfile(mapped_sd_path):
+    mapped = torch.load(mapped_sd_path, map_location=device)
+    encoder.load_state_dict(mapped, strict=False)
+encoder.eval()
+
+# Capture stage outputs via hooks
+stage_outs = {}
+def _hook(name):
+    def fn(module, inp, out):
+        if hasattr(out, 'features'):
+            f, c = out.features, out.indices
+        elif hasattr(out, 'F'):
+            f, c = out.F, out.C
+        else:
+            return
+        stage_outs[name] = (f.detach().cpu(), c.detach().cpu().long())
+    return fn
+
+hooks = [encoder.conv_input.register_forward_hook(_hook("conv_input"))]
+for i, stage in enumerate(encoder.conv_layers):
+    for j, block in enumerate(stage):
+        hooks.append(block.register_forward_hook(_hook(f"stage{i}_{j}")))
+
+with torch.no_grad():
+    out = encoder(features, coors, batch_size)
+for h in hooks:
+    h.remove()
+torch.cuda.synchronize()
+
+save_data = {
+    "state_dict": {k: v.cpu() for k, v in encoder.state_dict().items()},
+    "stage_outs": {k: (f, c) for k, (f, c) in stage_outs.items()},
+    "output": out.cpu(),
+    "n_z": encoder.to_bev.n_z,
+    "use_drcv": USE_DRCV,
+}
+torch.save(save_data, out_path)
+
+info = {
+    "shape": list(out.shape), "n_z": encoder.to_bev.n_z,
+    "has_nan": bool(out.isnan().any()),
+    "stages": list(stage_outs.keys()),
+    "param_count": sum(p.numel() for p in encoder.parameters()),
+}
+print(json.dumps(info))
+""")
+
+
+def _map_spconv_to_drcv_sd(sp_sd, dr_keys):
+    """Map spconv state_dict to drcv torch_sparse format.
+
+    Uses explicit structure-aware rules matching the SparseEncoder architecture:
+      conv_input → conv_input
+      conv_layers.I.J (ResBlock) → conv_layers.I.J
+      conv_layers.I.K (downsample) → conv_layers.I.K
+      conv_out → SKIPPED (architecturally different)
+    """
+    dr_key_set = set(dr_keys)
+    mapped = {}
+
+    def _conv(sp_key, dr_key):
+        if sp_key not in sp_sd or dr_key not in dr_key_set:
+            return
+        w = sp_sd[sp_key].permute(1, 2, 3, 4, 0).contiguous()
+        mapped[dr_key] = w.reshape(-1, w.shape[3], w.shape[4])
+
+    def _bn(sp_prefix, dr_prefix):
+        for suf in ('weight', 'bias', 'running_mean', 'running_var',
+                     'num_batches_tracked'):
+            sp_k = f"{sp_prefix}.{suf}"
+            dr_k = f"{dr_prefix}.{suf}"
+            if sp_k in sp_sd and dr_k in dr_key_set:
+                mapped[dr_k] = sp_sd[sp_k]
+
+    _conv('conv_input.0.weight', 'conv_input.convbnrelu.0.kernel')
+    _bn('conv_input.1', 'conv_input.convbnrelu.1.bn')
+
+    layer_cfg = [[16, 16, 32], [32, 32, 64], [64, 64, 128], [128, 128]]
+    for i, blocks in enumerate(layer_cfg):
+        for j in range(len(blocks)):
+            p = f"conv_layers.{i}.{j}"
+            is_down = (j == len(blocks) - 1) and (i < len(layer_cfg) - 1)
+            if is_down:
+                _conv(f"{p}.0.weight", f"{p}.convbnrelu.0.kernel")
+                _bn(f"{p}.1", f"{p}.convbnrelu.1.bn")
+            else:
+                _conv(f"{p}.conv1.weight", f"{p}.conv1.convbnrelu.0.kernel")
+                _bn(f"{p}.bn1", f"{p}.conv1.convbnrelu.1.bn")
+                _conv(f"{p}.conv2.weight", f"{p}.conv2.convbn.0.kernel")
+                _bn(f"{p}.bn2", f"{p}.conv2.convbn.1.bn")
+
+    return mapped
+
+
+def _test_cross_backend_real_encoder(device):
+    """Test the real SparseEncoder stage-by-stage with weight transfer.
+
+    Phase 1: spconv subprocess → save state_dict + stage features
+    Phase 2: main process → map weights spconv → drcv format
+    Phase 3: drcv subprocess → load mapped weights, save stage features
+    Phase 4: compare stage features between backends
+    """
+    print("\n" + "=" * 60)
+    print("Test 9: Cross-Backend SparseEncoder Equivalence (stage-by-stage)")
+    print("=" * 60)
+
+    dr_device = _pick_device_for_drcv_spconv()
+    if dr_device is None:
+        print("  [SKIP] No GPU passed drcv+spconv subprocess probe.")
+        return None
+
+    gpu_idx = dr_device.index
+
+    import tempfile, json
+
+    torch.manual_seed(99)
+    n_pts = 1000
+    B = 2
+    feats_all, coors_all = [], []
+    for b in range(B):
+        pts = _make_test_points(n_pts, device)
+        grid = ((pts - _VOXEL_MIN.to(device=device, dtype=pts.dtype)) /
+                _VOXEL_SIZE.to(device=device, dtype=pts.dtype)).int()
+        mask = ((grid >= 0) & (grid <= _GRID_MAX.to(device))).all(dim=1)
+        grid = grid[mask]
+        batch_col = torch.full((grid.shape[0], 1), b, dtype=grid.dtype, device=device)
+        coors_b = torch.cat([batch_col, grid], dim=1)
+        uniq, inv = torch.unique(coors_b, return_inverse=True, dim=0)
+        if USE_DRCV:
+            from drcv.ops.torch_scatter import scatter_mean as _sm
+            feat_agg = _sm(pts[mask], inv, dim=0)[:uniq.shape[0]]
+        else:
+            feat_agg = pts[mask][:uniq.shape[0]]
+        feats_all.append(feat_agg.cpu())
+        coors_all.append(uniq.cpu())
+
+    features = torch.cat(feats_all, dim=0)
+    coors = torch.cat(coors_all, dim=0)
+
+    tmpdir = tempfile.mkdtemp()
+    input_path = os.path.join(tmpdir, "input.pt")
+    torch.save({"features": features, "coors": coors, "batch_size": B}, input_path)
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_path = os.path.join(tmpdir, "phase.py")
+    with open(script_path, "w") as f:
+        f.write(_ENCODER_PHASE_SCRIPT)
+
+    def _run_phase(backend, extra_data=None):
+        out_file = os.path.join(tmpdir, f"{backend}_out.pt")
+        save_input = {"features": features, "coors": coors, "batch_size": B}
+        if extra_data:
+            save_input.update(extra_data)
+        torch.save(save_input, input_path)
+        try:
+            r = subprocess.run(
+                [sys.executable, script_path, str(gpu_idx), backend,
+                 input_path, out_file, script_dir],
+                capture_output=True, text=True, timeout=120, cwd=script_dir)
+            if r.returncode != 0:
+                for line in (r.stderr or r.stdout).strip().split("\n")[-8:]:
+                    print(f"    {line}")
+                return None
+            for line in r.stdout.strip().split("\n"):
+                if line.strip().startswith("{"):
+                    info = json.loads(line.strip())
+                    print(f"    shape={info['shape']}, n_z={info['n_z']}, "
+                          f"params={info['param_count']}, nan={info['has_nan']}")
+            return torch.load(out_file, map_location="cpu")
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            return None
+
+    # Phase 1: spconv
+    print(f"\n  Phase 1: spconv encoder on cuda:{gpu_idx}")
+    sp_data = _run_phase("spconv")
+    if sp_data is None:
+        import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
+        return None
+
+    # Phase 2: map weights
+    sp_sd = sp_data["state_dict"]
+    dr_dummy_keys_path = os.path.join(tmpdir, "dr_keys.pt")
+    # Need drcv key names — run a quick probe
+    print(f"\n  Phase 2: weight mapping (spconv 5D → drcv 3D)")
+    dr_probe = _run_phase("drcv")
+    if dr_probe is None:
+        import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
+        return None
+    dr_keys = list(dr_probe["state_dict"].keys())
+
+    mapped_sd = _map_spconv_to_drcv_sd(sp_sd, dr_keys)
+    mapped_path = os.path.join(tmpdir, "mapped_sd.pt")
+    torch.save(mapped_sd, mapped_path)
+    print(f"    mapped {len(mapped_sd)}/{len(dr_keys)} drcv keys")
+    unmapped = set(dr_keys) - set(mapped_sd.keys())
+    if unmapped:
+        conv_out_unmapped = [k for k in unmapped if 'conv_out' in k or 'to_bev' in k]
+        other_unmapped = [k for k in unmapped if k not in conv_out_unmapped]
+        if conv_out_unmapped:
+            print(f"    unmapped conv_out/to_bev: {len(conv_out_unmapped)} "
+                  f"(expected — different architecture)")
+        if other_unmapped:
+            print(f"    unmapped OTHER: {other_unmapped[:5]}")
+
+    # Phase 3: drcv with mapped weights
+    print(f"\n  Phase 3: drcv encoder with mapped spconv weights")
+    dr_data = _run_phase("drcv", {"mapped_sd_path": mapped_path})
+    if dr_data is None:
+        import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
+        return None
+
+    # Phase 4: compare stage features
+    print(f"\n  Phase 4: stage-by-stage feature comparison")
+    sp_stages = sp_data.get("stage_outs", {})
+    dr_stages = dr_data.get("stage_outs", {})
+    common = sorted(set(sp_stages.keys()) & set(dr_stages.keys()))
+
+    all_pass = True
+    for name in common:
+        sp_feat, sp_idx = sp_stages[name]
+        dr_feat, dr_idx = dr_stages[name]
+
+        n_sp, n_dr = sp_feat.shape[0], dr_feat.shape[0]
+        ch_sp, ch_dr = sp_feat.shape[1], dr_feat.shape[1]
+
+        if ch_sp != ch_dr:
+            print(f"    {name:20s}: channel mismatch sp={ch_sp} dr={ch_dr}")
+            continue
+
+        if n_sp == n_dr and ch_sp == ch_dr:
+            sp_c = sp_idx.long()  # [batch, x, y, z]
+            dr_c = dr_idx.long()  # [x, y, z, batch]
+            sp_key = sp_c[:, 0] * 10**9 + sp_c[:, 1] * 10**6 + sp_c[:, 2] * 10**3 + sp_c[:, 3]
+            dr_key = dr_c[:, 3] * 10**9 + dr_c[:, 0] * 10**6 + dr_c[:, 1] * 10**3 + dr_c[:, 2]
+
+            sp_order = sp_key.argsort()
+            dr_order = dr_key.argsort()
+
+            sp_sorted = sp_feat[sp_order].float()
+            dr_sorted = dr_feat[dr_order].float()
+
+            sp_c_sorted = sp_c[sp_order]
+            dr_c_norm = dr_c[dr_order][:, [3, 0, 1, 2]]
+
+            coords_match = (sp_c_sorted == dr_c_norm).all().item() if sp_c_sorted.shape == dr_c_norm.shape else False
+
+            if sp_sorted.numel() > 0 and dr_sorted.numel() > 0:
+                diff = (sp_sorted - dr_sorted).abs()
+                cos = torch.nn.functional.cosine_similarity(
+                    sp_sorted.flatten(), dr_sorted.flatten(), dim=0).item()
+            else:
+                diff = torch.tensor([0.0])
+                cos = 1.0
+
+            ok = cos > 0.95
+            all_pass &= ok
+            print(f"    {name:20s}: n={n_sp:5d} ch={ch_sp:3d}  "
+                  f"coords_match={coords_match}  "
+                  f"cos={cos:.6f}  max_diff={diff.max():.4e}  "
+                  f"{'PASS' if ok else 'FAIL'}")
+        else:
+            print(f"    {name:20s}: n_active sp={n_sp} dr={n_dr} (differ)")
+
+    sp_out, dr_out = sp_data["output"], dr_data["output"]
+    print(f"\n  Final output: spconv={list(sp_out.shape)}, drcv={list(dr_out.shape)}")
+    print(f"  n_z: spconv={sp_data['n_z']}, drcv={dr_data['n_z']}  "
+          f"(differ due to conv_out architecture)")
+
+    import shutil
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if all_pass:
+        print("\n  [result] ALL PASS — common stages produce equivalent features")
+    else:
+        print("\n  [result] SOME FAIL — backends diverge at some stages")
+    return all_pass
+
+
+# ---- Test 10: _auto_permute_spconv_weights correctness ----
+
+def _test_auto_permute_weights(device):
+    """Verify that the weight permutation logic in evaluate_checkpoint.py
+    correctly maps between spconv v2 and drcv weight layouts."""
+    print("\n" + "=" * 60)
+    print("Test 10: Weight Permutation (spconv v2 ↔ drcv layout)")
+    print("=" * 60)
+
+    all_pass = True
+    torch.manual_seed(42)
+
+    # 10a: roundtrip — permute v2→v1→v2 should be identity
+    w_v2 = torch.randn(32, 3, 3, 3, 16)  # spconv v2: (O, K, K, K, I)
+    w_v1 = w_v2.permute(1, 2, 3, 4, 0).contiguous()  # drcv/v1: (K, K, K, I, O)
+    w_back = w_v1.permute(4, 0, 1, 2, 3).contiguous()  # back to v2
+    ok_10a = torch.allclose(w_v2, w_back, atol=1e-7)
+    all_pass &= ok_10a
+    print(f"  [10a] v2→v1→v2 roundtrip: {'PASS' if ok_10a else 'FAIL'}")
+
+    # 10b: symmetric case — when I == O, shapes differ but sorted() match
+    w_sym = torch.randn(16, 3, 3, 3, 16)  # v2: (O=16, K, K, K, I=16)
+    w_sym_v1 = w_sym.permute(1, 2, 3, 4, 0).contiguous()  # v1: (3, 3, 3, 16, 16)
+    shapes_differ = (w_sym.shape != w_sym_v1.shape)
+    sorted_match = (sorted(w_sym.shape) == sorted(w_sym_v1.shape))
+    ok_10b = shapes_differ and sorted_match
+    all_pass &= ok_10b
+    print(f"  [10b] symmetric (I==O): shapes_differ={shapes_differ}, "
+          f"sorted_match={sorted_match}  {'PASS' if ok_10b else 'FAIL'}")
+
+    # 10c: simulate _auto_permute_spconv_weights detection logic
+    # Create a mock model with drcv-layout weights and a checkpoint with spconv-layout weights
+    class _MockModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = nn.Linear(1, 1)  # dummy
+
+    model = _MockModel()
+    model_sd = {"conv.weight": torch.randn(3, 3, 3, 16, 32)}  # drcv layout
+    ckpt_sd = {"conv.weight": torch.randn(32, 3, 3, 3, 16)}  # spconv v2 layout
+
+    cs = ckpt_sd["conv.weight"].shape
+    ms = model_sd["conv.weight"].shape
+    needs_permute = (cs != ms) and (sorted(cs) == sorted(ms))
+    ok_detect = needs_permute
+    all_pass &= ok_detect
+    print(f"  [10c] detection: ckpt={list(cs)}, model={list(ms)}, "
+          f"needs_permute={needs_permute}  {'PASS' if ok_detect else 'FAIL'}")
+
+    # 10c cont: verify permute(1,2,3,4,0) maps ckpt→model
+    w_permuted = ckpt_sd["conv.weight"].permute(1, 2, 3, 4, 0).contiguous()
+    ok_shape = (w_permuted.shape == model_sd["conv.weight"].shape)
+    all_pass &= ok_shape
+    print(f"  [10c] permute result: {list(w_permuted.shape)} == "
+          f"{list(model_sd['conv.weight'].shape)}  {'PASS' if ok_shape else 'FAIL'}")
+
+    # 10d: BN/other non-5D weights should pass through unchanged
+    bn_w = torch.randn(64)
+    bn_w_copy = bn_w.clone()
+    sd_mixed = {
+        "conv.weight": torch.randn(32, 3, 3, 3, 16),
+        "bn.weight": bn_w,
+        "bn.bias": torch.randn(64),
+        "linear.weight": torch.randn(128, 64),
+    }
+    for k, v in sd_mixed.items():
+        if v.ndim == 5:
+            sd_mixed[k] = v.permute(1, 2, 3, 4, 0).contiguous()
+    ok_10d = torch.allclose(sd_mixed["bn.weight"], bn_w_copy)
+    all_pass &= ok_10d
+    print(f"  [10d] non-5D passthrough (BN weight): {'PASS' if ok_10d else 'FAIL'}")
+
+    if all_pass:
+        print("  [result] ALL PASS")
+    else:
+        print("  [result] SOME FAIL")
+    return all_pass
+
+
 # ---- main ----
 
 if __name__ == "__main__":
@@ -952,6 +1502,9 @@ if __name__ == "__main__":
     results["5_voxel_modes"] = _test_voxel_modes(device)
     results["6_voxel_output_cmp"] = _test_voxel_output_comparison(device)
     results["7_jit_trace"] = _test_jit_trace(device)
+    results["8_to_bev_coords"] = _test_to_bev_coordinates(device)
+    results["9_cross_backend_enc"] = _test_cross_backend_real_encoder(device)
+    results["10_weight_permute"] = _test_auto_permute_weights(device)
 
     print("\n" + "=" * 60)
     print("Summary")

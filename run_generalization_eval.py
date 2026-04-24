@@ -13,6 +13,7 @@ import re
 import subprocess
 import json
 import argparse
+import time
 import numpy as np
 from datetime import datetime
 
@@ -21,6 +22,17 @@ import yaml
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+def _format_elapsed(seconds):
+    """Format elapsed seconds to human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m{s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m}m{s}s"
+
 
 DEFAULT_MODELS = [
     {
@@ -112,6 +124,8 @@ def load_config(config_path=None):
             "BATCH_SIZE": cfg.get("eval_params", {}).get("batch_size", 8),
             "VIS_INTERVAL": cfg.get("eval_params", {}).get("vis_interval", 200),
             "TIMEOUT": cfg.get("eval_params", {}).get("timeout", 1800),
+            "EVAL_SAMPLE_STEP": cfg.get("eval_params", {}).get("eval_sample_step", None),
+            "EVAL_MAX_FRAMES_PER_SEQ": cfg.get("eval_params", {}).get("eval_max_frames_per_seq", None),
             "MODELS": cfg.get("models", DEFAULT_MODELS),
         }
         print(f"[Config] Loaded from: {config_path}")
@@ -130,8 +144,29 @@ def load_config(config_path=None):
         "BATCH_SIZE": 8,
         "VIS_INTERVAL": 200,
         "TIMEOUT": 1800,
+        "EVAL_SAMPLE_STEP": None,
+        "EVAL_MAX_FRAMES_PER_SEQ": None,
         "MODELS": DEFAULT_MODELS,
     }
+
+
+def _detect_gpu_count():
+    """Detect available CUDA GPUs."""
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            return _torch.cuda.device_count()
+    except ImportError:
+        pass
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return len(result.stdout.strip().split('\n'))
+    except Exception:
+        pass
+    return 1
 
 
 def parse_script_args():
@@ -144,6 +179,13 @@ def parse_script_args():
                         help="Override eval angle range (degrees)")
     parser.add_argument("--trans_range", type=float, default=None,
                         help="Override eval translation range (meters)")
+    parser.add_argument("--parallel", type=int, default=0,
+                        help="Multi-GPU parallel evaluation: 0=sequential (default), "
+                             "N=use N GPUs in parallel, -1=auto-detect all GPUs")
+    parser.add_argument("--eval_sample_step", type=int, default=None,
+                        help="测试数据采样步长 (每隔N帧取1帧, None=使用全部帧)")
+    parser.add_argument("--eval_max_frames_per_seq", type=int, default=None,
+                        help="测试集每序列最多帧数 (与 eval_sample_step 互斥)")
     return parser.parse_args()
 
 
@@ -157,6 +199,12 @@ if _script_args.angle_range is not None:
 if _script_args.trans_range is not None:
     CFG["TRANS_RANGE"] = _script_args.trans_range
 
+_PARALLEL_GPUS = _script_args.parallel
+if _PARALLEL_GPUS == -1:
+    _PARALLEL_GPUS = _detect_gpu_count()
+elif _PARALLEL_GPUS == 0:
+    _PARALLEL_GPUS = 1
+
 MODELS = CFG["MODELS"]
 BEVCALIB_ROOT = CFG["BEVCALIB_ROOT"]
 MODELS_DIR = CFG["MODELS_DIR"]
@@ -168,6 +216,9 @@ TRANS_RANGE = CFG["TRANS_RANGE"]
 BATCH_SIZE = CFG["BATCH_SIZE"]
 VIS_INTERVAL = CFG["VIS_INTERVAL"]
 EVAL_TIMEOUT = CFG["TIMEOUT"]
+EVAL_SAMPLE_STEP = _script_args.eval_sample_step if _script_args.eval_sample_step is not None else CFG.get("EVAL_SAMPLE_STEP")
+_EVAL_MF_CLI = getattr(_script_args, "eval_max_frames_per_seq", None)
+EVAL_MAX_FRAMES_PER_SEQ = _EVAL_MF_CLI if _EVAL_MF_CLI is not None else CFG.get("EVAL_MAX_FRAMES_PER_SEQ")
 
 
 def parse_eval_stats(extrinsics_path):
@@ -266,6 +317,15 @@ def parse_eval_stats(extrinsics_path):
                 })
     result['seq_boundaries'] = seq_bounds
 
+    # Parse Macro-Averaged metrics
+    macro_match = re.search(r'Macro \(sequence-level\):\s*([\d.]+)', text)
+    if macro_match:
+        result['macro_rot_mean'] = float(macro_match.group(1))
+    primary_match = re.search(r'PRIMARY_METRIC:\s*(\w+)\s+([\d.]+)', text)
+    if primary_match:
+        result['primary_metric_type'] = primary_match.group(1)
+        result['primary_metric_value'] = float(primary_match.group(2))
+
     return result if 'rot_error_mean' in result else None
 
 
@@ -308,154 +368,120 @@ def _resolve_model_base(mcfg):
     return os.path.join(MODELS_DIR, mcfg["dir_name"])
 
 
-def run_evaluations():
-    """Run evaluations for all models, skip completed ones."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    for idx, mcfg in enumerate(MODELS):
-        label = mcfg["label"]
-        per_model_dir = os.path.join(OUTPUT_DIR, label)
-        extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
-
-        if os.path.isfile(extrinsics_path):
-            with open(extrinsics_path, 'r') as f:
-                if "EVALUATION STATISTICS" in f.read():
-                    print(f"\n[{idx+1}/{len(MODELS)}] {label}: already complete, skipping")
-                    continue
-            print(f"\n[{idx+1}/{len(MODELS)}] {label}: incomplete result found, re-running...")
-            import shutil
-            shutil.rmtree(per_model_dir, ignore_errors=True)
-
-        model_base = _resolve_model_base(mcfg)
-        ckpt_path = os.path.join(model_base,
-                                 os.path.basename(MODELS_DIR) +
-                                "_scratch/checkpoint", mcfg["ckpt"])
-        if not os.path.isfile(ckpt_path):
-            import glob as _glob
-            candidates = _glob.glob(os.path.join(model_base, "*_scratch/checkpoint", mcfg["ckpt"]))
-            if candidates:
-                ckpt_path = candidates[0]
-            else:
-                print(f"\n[{idx+1}/{len(MODELS)}] {label}: SKIP - checkpoint not found: {ckpt_path}")
-                continue
-
-        print(f"\n{'='*80}")
-        print(f"[{idx+1}/{len(MODELS)}] Evaluating: {label}")
-        print(f"  ckpt: {ckpt_path}")
-        print(f"  BEV_ZBOUND_STEP={mcfg['bev_zbound_step']}, rotation_only={mcfg['rotation_only']}")
-        print(f"{'='*80}")
-
-        env = os.environ.copy()
-        env.pop("USE_DRCV_BACKEND", None)
-        env["BEV_ZBOUND_STEP"] = mcfg["bev_zbound_step"]
-        env["HF_HUB_OFFLINE"] = "1"
-        for env_key in ("BEV_XBOUND_MIN", "BEV_XBOUND_MAX",
-                        "BEV_YBOUND_MIN", "BEV_YBOUND_MAX", "BEV_XY_STEP"):
-            if env_key.lower() in mcfg:
-                env[env_key] = str(mcfg[env_key.lower()])
-
-        use_drinfer_backend = mcfg.get("backend", "pytorch") == "drinfer"
-
-        if use_drinfer_backend:
-            drinfer_eval_script = os.path.join(
-                os.path.dirname(EVAL_SCRIPT), "evaluate_drinfer.py")
-            export_dir = mcfg.get("export_dir", "")
-            if not export_dir:
-                model_base_dr = _resolve_model_base(mcfg)
-                export_dir = os.path.join(model_base_dr, "drinfer")
-            cmd = [
-                sys.executable, drinfer_eval_script,
-                "--ckpt_path", ckpt_path,
-                "--export_dir", export_dir,
-                "--dataset_root", TEST_DATA,
-                "--output_dir", per_model_dir,
-                "--angle_range_deg", str(ANGLE_RANGE),
-                "--trans_range", str(TRANS_RANGE),
-                "--use_full_dataset",
-                "--max_batches", "0",
-                "--rotation_only", str(mcfg["rotation_only"]),
-                "--vis_interval", str(VIS_INTERVAL),
-                "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
-            ]
-            if mcfg.get("compare_pytorch"):
-                cmd.append("--compare_pytorch")
-            if mcfg.get("model_name"):
-                cmd.extend(["--model_name", str(mcfg["model_name"])])
-            if mcfg.get("model_version"):
-                cmd.extend(["--model_version", str(mcfg["model_version"])])
-            if mcfg.get("max_attn_tokens") is not None:
-                cmd.extend(["--max_attn_tokens", str(mcfg["max_attn_tokens"])])
-            if mcfg.get("use_drcv"):
-                cmd.append("--use_drcv")
+def _build_eval_cmd_and_env(mcfg, per_model_dir):
+    """Build subprocess command and env for a single model evaluation."""
+    model_base = _resolve_model_base(mcfg)
+    ckpt_path = os.path.join(model_base,
+                             os.path.basename(MODELS_DIR) +
+                            "_scratch/checkpoint", mcfg["ckpt"])
+    if not os.path.isfile(ckpt_path):
+        import glob as _glob
+        candidates = _glob.glob(os.path.join(model_base, "*_scratch/checkpoint", mcfg["ckpt"]))
+        if candidates:
+            ckpt_path = candidates[0]
         else:
-            cmd = [
-                sys.executable, EVAL_SCRIPT,
-                "--ckpt_path", ckpt_path,
-                "--dataset_root", TEST_DATA,
-                "--output_dir", per_model_dir,
-                "--angle_range_deg", str(ANGLE_RANGE),
-                "--trans_range", str(TRANS_RANGE),
-                "--use_full_dataset",
-                "--max_batches", "0",
-                "--rotation_only", str(mcfg["rotation_only"]),
-                "--vis_interval", str(VIS_INTERVAL),
-                "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
-            ]
-        if "use_mlp_head" in mcfg:
-            cmd.extend(["--use_mlp_head", str(mcfg["use_mlp_head"])])
-        if "bev_pool_factor" in mcfg:
-            cmd.extend(["--bev_pool_factor", str(mcfg["bev_pool_factor"])])
-        if "use_drcv" in mcfg:
-            if mcfg["use_drcv"]:
-                if not use_drinfer_backend:
-                    cmd.append("--use_drcv")
-                env["USE_DRCV_BACKEND"] = "1"
-            else:
-                env["USE_DRCV_BACKEND"] = "0"
-        if mcfg.get("use_foundation_depth"):
-            cmd.extend(["--use_foundation_depth", str(mcfg["use_foundation_depth"])])
-            env["HF_HUB_OFFLINE"] = "1"
-        if mcfg.get("depth_model_type"):
-            cmd.extend(["--depth_model_type", str(mcfg["depth_model_type"])])
-        if mcfg.get("fd_mode"):
-            cmd.extend(["--fd_mode", str(mcfg["fd_mode"])])
-        if mcfg.get("voxel_mode"):
-            cmd.extend(["--voxel_mode", str(mcfg["voxel_mode"])])
-        if mcfg.get("scatter_reduce"):
-            cmd.extend(["--scatter_reduce", str(mcfg["scatter_reduce"])])
-        if mcfg.get("to_bev_mode"):
-            cmd.extend(["--to_bev_mode", str(mcfg["to_bev_mode"])])
+            return None, None, ckpt_path
 
-        log_path = os.path.join(per_model_dir, "eval_run.log")
-        os.makedirs(per_model_dir, exist_ok=True)
+    env = os.environ.copy()
+    if not env.get("CUDA_VISIBLE_DEVICES"):
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+    env.pop("USE_DRCV_BACKEND", None)
+    env["BEV_ZBOUND_STEP"] = mcfg["bev_zbound_step"]
+    env["HF_HUB_OFFLINE"] = "1"
+    for env_key in ("BEV_XBOUND_MIN", "BEV_XBOUND_MAX",
+                    "BEV_YBOUND_MIN", "BEV_YBOUND_MAX", "BEV_XY_STEP"):
+        if env_key.lower() in mcfg:
+            env[env_key] = str(mcfg[env_key.lower()])
 
-        try:
-            with open(log_path, 'w') as log_f:
-                proc = subprocess.Popen(
-                    cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1
-                )
-                for line in proc.stdout:
-                    sys.stdout.write(f"  {line}")
-                    sys.stdout.flush()
-                    log_f.write(line)
-                proc.wait(timeout=EVAL_TIMEOUT)
+    use_drinfer_backend = mcfg.get("backend", "pytorch") == "drinfer"
 
-            if proc.returncode != 0:
-                print(f"  [ERROR] {label} failed (exit {proc.returncode})")
-                print(f"  Log saved: {log_path}")
-                continue
-            print(f"  [OK] {label} evaluation complete")
-            print(f"  Log saved: {log_path}")
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            print(f"  [ERROR] {label} timed out ({EVAL_TIMEOUT}s)")
-            print(f"  Partial log: {log_path}")
-        except Exception as e:
-            print(f"  [ERROR] {label}: {e}")
-            print(f"  Log: {log_path}")
+    if use_drinfer_backend:
+        drinfer_eval_script = os.path.join(
+            os.path.dirname(EVAL_SCRIPT), "evaluate_drinfer.py")
+        export_dir = mcfg.get("export_dir", "")
+        if not export_dir:
+            model_base_dr = _resolve_model_base(mcfg)
+            export_dir = os.path.join(model_base_dr, "drinfer")
+        cmd = [
+            sys.executable, drinfer_eval_script,
+            "--ckpt_path", ckpt_path,
+            "--export_dir", export_dir,
+            "--dataset_root", TEST_DATA,
+            "--output_dir", per_model_dir,
+            "--angle_range_deg", str(ANGLE_RANGE),
+            "--trans_range", str(TRANS_RANGE),
+            "--use_full_dataset",
+            "--max_batches", "0",
+            "--rotation_only", str(mcfg["rotation_only"]),
+            "--vis_interval", str(VIS_INTERVAL),
+            "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
+        ]
+        if mcfg.get("compare_pytorch"):
+            cmd.append("--compare_pytorch")
+        if mcfg.get("model_name"):
+            cmd.extend(["--model_name", str(mcfg["model_name"])])
+        if mcfg.get("model_version"):
+            cmd.extend(["--model_version", str(mcfg["model_version"])])
+        if mcfg.get("max_attn_tokens") is not None:
+            cmd.extend(["--max_attn_tokens", str(mcfg["max_attn_tokens"])])
+        if mcfg.get("use_drcv"):
+            cmd.append("--use_drcv")
+        if mcfg.get("use_deformable"):
+            cmd.extend(["--deformable", "1"])
+        if mcfg.get("max_attn_tokens") is not None:
+            cmd.extend(["--max_attn_tokens", str(mcfg["max_attn_tokens"])])
+    else:
+        cmd = [
+            sys.executable, EVAL_SCRIPT,
+            "--ckpt_path", ckpt_path,
+            "--dataset_root", TEST_DATA,
+            "--output_dir", per_model_dir,
+            "--angle_range_deg", str(ANGLE_RANGE),
+            "--trans_range", str(TRANS_RANGE),
+            "--use_full_dataset",
+            "--max_batches", "0",
+            "--rotation_only", str(mcfg["rotation_only"]),
+            "--vis_interval", str(VIS_INTERVAL),
+            "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
+        ]
+    if mcfg.get("use_deformable"):
+        cmd.extend(["--deformable", "1"])
+    if "use_mlp_head" in mcfg:
+        cmd.extend(["--use_mlp_head", str(mcfg["use_mlp_head"])])
+    if "bev_pool_factor" in mcfg:
+        cmd.extend(["--bev_pool_factor", str(mcfg["bev_pool_factor"])])
+    if "use_drcv" in mcfg:
+        if mcfg["use_drcv"]:
+            if not use_drinfer_backend:
+                cmd.append("--use_drcv")
+            env["USE_DRCV_BACKEND"] = "1"
+        else:
+            env["USE_DRCV_BACKEND"] = "0"
+    if mcfg.get("use_foundation_depth"):
+        cmd.extend(["--use_foundation_depth", str(mcfg["use_foundation_depth"])])
+        env["HF_HUB_OFFLINE"] = "1"
+    if mcfg.get("depth_model_type"):
+        cmd.extend(["--depth_model_type", str(mcfg["depth_model_type"])])
+    if mcfg.get("fd_mode"):
+        cmd.extend(["--fd_mode", str(mcfg["fd_mode"])])
+    if mcfg.get("voxel_mode"):
+        cmd.extend(["--voxel_mode", str(mcfg["voxel_mode"])])
+    if mcfg.get("scatter_reduce"):
+        cmd.extend(["--scatter_reduce", str(mcfg["scatter_reduce"])])
+    if mcfg.get("to_bev_mode"):
+        cmd.extend(["--to_bev_mode", str(mcfg["to_bev_mode"])])
+    if EVAL_SAMPLE_STEP is not None:
+        cmd.extend(["--eval_sample_step", str(EVAL_SAMPLE_STEP)])
+    if EVAL_MAX_FRAMES_PER_SEQ is not None:
+        cmd.extend(["--eval_max_frames_per_seq", str(EVAL_MAX_FRAMES_PER_SEQ)])
+    if mcfg.get("data_balance"):
+        cmd.extend(["--data_balance", str(mcfg["data_balance"])])
 
-    # Also check/copy existing test_data_eval results
+    return cmd, env, ckpt_path
+
+
+def _copy_existing_results():
+    """Check/copy existing test_data_eval results for models without outputs."""
     for mcfg in MODELS:
         label = mcfg["label"]
         per_model_dir = os.path.join(OUTPUT_DIR, label)
@@ -476,6 +502,334 @@ def run_evaluations():
                             shutil.copy2(os.path.join(src_dir, fn),
                                          os.path.join(per_model_dir, fn))
                     print(f"  Copied existing results for {label} from test_data_eval")
+
+
+def _precheck_models():
+    """Pre-check all models: classify into done/ready/missing.
+
+    Returns (done, ready, missing) where each is a list of
+    (idx, label, mcfg, per_model_dir, ckpt_path_or_None, reason).
+    """
+    done, ready, missing = [], [], []
+
+    for idx, mcfg in enumerate(MODELS):
+        label = mcfg["label"]
+        per_model_dir = os.path.join(OUTPUT_DIR, label)
+        extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
+
+        if os.path.isfile(extrinsics_path):
+            with open(extrinsics_path, 'r') as f:
+                if "EVALUATION STATISTICS" in f.read():
+                    done.append((idx, label, mcfg, per_model_dir, None, "eval complete"))
+                    continue
+
+        model_base = _resolve_model_base(mcfg)
+        ckpt_path = os.path.join(model_base,
+                                 os.path.basename(MODELS_DIR) +
+                                "_scratch/checkpoint", mcfg["ckpt"])
+        if not os.path.isfile(ckpt_path):
+            import glob as _glob
+            candidates = _glob.glob(os.path.join(model_base, "*_scratch/checkpoint", mcfg["ckpt"]))
+            if candidates:
+                ckpt_path = candidates[0]
+            else:
+                train_log = os.path.join(model_base, "train.log")
+                if os.path.isdir(model_base):
+                    reason = f"ckpt not found ({mcfg['ckpt']}), dir exists"
+                    if os.path.isfile(train_log):
+                        reason += " (training may be in progress)"
+                else:
+                    reason = f"model dir not found: {model_base}"
+                missing.append((idx, label, mcfg, per_model_dir, ckpt_path, reason))
+                continue
+
+        ready.append((idx, label, mcfg, per_model_dir, ckpt_path, "ready"))
+
+    return done, ready, missing
+
+
+def run_evaluations():
+    """Run evaluations for all models, optionally in multi-GPU parallel."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    done, ready, missing = _precheck_models()
+
+    print(f"\n{'='*80}")
+    print(f"Pre-check: {len(MODELS)} models in config")
+    print(f"  ✓ Already evaluated: {len(done)}")
+    print(f"  ⏳ Ready to evaluate: {len(ready)}")
+    print(f"  ✗ Missing (no checkpoint): {len(missing)}")
+    print(f"{'='*80}")
+
+    if done:
+        print(f"\nAlready done ({len(done)}):")
+        for _, label, _, _, _, reason in done:
+            print(f"  ✓ {label}")
+
+    if missing:
+        print(f"\nMissing ({len(missing)}):")
+        for _, label, _, _, _, reason in missing:
+            print(f"  ✗ {label}: {reason}")
+
+    if ready:
+        print(f"\nWill evaluate ({len(ready)}):")
+        for _, label, mcfg, _, ckpt_path, _ in ready:
+            print(f"  ⏳ {label} [{ckpt_path}]")
+
+    if not ready:
+        if missing:
+            print(f"\nNo models ready. {len(missing)} model(s) missing checkpoints.")
+        else:
+            print("\nAll models already evaluated.")
+        _copy_existing_results()
+        return
+
+    pending_tasks = []
+    for idx, label, mcfg, per_model_dir, ckpt_path, _ in ready:
+        extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
+        if os.path.isfile(extrinsics_path):
+            import shutil
+            shutil.rmtree(per_model_dir, ignore_errors=True)
+
+        cmd, env, _ = _build_eval_cmd_and_env(mcfg, per_model_dir)
+        if cmd is None:
+            continue
+
+        pending_tasks.append({
+            "idx": idx, "label": label, "mcfg": mcfg,
+            "per_model_dir": per_model_dir, "cmd": cmd, "env": env,
+            "ckpt_path": ckpt_path,
+        })
+
+    if not pending_tasks:
+        _copy_existing_results()
+        return
+
+    num_gpus = _PARALLEL_GPUS
+    if num_gpus <= 1:
+        _run_evaluations_sequential(pending_tasks)
+    else:
+        actual_gpus = min(num_gpus, len(pending_tasks))
+        if actual_gpus < num_gpus:
+            print(f"\nOnly {len(pending_tasks)} model(s) to evaluate, "
+                  f"using {actual_gpus}/{num_gpus} GPUs")
+        _run_evaluations_parallel(pending_tasks, actual_gpus)
+
+    _copy_existing_results()
+
+
+def _run_evaluations_sequential(tasks):
+    """Original sequential evaluation."""
+    for task in tasks:
+        idx, label = task["idx"], task["label"]
+        mcfg, cmd, env = task["mcfg"], task["cmd"], task["env"]
+        per_model_dir = task["per_model_dir"]
+
+        print(f"\n{'='*80}")
+        print(f"[{idx+1}/{len(MODELS)}] Evaluating: {label}")
+        print(f"  ckpt: {task['ckpt_path']}")
+        print(f"  BEV_ZBOUND_STEP={mcfg['bev_zbound_step']}, rotation_only={mcfg['rotation_only']}")
+        print(f"{'='*80}")
+
+        log_path = os.path.join(per_model_dir, "eval_run.log")
+        os.makedirs(per_model_dir, exist_ok=True)
+
+        _model_t0 = time.time()
+        try:
+            with open(log_path, 'w') as log_f:
+                proc = subprocess.Popen(
+                    cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1
+                )
+                for line in proc.stdout:
+                    sys.stdout.write(f"  {line}")
+                    sys.stdout.flush()
+                    log_f.write(line)
+                proc.wait(timeout=EVAL_TIMEOUT)
+
+            _model_elapsed = time.time() - _model_t0
+            if proc.returncode != 0:
+                print(f"  [ERROR] {label} failed (exit {proc.returncode}, 耗时: {_format_elapsed(_model_elapsed)})")
+                print(f"  Log saved: {log_path}")
+                continue
+            print(f"  [OK] {label} evaluation complete (耗时: {_format_elapsed(_model_elapsed)})")
+            print(f"  Log saved: {log_path}")
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _model_elapsed = time.time() - _model_t0
+            print(f"  [ERROR] {label} timed out ({EVAL_TIMEOUT}s, 耗时: {_format_elapsed(_model_elapsed)})")
+            print(f"  Partial log: {log_path}")
+        except Exception as e:
+            _model_elapsed = time.time() - _model_t0
+            print(f"  [ERROR] {label}: {e} (耗时: {_format_elapsed(_model_elapsed)})")
+            print(f"  Log: {log_path}")
+
+
+def _parse_progress_from_log(log_path):
+    """Extract latest progress info from an eval log file.
+
+    Returns (last_sample_idx, last_rot_error, status_line) or None.
+    """
+    if not os.path.isfile(log_path):
+        return None
+    try:
+        with open(log_path, 'r', errors='ignore') as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+
+    last_sample = -1
+    last_rot = None
+    total_samples = None
+
+    for line in reversed(lines):
+        s = line.strip()
+        if last_sample < 0:
+            m = re.search(r'处理样本\s*(\d+)(?:/(\d+))?', s)
+            if m:
+                last_sample = int(m.group(1))
+                if m.group(2):
+                    total_samples = int(m.group(2))
+            m2 = re.search(r'Sample\s+(\d+)', s)
+            if m2 and last_sample < 0:
+                last_sample = int(m2.group(1))
+        if last_rot is None:
+            m_rot = re.search(r'[Rr]ot[=:]\s*([\d.]+)', s)
+            if m_rot:
+                last_rot = float(m_rot.group(1))
+        if 'Evaluation complete' in s or '评估完成' in s:
+            m_done = re.search(r'(\d+)\s*samples', s)
+            if m_done:
+                return (int(m_done.group(1)), last_rot, "DONE")
+        if last_sample >= 0 and last_rot is not None:
+            break
+
+    if last_sample < 0:
+        for line in lines:
+            if '加载数据集' in line or 'Loading dataset' in line:
+                return (0, None, "loading")
+            if '初始化模型' in line or 'Initializing' in line:
+                return (0, None, "init")
+        return None
+
+    pct = ""
+    if total_samples and total_samples > 0:
+        pct = f" ({100 * last_sample / total_samples:.0f}%)"
+    rot_str = f" rot={last_rot:.2f}°" if last_rot is not None else ""
+    return (last_sample, last_rot, f"sample {last_sample}{pct}{rot_str}")
+
+
+def _print_wave_progress(running, wave_idx, num_waves, elapsed_sec):
+    """Print a compact progress summary for all processes in a wave."""
+    status_parts = []
+    all_done = True
+    for r in running:
+        label = r["label"]
+        proc = r["proc"]
+        gpu_id = r["gpu_id"]
+        is_alive = proc.poll() is None
+        if is_alive:
+            all_done = False
+
+        progress = _parse_progress_from_log(r["log_path"])
+        if progress is not None:
+            _, _, status = progress
+            mark = "⏳" if is_alive else ("✓" if proc.returncode == 0 else "✗")
+            status_parts.append(f"  GPU{gpu_id} {mark} {label}: {status}")
+        else:
+            mark = "⏳" if is_alive else ("✓" if proc.returncode == 0 else "✗")
+            status_parts.append(f"  GPU{gpu_id} {mark} {label}: starting...")
+
+    elapsed_str = f"{int(elapsed_sec)}s"
+    if elapsed_sec >= 60:
+        elapsed_str = f"{int(elapsed_sec // 60)}m{int(elapsed_sec % 60)}s"
+    header = f"[Wave {wave_idx+1}/{num_waves}] {elapsed_str} elapsed"
+    print(f"\n{header}")
+    for part in status_parts:
+        print(part)
+    return all_done
+
+
+def _run_evaluations_parallel(tasks, num_gpus):
+    """Run evaluations in parallel batches, each model on a separate GPU.
+
+    Models are grouped into waves of `num_gpus`. Within each wave,
+    each subprocess is pinned to a unique GPU via CUDA_VISIBLE_DEVICES.
+    Progress is polled every 30 seconds.
+    """
+    import math
+    import time as _time
+
+    total = len(tasks)
+    num_waves = math.ceil(total / num_gpus)
+    print(f"\n{'='*80}")
+    print(f"Parallel evaluation: {total} models on {num_gpus} GPUs ({num_waves} wave(s))")
+    print(f"{'='*80}")
+
+    POLL_INTERVAL = 30
+
+    for wave_idx in range(num_waves):
+        wave_start = wave_idx * num_gpus
+        wave_end = min(wave_start + num_gpus, total)
+        wave_tasks = tasks[wave_start:wave_end]
+
+        print(f"\n--- Wave {wave_idx+1}/{num_waves}: "
+              f"{', '.join(t['label'] + f' [GPU {gi}]' for gi, t in enumerate(wave_tasks))} ---")
+
+        running = []
+        wave_t0 = _time.monotonic()
+        for gpu_id, task in enumerate(wave_tasks):
+            label = task["label"]
+            per_model_dir = task["per_model_dir"]
+            env = task["env"].copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+            log_path = os.path.join(per_model_dir, "eval_run.log")
+            os.makedirs(per_model_dir, exist_ok=True)
+            log_f = open(log_path, 'w')
+
+            print(f"  [GPU {gpu_id}] Starting: {label}")
+            proc = subprocess.Popen(
+                task["cmd"], env=env,
+                stdout=log_f, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            running.append({
+                "proc": proc, "label": label, "gpu_id": gpu_id,
+                "log_path": log_path, "log_f": log_f,
+            })
+
+        while True:
+            alive = [r for r in running if r["proc"].poll() is None]
+            if not alive:
+                break
+            elapsed = _time.monotonic() - wave_t0
+            if elapsed > EVAL_TIMEOUT:
+                for r in alive:
+                    r["proc"].kill()
+                    print(f"  [GPU {r['gpu_id']}] [TIMEOUT] {r['label']} killed "
+                          f"after {EVAL_TIMEOUT}s")
+                break
+            _print_wave_progress(running, wave_idx, num_waves, elapsed)
+            _time.sleep(POLL_INTERVAL)
+
+        for r in running:
+            r["proc"].wait()
+            r["log_f"].close()
+
+        elapsed = _time.monotonic() - wave_t0
+        _print_wave_progress(running, wave_idx, num_waves, elapsed)
+
+        for r in running:
+            rc = r["proc"].returncode
+            if rc == 0:
+                print(f"  [GPU {r['gpu_id']}] [OK] {r['label']} complete")
+            else:
+                print(f"  [GPU {r['gpu_id']}] [ERROR] {r['label']} exit={rc} "
+                      f"(log: {r['log_path']})")
+
+        elapsed_str = f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
+        print(f"--- Wave {wave_idx+1}/{num_waves} finished ({elapsed_str}) ---")
 
 
 def collect_all_stats():
@@ -775,6 +1129,21 @@ def generate_report(all_stats):
     lines.append("![Rotation Error Bar Chart](charts/rotation_error_bar.png)")
     lines.append("")
 
+    # Macro vs Micro comparison (if macro data available)
+    has_macro = any(s.get('macro_rot_mean') for s in all_stats)
+    if has_macro:
+        lines.append("**Micro vs Macro 对比 (均衡评估)**:")
+        lines.append("")
+        lines.append("| 模型 | Micro(样本级) | Macro(序列级) | 差异 |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for s in sorted_stats:
+            micro = s.get('rot_error_mean', -1)
+            macro = s.get('macro_rot_mean', -1)
+            diff = macro - micro if macro > 0 and micro > 0 else 0
+            sign = "+" if diff >= 0 else ""
+            lines.append(f"| {s['label']} | {micro:.3f} | {macro:.3f} | {sign}{diff:.3f} |")
+        lines.append("")
+
     # Section 3
     lines.append("=" * 80)
     lines.append("三、旋转分量分析 (Roll / Pitch / Yaw Mean, deg)")
@@ -995,12 +1364,24 @@ def generate_report(all_stats):
 
 
 def main():
+    _total_t0 = time.time()
     print("=" * 80)
     print("BEVCalib 多模型泛化性能评估")
     print(f"  模型数: {len(MODELS)}")
     print(f"  测试数据: {TEST_DATA}")
     print(f"  扰动: {ANGLE_RANGE} deg, {TRANS_RANGE} m")
+    if EVAL_SAMPLE_STEP is not None and EVAL_MAX_FRAMES_PER_SEQ is not None:
+        print("[FATAL] eval_sample_step 与 eval_max_frames_per_seq 互斥，不能同时配置。")
+        return
+    if EVAL_SAMPLE_STEP is not None:
+        print(f"  采样: 每隔{EVAL_SAMPLE_STEP}帧取1帧")
+    elif EVAL_MAX_FRAMES_PER_SEQ is not None:
+        print(f"  采样: 每序列最多 {EVAL_MAX_FRAMES_PER_SEQ} 帧 (均匀下采样)")
     print(f"  输出: {OUTPUT_DIR}")
+    if _PARALLEL_GPUS > 1:
+        print(f"  并行模式: {_PARALLEL_GPUS} GPUs")
+    else:
+        print(f"  并行模式: 关闭 (使用 --parallel -1 启用多卡并行)")
     print("=" * 80)
 
     # Step 1: Run evaluations
@@ -1026,12 +1407,14 @@ def main():
     print("\n>>> Step 5: Generating report...")
     report_path = generate_report(all_stats)
 
+    _total_elapsed = time.time() - _total_t0
     print(f"\n{'='*80}")
     print(f"Evaluation complete!")
     print(f"  Models evaluated: {len(all_stats)}/{len(MODELS)}")
     print(f"  Report: {report_path}")
     print(f"  Charts: {os.path.join(OUTPUT_DIR, 'charts')}/")
     print(f"  Projections: {os.path.join(OUTPUT_DIR, 'projection_comparison')}/")
+    print(f"  总耗时: {_format_elapsed(_total_elapsed)}")
     print(f"{'='*80}")
 
 

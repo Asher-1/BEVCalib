@@ -1,0 +1,137 @@
+# V17 Quick PyTorch 泛化评估配置 — sign-flip 基座 + perturb 强度消融
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v17_quick.yaml
+#   多卡并行:
+#     ... --parallel -1
+#   快速评估 (每隔4帧采样):
+#     ... --eval_sample_step 4
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+# 训练后需将模型目录整理到此路径:
+#   mkdir -p logs/all_training_data/v17_quick
+#   mv logs/all_training_data/model_small_*v17*quick logs/all_training_data/v17_quick/
+models_dir: "logs/all_training_data/v17_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v17_quick"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # === V17 Quick sign-flip 基座 + perturb 强度消融 ===
+
+  # 0. sign-flip only 对照
+  - label: "v17-signflip-only"
+    dir_name: "model_small_5deg_v17_signflip_only_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-signflip-only"
+    mode_desc: "V17: sign_flip(0.15) 对照 (无perturb)"
+
+  # 1. sign-flip + 弱 perturb (推荐)
+  - label: "v17-weak-perturb"
+    dir_name: "model_small_5deg_v17_weak_perturb_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-perturb"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.10,1.5°) 弱融合"
+
+  # 2. sign-flip + 中等 perturb
+  - label: "v17-mid-perturb"
+    dir_name: "model_small_5deg_v17_mid_perturb_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-mid-perturb"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.15,2°) 中等融合"
+
+  # 3. sign-flip + 弱 perturb + Pitch1.5
+  - label: "v17-weak-pitch15"
+    dir_name: "model_small_5deg_v17_weak_pitch15_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-pitch15"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.10,1.5°)+Pitch1.5"
+
+  # 4. sign-flip + 弱 perturb + Pitch3
+  - label: "v17-weak-pitch3"
+    dir_name: "model_small_5deg_v17_weak_pitch3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v17-weak-pitch3"
+    mode_desc: "V17: sign_flip(0.15)+perturb(0.10,1.5°)+Pitch3"
+
+  # 5. 8度扰动 + 弱 perturb
+  - label: "v17-angle8-weak"
+    dir_name: "model_small_8deg_v17_angle8_weak_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 8
+    z_voxels: 10
+    version: "v17-angle8-weak"
+    mode_desc: "V17: 8deg+sign_flip(0.15)+perturb(0.10,1.5°)"
+
+# ============================================================================
+# V17 Quick 消融矩阵
+# ============================================================================
+#
+#   实验                | sign_flip | perturb     | Pitch loss | angle | 说明
+#   --------------------+-----------+-------------+------------+-------+----------
+#   v17-signflip-only   | 0.15      | No          | 1x         | 5°    | 基线对照
+#   v17-weak-perturb    | 0.15      | 0.10, 1.5°  | 1x         | 5°    | ★推荐
+#   v17-mid-perturb     | 0.15      | 0.15, 2.0°  | 1x         | 5°    | 中等融合
+#   v17-weak-pitch15    | 0.15      | 0.10, 1.5°  | 1.5x       | 5°    | 温和pitch
+#   v17-weak-pitch3     | 0.15      | 0.10, 1.5°  | 3x         | 5°    | 强pitch
+#   v17-angle8-weak     | 0.15      | 0.10, 1.5°  | 1x         | 8°    | 大角度

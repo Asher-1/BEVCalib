@@ -1,0 +1,100 @@
+# test_models 子目录实验 — 泛化评估（与 eval_generalization_all_v16_quick 同结构）
+#
+# 重要: models_dir 必须是 `logs/all_training_data`（不要写成 `.../test_models`），
+# 否则 os.path.basename(MODELS_DIR) 会变成 `test_models`，checkpoint 会错误指向
+# `.../test_models_scratch/checkpoint/`（不存在）。正确 scratch 目录名为
+# `all_training_data_scratch`，因此 dir_name 使用 `test_models/<run_name>`。
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_test_models.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_test_models"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+
+models:
+  # === LR 消融 (L20 8GPU, max_frames_per_seq=500)，架构与 V16 Z10+DRCV+scatter 一致 ===
+  - label: "test-lr-1e4"
+    dir_name: "test_models/model_small_5deg_v16_lr_1e4_step"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-lr-ablation"
+    mode_desc: "LR=1e-4 step schedule, L20×8, max_frames_per_seq=500"
+
+  - label: "test-lr-2e4"
+    dir_name: "test_models/model_small_5deg_v16_lr_2e4_step"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-lr-ablation"
+    mode_desc: "LR=2e-4 step schedule, L20×8, max_frames_per_seq=500"
+
+  - label: "test-lr-3e4"
+    dir_name: "test_models/model_small_5deg_v16_lr_3e4_step"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-lr-ablation"
+    mode_desc: "LR=3e-4 step schedule, L20×8, max_frames_per_seq=500"
+
+  # === A30 大规模 (sample_step=3)，架构同上 ===
+  - label: "test-a30-ultimate"
+    dir_name: "test_models/model_small_5deg_v16_a30_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-a30"
+    mode_desc: "A30 multi-node DDP scale, sample_step=3 (训练采样；eval 默认全帧除非设 eval_sample_step)"
+
+  - label: "test-a30-pitch3-signflip"
+    dir_name: "test_models/model_small_5deg_v16_a30_pitch3_signflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-a30-pitch3"
+    mode_desc: "A30 pitch_sign_flip=0.15, augment_pitch_flip_prob=0 (与 ultimate 采样同为 sample_step=3)"

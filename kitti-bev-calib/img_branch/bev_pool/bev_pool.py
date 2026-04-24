@@ -262,9 +262,9 @@ if __name__ == "__main__":
         d1 = (x_drcv - x_custom).abs()
         d2 = (x_drcv - x_scatter).abs()
         print(f"\n[drcv vs custom]  max={d1.max().item():.6e}, mean={d1.mean().item():.6e}  "
-              f"{'MATCH' if d1.max().item() < 1e-4 else 'MISMATCH'}")
+              f"{'MATCH' if d1.max().item() < 1e-6 else 'MISMATCH'}")
         print(f"[drcv vs scatter] max={d2.max().item():.6e}, mean={d2.mean().item():.6e}  "
-              f"{'MATCH' if d2.max().item() < 1e-4 else 'MISMATCH'}")
+              f"{'MATCH' if d2.max().item() < 1e-6 else 'MISMATCH'}")
         print()
 
     _run_test(200, 128, 2, 5, 10, 10)

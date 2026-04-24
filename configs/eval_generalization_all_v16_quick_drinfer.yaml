@@ -1,0 +1,128 @@
+# V16 Quick DrInfer 泛化评估配置 — 双模式 Pitch 增强消融
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v16_quick_drinfer.yaml
+#   多卡并行:
+#     ... --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v16_quick_drinfer"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # === V16 Quick 双模式 Pitch 增强消融 (DrInfer + PyTorch 对照) ===
+
+  # 0. 对照组: 无pitch增强
+  - label: "v16-baseline [DrInfer]"
+    dir_name: "model_small_5deg_v16_baseline_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-baseline-drinfer"
+    mode_desc: "V16 对照: Z10+Cosine+Aug (无pitch增强)"
+
+  # 1. pitch sign flip 单独
+  - label: "v16-sign-flip [DrInfer]"
+    dir_name: "model_small_5deg_v16_sign_flip_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-sign-flip-drinfer"
+    mode_desc: "V16: sign_flip(0.15) 精确pitch反转"
+
+  # 2. X-axis perturb 单独
+  - label: "v16-perturb [DrInfer]"
+    dir_name: "model_small_5deg_v16_perturb_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-perturb-drinfer"
+    mode_desc: "V16: perturb(0.2,2deg) X轴随机扰动"
+
+  # 3. 双模式融合
+  - label: "v16-dual [DrInfer]"
+    dir_name: "model_small_5deg_v16_dual_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-dual-drinfer"
+    mode_desc: "V16: sign_flip(0.1)+perturb(0.15,2deg) 双模式融合"
+
+  # 4. 双模式 + Pitch3
+  - label: "v16-dual-pitch3 [DrInfer]"
+    dir_name: "model_small_5deg_v16_dual_pitch3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    backend: "drinfer"
+    compare_pytorch: true
+    max_attn_tokens: 800
+    model_name: "bevcalib_fusion_head"
+    model_version: "v2"
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-dual-pitch3-drinfer"
+    mode_desc: "V16: sign_flip(0.1)+perturb(0.15,2deg)+Pitch3 终极配方"

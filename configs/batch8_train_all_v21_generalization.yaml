@@ -1,0 +1,146 @@
+# BEVCalib V21 — 以泛化为核心目标的训练配置
+#
+# 设计理念:
+#   基于 V20+V16 综合评估的量化分析结论:
+#   - V20 spconv+Z5+wt=1:3:1 测试域最佳 (0.646°) 但衰退 5.9x
+#   - V16 ultimate 双增强衰退仅 2.9x 但绝对精度不如 V20
+#   - 数据分布分析发现: 泛化误差 ≈ 场景记忆化(54%) + 标定敏感性(46%)
+#   - Seq 09 天然对照实验: 同标定不同行程仍有 7.3x Pitch 放大
+#   - 逐参数分析: 无单一标定参数显著相关, 需多维度增强
+#
+# V21 策略:
+#   架构: V20 最优 (spconv + Z5 + hard + sum)
+#   增强: V16 ultimate 基础上全面加强 + 新增 intrinsic augmentation
+#   目标: 测试域 Pitch < 0.25°, 总误差 < 0.40°
+#
+# 实验矩阵:
+#   1. v21_generalize_full:     完整增强 (场景+标定双消)
+#   2. v21_generalize_no_intr:  无内参增强 (消融对照)
+#   3. v21_generalize_strong:   超强增强 (探索上限)
+#   4. v21_generalize_z10:      Z10 + 完整增强 (Z消融)
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0           # Z=5
+    USE_DRCV_BACKEND: 0            # spconv (proven 2x better than DRCV)
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 16
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"   # Pitch 3x weighting (V20 best proven)
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # ===== V21 增强基线 (对标场景记忆化 54%) =====
+    augment_pitch_sign_flip_prob: 0.15   # V16=0.1, 加强
+    augment_pitch_flip_prob: 0.20        # V16=0.15, 加强
+    augment_pitch_flip_max_deg: 3.0      # V16=2.0, 扩大 Pitch 扰动范围
+    augment_color_jitter: 0.15           # V16=0.1, 强化视觉打乱
+    augment_pc_jitter: 0.02              # V16=0.02, 保持
+    augment_pc_dropout: 0.05             # V16=0.0, 新增 5% 点云随机丢弃
+
+    # ===== V21 新增: 内参增强 (对标标定敏感性 46%) =====
+    # 实际跨车变化: fx ±1.6%, cy ±2.8%
+    # fx/fy ±3% (2x余量), cx/cy ±3% (覆盖100%实际变化)
+    augment_intrinsic: 0.03
+    augment_intrinsic_cxcy: 0.03
+
+    max_frames_per_seq: 10000
+    early_stopping_patience: 30
+    seed: 42
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # 实验 1: V21 完整增强 (推荐主实验)
+  # =========================================================================
+  # 预期: 场景记忆化抑制 + 标定敏感性消除 → Pitch 衰退 < 5x
+  - name: "v21_generalize_full"
+    description: "V21: Z5+spconv+wt1:3:1+双Pitch增强+color+intrinsic 完整泛化方案"
+    dataset: "all"
+    version: "v21_generalize_full"
+
+  # =========================================================================
+  # 实验 2: 无内参增强 (消融对照)
+  # =========================================================================
+  # 目的: 量化 augment_intrinsic 的独立贡献
+  - name: "v21_generalize_no_intr"
+    description: "V21 消融: 无内参增强 (验证 intrinsic aug 贡献)"
+    dataset: "all"
+    version: "v21_generalize_no_intr"
+    params:
+      augment_intrinsic: 0.0
+      augment_intrinsic_cxcy: 0.0
+
+  # =========================================================================
+  # 实验 3: 超强增强 (探索上限)
+  # =========================================================================
+  # 加大所有增强参数, 探索增强极限
+  - name: "v21_generalize_strong"
+    description: "V21 强化: 更大增强强度, 探索泛化上限"
+    dataset: "all"
+    version: "v21_generalize_strong"
+    params:
+      augment_pitch_sign_flip_prob: 0.25
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 4.0
+      augment_color_jitter: 0.25
+      augment_pc_jitter: 0.03
+      augment_pc_dropout: 0.10
+      augment_intrinsic: 0.05
+      augment_intrinsic_cxcy: 0.05
+
+  # =========================================================================
+  # 实验 4: Z10 + 完整增强 (Z 消融)
+  # =========================================================================
+  # V20 结论: Z10 训练域更好但泛化不如 Z5, 加增强后是否翻转?
+  - name: "v21_generalize_z10"
+    description: "V21: Z10+完整增强 (验证 Z10+augment 是否优于 Z5+augment)"
+    dataset: "all"
+    version: "v21_generalize_z10"
+    env:
+      BEV_ZBOUND_STEP: 2.0

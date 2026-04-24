@@ -78,6 +78,13 @@ cd tools/preparation
     /mnt/drtraining/user/dahailu/data/bevcalib/test_trips/YR-C061-9_20260305_055658 \
     /mnt/drtraining/user/dahailu/data/bevcalib/test_single \
     640 360 traffic_2 10.0 --sequence-id 5
+
+
+# 多 trips + 指定 起始的sequence ID + 并行处理trips
+./run_preparation_pipeline.sh \
+    /mnt/drtraining/user/dahailu/data/bevcalib/new_trips \
+    /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_v2 \
+    640 360 traffic_2 10.0 --start-sequence 11 -j 11
 ```
 
 | 参数 | 说明 | 默认值 |

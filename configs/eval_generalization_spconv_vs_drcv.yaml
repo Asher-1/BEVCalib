@@ -1,0 +1,176 @@
+# spconv vs drcv 泛化对比评估
+#
+# 包含 8 个模型: 4 个新 spconv 实验 + 4 个已有 drcv 对照
+#
+# 目的:
+#   验证 spconv conv_out (3x3x3, stride-Z=2) 信息瓶颈假说:
+#   spconv 组的泛化误差应系统性低于对应 drcv 对照组
+#
+# 注意:
+#   - spconv 模型需先完成训练 (batch8_train_all_spconv_vs_drcv.yaml)
+#   - drcv 对照模型位于 test_models2/ 子目录
+#   - models_dir 使用 `logs/all_training_data`, dir_name 含子路径
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_spconv_vs_drcv.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_spconv_vs_drcv.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_spconv_vs_drcv_v1"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+
+models:
+  # ============================================================================
+  # A. 无增强对照组: spconv vs drcv, z=10, wt=1:3:1
+  # ============================================================================
+
+  # spconv 实验组
+  - label: "spconv-z10-wt3"
+    dir_name: "model_small_5deg_spconv_z10_wt3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "spconv"
+    mode_desc: "spconv, z=10, wt=1:3:1, 无增强, sample_step=2"
+
+  # drcv 对照组
+  - label: "drcv-z10-wt3"
+    dir_name: "test_models2/model_small_5deg_v20_v8_z10_pitch_wt3_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v20-drcv"
+    mode_desc: "drcv, z=10, wt=1:3:1, 无增强, sample_step=2 (对照, 已知 1.200°)"
+
+  # ============================================================================
+  # B. 无增强: spconv z=5 vs drcv z=10, wt=1:1:1
+  # 注意: drcv 对照用 z=10 (无本地 drcv z=5 模型), 非完全等价对比,
+  #       但可验证 spconv z=5 (n_z=1) vs drcv z=10 (n_z=5) 的架构差异影响
+  # ============================================================================
+
+  # spconv 实验组: z=5 → conv_out 后 n_z=1 (极端信息瓶颈)
+  - label: "spconv-z5-wt1"
+    dir_name: "model_small_5deg_spconv_z5_wt1"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "spconv"
+    mode_desc: "spconv, z=5 (n_z=1), wt=1:1:1, 无增强, sample_step=2"
+
+  # drcv 对照组: z=10 → 无 conv_out 压缩, n_z=5
+  - label: "drcv-z10-wt1"
+    dir_name: "test_models2/model_small_5deg_v20_v8_z10_drcv"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v20-drcv"
+    mode_desc: "drcv, z=10 (n_z=5), wt=1:1:1, 无增强, sample_step=2 (对照, 注意Z不同)"
+
+  # ============================================================================
+  # C. 全量增强对照组: spconv vs drcv, z=10, wt=1:3:1
+  # ============================================================================
+
+  # spconv 实验组
+  - label: "spconv-z10-wt3-fullaug"
+    dir_name: "model_small_5deg_spconv_z10_wt3_fullaug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "spconv"
+    mode_desc: "spconv, z=10, wt=1:3:1, 全增强(jitter+color+pitch_flip+sign_flip), sample_step=2"
+
+  # drcv 对照组
+  - label: "drcv-z10-wt3-fullaug"
+    dir_name: "test_models2/model_small_5deg_v16_ultimate"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-drcv"
+    mode_desc: "drcv, z=10, wt=1:3:1, 全增强, sample_step=2 (对照, 已知 0.913°)"
+
+  # ============================================================================
+  # D. signflip 增强对照组: spconv vs drcv, z=10, wt=1:3:1
+  # ============================================================================
+
+  # spconv 实验组
+  - label: "spconv-z10-wt3-signflip"
+    dir_name: "model_small_5deg_spconv_z10_wt3_signflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "spconv"
+    mode_desc: "spconv, z=10, wt=1:3:1, signflip=0.15+jitter+color, sample_step=2"
+
+  # drcv 对照组
+  - label: "drcv-z10-wt3-signflip"
+    dir_name: "test_models2/model_small_5deg_v16_pitch3_signflip"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16-drcv"
+    mode_desc: "drcv, z=10, wt=1:3:1, signflip=0.15, sample_step=2 (对照, 已知 2.062°)"

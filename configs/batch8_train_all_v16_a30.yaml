@@ -1,0 +1,256 @@
+# BEVCalib V16 A30 集群训练配置
+#
+# 目标: 32节点 A30 集群 (每节点8卡, 共256 GPU)
+# GPU: NVIDIA A30 (24GB HBM2) — 比 L20(48GB) 显存减半, 故 per-GPU bs=8
+# 全局 Batch: 8 × 8gpu × 32node = 2048
+#
+# 训练策略:
+#   - ddp_auto_scale=1 (加速模式): 自动 √缩放 LR + 延长 warmup, epoch不变
+#   - 参考配置: 16GPU (等效云版 8GPU×bs16 的有效batch=128), 即以 lr=1e-4 为基准
+#   - 自动缩放后: LR ≈ 1e-4 × √(256/16) = 1e-4 × 4.0 = 4.0e-4
+#     (与云版 L20 的 LR 缩放完全一致)
+#
+# DDP 加速分析 (sample_step=3):
+#   Quick (8GPU, step=4): ~32612 frames / (8×16) = 254 steps/epoch × 400 epoch = 101,600 steps
+#   A30 (256GPU, step=3): ~43483 frames / (256×8) = 21 steps/epoch × 400 epoch = 8,400 steps
+#   → 加速 ~12x (epoch不变, 每epoch步数减少, 但采样更密集)
+#
+# LR 缩放对齐 (ref_gpus=16):
+#   A30: ref_batch = 16GPU×8bs = 128  ← 等效云版 8GPU×16bs = 128
+#   → gpu_ratio = 256/16 = 16, √缩放 = 4.0×, LR = 4.0e-4 (与云版一致)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v16_a30.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0              # Z=10 (10个Z-voxel)
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 8                       # A30 显存 24GB, per-GPU 最大 bs=8
+    learning_rate: 1e-4                 # 基准 LR (ddp_auto_scale 会自动缩放)
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32                          # 32节点 × 8卡 = 256 GPU
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1                   # 加速模式: √缩放LR+warmup, epoch不变
+    ddp_reference_gpus: 16              # 16GPU×bs8=128 等效云版 8GPU×bs16=128, 保证 √缩放一致
+    max_scaled_lr: 4e-4                  # LR上限: V16消融验证最优区间 2e-4~4e-4
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 ===
+    lr_schedule: step
+    warmup_epochs: 5                    # 基准 warmup (ddp_auto_scale 会自动缩放)
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 ===
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_flip_max_deg: 2.0
+    augment_pitch_sign_flip_prob: 0.0
+
+    # === 数据采样 ===
+    sample_step: 3                      # 每隔3帧取1帧
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+    grad_accum_steps: 1
+
+    # === DrInfer 兼容 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # 第1组: 自动缩放实验 (ddp_auto_scale=1, 加速模式)
+  # =========================================================================
+
+  # 0. 终极配置 (自动缩放)
+  - name: "v16_a30_ultimate"
+    description: "V16 A30: StepLR+Pitch3+dual_pitch (auto_scale=1, 256GPU)"
+    dataset: "all"
+    version: "v16_a30_ultimate"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+
+  # 1. sign_flip only
+  - name: "v16_a30_pitch3_signflip"
+    description: "V16 A30: Pitch3+sign_flip(0.15)"
+    dataset: "all"
+    version: "v16_a30_pitch3_signflip"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.15
+
+  # 2. 纯 Aug 对照
+  - name: "v16_a30_pitch3_aug"
+    description: "V16 A30: Pitch3+Aug (对照组)"
+    dataset: "all"
+    version: "v16_a30_pitch3_aug"
+    params:
+      axis_weights: "1.0,3.0,1.0"
+
+  # 3. Cosine 终极配置
+  - name: "v16_a30_cosine_ultimate"
+    description: "V16 A30: Cosine+dual_pitch"
+    dataset: "all"
+    version: "v16_a30_cosine_ultimate"
+    params:
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 10
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+
+  # =========================================================================
+  # 第2组: 手动 LR 探索 (ddp_auto_scale=0, 关闭自动缩放)
+  # 目的: 大 batch (2048) 下探索最优 LR 区间
+  # =========================================================================
+
+  # 4. 手动 LR=3e-4 (理论 √缩放中值)
+  - name: "v16_a30_manual_lr3e4"
+    description: "V16 A30: 手动LR=3e-4, warmup=20 (√缩放中值)"
+    dataset: "all"
+    version: "v16_a30_manual_lr3e4"
+    params:
+      ddp_auto_scale: 0
+      learning_rate: 3e-4
+      warmup_epochs: 20
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+
+  # 5. 手动 LR=5e-4 (激进上界)
+  - name: "v16_a30_manual_lr5e4"
+    description: "V16 A30: 手动LR=5e-4, warmup=30 (激进)"
+    dataset: "all"
+    version: "v16_a30_manual_lr5e4"
+    params:
+      ddp_auto_scale: 0
+      learning_rate: 5e-4
+      warmup_epochs: 30
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+
+  # 6. 手动 LR=2e-4 (保守探索)
+  - name: "v16_a30_manual_lr2e4"
+    description: "V16 A30: 手动LR=2e-4, warmup=15 (保守)"
+    dataset: "all"
+    version: "v16_a30_manual_lr2e4"
+    params:
+      ddp_auto_scale: 0
+      learning_rate: 2e-4
+      warmup_epochs: 15
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+
+  # =========================================================================
+  # 第3组: Cosine + 手动 LR
+  # =========================================================================
+
+  # 7. Cosine + 手动 LR=3e-4
+  - name: "v16_a30_cosine_lr3e4"
+    description: "V16 A30: Cosine+LR=3e-4, warmup=20"
+    dataset: "all"
+    version: "v16_a30_cosine_lr3e4"
+    params:
+      ddp_auto_scale: 0
+      learning_rate: 3e-4
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      warmup_epochs: 20
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+
+  # =========================================================================
+  # 第4组: Grad Accumulation (模拟更小 effective batch, 增加步数)
+  # =========================================================================
+
+  # 8. grad_accum=2, effective steps翻倍
+  - name: "v16_a30_grad_accum2"
+    description: "V16 A30: grad_accum=2 (模拟16步/epoch→32步)"
+    dataset: "all"
+    version: "v16_a30_grad_accum2"
+    params:
+      grad_accum_steps: 2
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+
+# ============================================================================
+# 实验矩阵总结 (A30 32节点, 256 GPU, global_bs=2048)
+# ============================================================================
+#
+#   #  | 实验名                    | Scale  | LR      | Schedule | Warmup | 描述
+#   ---+---------------------------+--------+---------+----------+--------+------------------
+#   0  | v16_a30_ultimate          | auto   | ~5.7e-4 | Step     | ~133   | ★终极 auto
+#   1  | v16_a30_pitch3_signflip   | auto   | ~5.7e-4 | Step     | ~133   | sign_flip only
+#   2  | v16_a30_pitch3_aug        | auto   | ~5.7e-4 | Step     | ~133   | 纯aug对照
+#   3  | v16_a30_cosine_ultimate   | auto   | ~5.7e-4 | Cosine   | ~133   | Cosine auto
+#   4  | v16_a30_manual_lr3e4      | off    | 3e-4    | Step     | 20     | √缩放中值
+#   5  | v16_a30_manual_lr5e4      | off    | 5e-4    | Step     | 30     | 激进上界
+#   6  | v16_a30_manual_lr2e4      | off    | 2e-4    | Step     | 15     | 保守探索
+#   7  | v16_a30_cosine_lr3e4      | off    | 3e-4    | Cosine   | 20     | Cosine+手动LR
+#   8  | v16_a30_grad_accum2       | auto   | ~5.7e-4 | Step     | ~133   | grad_accum优化
+#
+# A30 硬件 vs L20:
+#   A30: 24GB HBM2, per-GPU bs=8 → global_bs=2048
+#   L20: 48GB GDDR6X, per-GPU bs=16 → global_bs=1024 (8机) / 2048 (16机)
+#
+# 关键对比:
+#   - auto vs manual LR: 验证 √缩放策略在超大 batch 下的效果
+#   - Step vs Cosine: 大 batch 更适合哪种 LR 调度
+#   - grad_accum=2: 增加优化步数是否改善收敛

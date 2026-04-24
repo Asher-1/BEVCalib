@@ -72,6 +72,7 @@ def _auto_export_if_needed(args, export_dir, rotation_only):
         "to_bev_mode": args.to_bev_mode or "concat",
         "model_name": args.model_name,
         "model_version": args.model_version,
+        "deformable": bool(args.deformable),
         "verify_export_graph": True,
         "export_strategy": "full",
         "max_attn_tokens": args.max_attn_tokens,
@@ -117,6 +118,10 @@ def parse_args():
     p.add_argument("--trans_range", type=float, default=0.15)
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--max_batches", type=int, default=0)
+    p.add_argument("--eval_sample_step", type=int, default=None,
+                   help="测试数据采样步长 (每隔N帧取1帧, None=使用全部帧)")
+    p.add_argument("--eval_max_frames_per_seq", type=int, default=None,
+                   help="测试集每序列最多帧数 (均匀下采样; 与 eval_sample_step 互斥)")
     p.add_argument("--rotation_only", type=int, default=1)
     p.add_argument("--vis_interval", type=int, default=200)
     p.add_argument("--vis_points", type=int, default=8000)
@@ -135,9 +140,13 @@ def parse_args():
     p.add_argument("--model_version", type=str, default="v2")
     p.add_argument("--max_attn_tokens", type=int, default=800,
                    help="Token packing limit for transformer (0=disabled, 800=default)")
+    p.add_argument("--deformable", type=int, default=0,
+                   help="Use deformable attention (0=standard transformer, 1=deformable)")
     p.add_argument("--eval_seed", type=int, default=42)
     p.add_argument("--compare_pytorch", action="store_true",
                    help="Also run PyTorch inference and append comparison stats")
+    p.add_argument("--data_balance", type=int, default=0,
+                   help="Balanced evaluation mode (0=micro only, 1/2=macro primary)")
     return p.parse_args()
 
 
@@ -166,6 +175,20 @@ def _resolve_from_checkpoint(args):
         rot = _get("rotation_only", None)
         if rot is not None and args.rotation_only == 1:
             args.rotation_only = 1 if rot else 0
+        if args.bev_pool_factor == 0:
+            args.bev_pool_factor = _get("bev_pool_factor", 0)
+        if args.deformable == 0:
+            args.deformable = 1 if _get("deformable", False) else 0
+        if not hasattr(args, 'bev_encoder') or args.bev_encoder is None:
+            args.bev_encoder = 1 if _get("bev_encoder", True) else 0
+        else:
+            args.bev_encoder = 1
+        if not hasattr(args, 'perturb_distribution'):
+            args.perturb_distribution = _get('perturb_distribution', 'uniform')
+        if not hasattr(args, 'per_axis_prob'):
+            args.per_axis_prob = _get('per_axis_prob', 0.0)
+        if not hasattr(args, 'per_axis_weights'):
+            args.per_axis_weights = _get('per_axis_weights', '')
 
     bz = _get("bev_zbound_step", None)
     if bz is None:
@@ -197,7 +220,19 @@ def build_dataloader(args):
     from custom_dataset import CustomDataset
     from evaluate_checkpoint import make_collate_fn
 
-    dataset = CustomDataset(data_folder=args.dataset_root, auto_detect=True)
+    _ss = getattr(args, 'eval_sample_step', None)
+    _mf = getattr(args, 'eval_max_frames_per_seq', None)
+    if _ss is not None and _mf is not None:
+        raise ValueError(
+            "eval_sample_step 与 eval_max_frames_per_seq 互斥。"
+            f" eval_sample_step={_ss}, eval_max_frames_per_seq={_mf}"
+        )
+    dataset = CustomDataset(
+        data_folder=args.dataset_root,
+        auto_detect=True,
+        sample_step=_ss,
+        max_frames_per_seq=_mf,
+    )
     target_size = (args.target_width, args.target_height)
     collate_fn = make_collate_fn(target_size)
 
@@ -323,8 +358,20 @@ def _write_stats_block(f, all_errors, sample_count, rotation_only, seq_boundarie
                     f"max={np.max(seq_rot):.4f}°\n\n")
 
 
+def _format_elapsed(seconds):
+    """Format elapsed seconds to human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m{s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m}m{s}s"
+
+
 def main():
     args = parse_args()
+    _eval_t0 = time.time()
 
     if args.use_drcv:
         os.environ["USE_DRCV_BACKEND"] = "1"
@@ -368,10 +415,13 @@ def main():
         device=device,
         img_shape=(args.target_height, args.target_width),
         rotation_only=rotation_only,
+        deformable=bool(args.deformable),
+        bev_encoder=bool(getattr(args, 'bev_encoder', 1)),
         use_mlp_head=bool(args.use_mlp_head),
         voxel_mode=args.voxel_mode,
         to_bev_mode=args.to_bev_mode,
         scatter_reduce=args.scatter_reduce,
+        bev_pool_factor=args.bev_pool_factor,
         max_attn_tokens=args.max_attn_tokens,
     )
 
@@ -423,10 +473,16 @@ def main():
                 break
 
             gt_T_np = np.array(gt_T_list).astype(np.float32)
+            _paw = None
+            if getattr(args, 'per_axis_weights', '') and args.per_axis_weights:
+                _paw = tuple(float(x) for x in args.per_axis_weights.split(','))
             init_T_np, _, _ = generate_single_perturbation_from_T(
                 gt_T_np,
                 angle_range_deg=args.angle_range_deg,
                 trans_range=args.trans_range if not rotation_only else 0.0,
+                distribution=getattr(args, 'perturb_distribution', 'uniform'),
+                per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                per_axis_weights=_paw,
             )
 
             imgs_np = np.array(imgs)
@@ -562,6 +618,7 @@ def main():
                 f.write(f"  DrInfer: {t_arr.mean():.1f}ms/batch\n")
                 f.write(f"  Speedup: {speedup:.2f}x\n")
 
+    _eval_elapsed = time.time() - _eval_t0
     print(f"\n{'=' * 60}")
     print(f"Evaluation complete: {sample_count} samples")
     rot_mean = np.mean(all_errors['rot_error'])
@@ -569,6 +626,7 @@ def main():
     print(f"  Rotation error: mean={rot_mean:.4f}°  p95={rot_p95:.4f}°")
     print(f"  Latency: {np.mean(timings_dr):.1f}ms/batch ({per_sample_ms:.1f}ms/sample)")
     print(f"  Results: {extrinsics_file}")
+    print(f"  总耗时: {_format_elapsed(_eval_elapsed)}")
     print(f"{'=' * 60}")
 
 

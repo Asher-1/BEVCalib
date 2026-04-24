@@ -1,0 +1,83 @@
+# V16 speedup 评估配置
+#
+# 对应训练配置: batch8_train_all_v16_speedup.yaml
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v16_speedup.yaml
+#   多卡并行:
+#     ... --parallel -1
+#
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v16_speedup"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v16_speedup"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  - label: "v16_ultimate_fast"
+    dir_name: "model_small_5deg_v16_ultimate_fast"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16_ultimate_fast"
+    mode_desc: "Pitch3+StepLR+dual_pitch"
+
+  - label: "v16_pitch3_signflip_fast"
+    dir_name: "model_small_5deg_v16_pitch3_signflip_fast"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16_pitch3_signflip_fast"
+    mode_desc: "Pitch3+sign_flip"
+
+  - label: "v16_pitch3_aug_fast"
+    dir_name: "model_small_5deg_v16_pitch3_aug_fast"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16_pitch3_aug_fast"
+    mode_desc: "Pitch3+Aug 对照"
+
+  - label: "v16_cosine_ultimate_fast"
+    dir_name: "model_small_5deg_v16_cosine_ultimate_fast"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v16_cosine_ultimate_fast"
+    mode_desc: "Cosine+dual_pitch"

@@ -1,0 +1,100 @@
+# V18 Quick PyTorch 泛化评估配置 — Pitch 泛化突破
+#
+# 用法:
+#   USE_DRCV_BACKEND=1 HF_HUB_OFFLINE=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_generalization_all_v18_quick.yaml
+#   多卡并行:
+#     ... --parallel -1
+#   快速评估 (每隔4帧采样):
+#     ... --eval_sample_step 4
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v18_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_eval_all_v18_quick"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 3600
+
+models:
+  # === V18 Quick Pitch 泛化突破 ===
+
+  # A. sign-flip 强化 + Pitch 聚焦 (首选)
+  - label: "v18-signflip-pitch-focus"
+    dir_name: "model_small_5deg_v18_signflip_pitch_focus_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v18-signflip-pitch-focus"
+    mode_desc: "V18-A: sign_flip(0.20)+Pitch2.0 (首选)"
+
+  # B. 大角度 + Pitch 强化
+  - label: "v18-angle8-pitch"
+    dir_name: "model_small_8deg_v18_angle8_pitch_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 8
+    z_voxels: 10
+    version: "v18-angle8-pitch"
+    mode_desc: "V18-B: 8deg+sign_flip(0.20)+Pitch2.5"
+
+  # C. 混合增强 + 高 per-axis 扰动
+  - label: "v18-hybrid-aug"
+    dir_name: "model_small_5deg_v18_hybrid_aug_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v18-hybrid-aug"
+    mode_desc: "V18-C: sign_flip(0.20)+perturb(0.15,2.5°)+per_axis(0.5)"
+
+  # D. StepLR + sign-flip + Pitch (调度器消融)
+  - label: "v18-step-signflip-pitch"
+    dir_name: "model_small_5deg_v18_step_signflip_pitch_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    rotation_only: 1
+    use_drcv: 1
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 10
+    version: "v18-step-signflip-pitch"
+    mode_desc: "V18-D: StepLR+sign_flip(0.20)+Pitch2.0"
+
+# ============================================================================
+# V18 Quick 消融矩阵 (4组, 全部 DRCV)
+# ============================================================================
+#
+#   实验                       | sign_flip | Pitch loss | angle | Backend  | Z   | LR调度
+#   ---------------------------+-----------+------------+-------+----------+-----+---------
+#   v18-signflip-pitch-focus   | 0.20      | 2.0x       | 5°    | DRCV     | 10  | Cosine
+#   v18-angle8-pitch           | 0.20      | 2.5x       | 8°    | DRCV     | 10  | Cosine
+#   v18-hybrid-aug             | 0.20      | 2.0x       | 5°    | DRCV     | 10  | Cosine
+#   v18-step-signflip-pitch    | 0.20      | 2.0x       | 5°    | DRCV     | 10  | Step

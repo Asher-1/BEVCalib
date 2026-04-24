@@ -1,0 +1,198 @@
+# BEVCalib V16 Quick 训练配置 — 综合最优策略 (DrInfer 兼容)
+#
+# V16 设计哲学:
+#   基于 V8~V14 共 33 个模型的完整评估数据, 提炼最优配置组合:
+#
+#   核心发现 (来自 CROSS_VERSION_COMPARISON.md):
+#     1. Z=10 是最有效的单因素改善 (Seq02 ↓28.5%)
+#     2. CosineAnnealing + 轻度增强 对 Seq02 效果最好 (1.275° → 1.009°, ↓20.9%)
+#     3. Pitch3 权重在 quick 模式下反伤 Seq02 (1.071° → 1.273°), 全量时有效
+#     4. scatter-mean + concat 是 DrInfer 已验证的最佳组合 (2.03x 加速, < 0.005° 精度差)
+#
+#   Quick 版本策略:
+#     - 基座: Z=10 + CosineAnnealing + 轻度增强 (v12-z10-cosine-aug 最佳 Seq02 配方)
+#     - 不加 Pitch3 权重 (quick 数据量不足时反效果)
+#     - 消融: scatter-mean vs scatter-sum, 有/无 pitch3
+#
+# Baseline 参照:
+#   - v12-z10-cosine-aug:   整体 0.595°, Seq02 1.009° (quick 最佳 Seq02)
+#   - v12-z10-pitch3-aug:   整体 0.545°, Seq02 1.113° (quick 最佳整体)
+#   - all-v8-z10-pitch3:    整体 0.251°, Seq02 1.076° (全量冠军)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v16_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 2.0              # Z=10 (10个Z-voxel, 关键改善因素)
+    USE_DRCV_BACKEND: 1
+    HF_HUB_OFFLINE: 1
+
+  params:
+    # === 扰动范围 ===
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    # === 训练基础配置 ===
+    batch_size: 16
+    learning_rate: 2e-4                 # V16 LR消融验证: 2e-4 优于 1e-4 (0.15° vs 0.17°)
+
+    # === 分布式训练 (DDP) ===
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+
+    # === 模型配置 ===
+    use_compile: false
+    rotation_only: true
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+
+    # === 回归头 & 损失类型 ===
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # === 正则化 ===
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # === 训练扰动策略 ===
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # === 学习率调度 (V16核心: CosineAnnealing) ===
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 50
+    cosine_Tmult: 2
+    warmup_epochs: 10
+    backbone_lr_scale: 0.1
+
+    # === 数据增强 (V16核心: 轻度增强 + 双模式pitch几何增强) ===
+    augment_pc_jitter: 0.02         # 点云高斯噪声 σ=0.02m
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.1       # 颜色抖动 10%
+    # Pitch增强: 已修复Y→X轴旋转bug, V14失败的真因是旋转轴错误
+    augment_pitch_flip_prob: 0.0    # 模式1: 随机X轴扰动 (per experiment)
+    augment_pitch_flip_max_deg: 2.0 # 扰动范围 ±2° (覆盖实际安装范围 ±1.6°)
+    augment_pitch_sign_flip_prob: 0.0  # 模式2: 精确pitch符号反转 (per experiment)
+
+    # === 训练控制 ===
+    early_stopping_patience: 30
+    seed: 42
+
+    # === Quick模式加速参数 ===
+    max_frames_per_seq: 500
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    # === DrInfer 兼容配置 ===
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    # === 运行模式 ===
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # V16 消融矩阵: 双模式 Pitch 增强 (旋转轴已修复: Y→X)
+  #
+  # 核心发现:
+  #   1. Seq02 错误根因: camera-LiDAR pitch 安装角度反转 (R[0,1]符号翻转)
+  #   2. V14 pflip 失败真因: 旋转轴错误 (Y轴不影响pitch!), 不是参数太激进
+  #   3. 修复后提供两种互补模式:
+  #      - 模式1 (perturb): X轴随机旋转 ±max_deg° → 增加几何多样性
+  #      - 模式2 (sign_flip): 精确反转 pitch 符号 → 直接生成 Seq02-like 样本
+  # =========================================================================
+
+  # 0. 对照组: 无pitch增强 (复现 v12-z10-cosine-aug 基线)
+  - name: "v16_baseline"
+    description: "V16 Quick: Z10+Cosine+Aug (对照组, 无pitch增强)"
+    dataset: "all"
+    version: "v16_baseline_quick"
+    params:
+      scatter_reduce: "mean"
+      axis_weights: "1.0,1.0,1.0"
+
+  # 1. 模式2单独: pitch sign flip (最精准的 Seq02 增强)
+  - name: "v16_sign_flip"
+    description: "V16 Quick: +sign_flip(0.15) (精确反转pitch符号)"
+    dataset: "all"
+    version: "v16_sign_flip_quick"
+    params:
+      scatter_reduce: "mean"
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_sign_flip_prob: 0.15
+
+  # 2. 模式1单独: pitch X-axis 扰动 (修复后的几何增强)
+  - name: "v16_perturb"
+    description: "V16 Quick: +perturb(0.2,2°) (X轴随机扰动)"
+    dataset: "all"
+    version: "v16_perturb_quick"
+    params:
+      scatter_reduce: "mean"
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_flip_prob: 0.2
+      augment_pitch_flip_max_deg: 2.0
+
+  # 3. 双模式融合: sign_flip + perturb (两种模式联合)
+  - name: "v16_dual"
+    description: "V16 Quick: +sign_flip(0.1)+perturb(0.15,2°) (双模式融合)"
+    dataset: "all"
+    version: "v16_dual_quick"
+    params:
+      scatter_reduce: "mean"
+      axis_weights: "1.0,1.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.0
+
+  # 4. 双模式 + Pitch3 loss: 终极配方
+  - name: "v16_dual_pitch3"
+    description: "V16 Quick: +sign_flip(0.1)+perturb(0.15,2°)+Pitch3 (终极)"
+    dataset: "all"
+    version: "v16_dual_pitch3_quick"
+    params:
+      scatter_reduce: "mean"
+      axis_weights: "1.0,3.0,1.0"
+      augment_pitch_sign_flip_prob: 0.1
+      augment_pitch_flip_prob: 0.15
+      augment_pitch_flip_max_deg: 2.0
+
+# ============================================================================
+# V16 Quick 消融矩阵 (5组, 全部 Z=10 + Cosine + Aug, DrInfer 兼容)
+# ============================================================================
+#
+#   实验                | sign_flip | perturb(p,deg) | Pitch3 | 验证目标
+#   --------------------+-----------+----------------+--------+-------------------
+#   0 v16_baseline      | No        | No             | No     | V12基线复现
+#   1 v16_sign_flip     | 0.15      | No             | No     | 符号翻转单独效果
+#   2 v16_perturb       | No        | 0.2, 2°        | No     | X轴扰动单独效果
+#   3 v16_dual          | 0.1       | 0.15, 2°       | No     | 双模式联合效果
+#   4 v16_dual_pitch3   | 0.1       | 0.15, 2°       | Yes    | 双模式+loss联合
+#
+# V16 vs V14 关键差异:
+#   旋转轴:  Y-axis → X-axis (修复致命BUG: Y轴完全不影响pitch!)
+#   新增:    sign_flip 模式 (精确反转, 不依赖随机碰巧)
+#   max_deg: 6° → 2° (匹配真实安装 pitch ±1.6°)
+#   搭配:    Cosine + pc_jitter + color_jitter (V14 无此基础)
+#
+# 预期 (基于修复后的正确旋转轴):
+#   v16_baseline:      ~0.59°, Seq02 ~1.01° (复现V12基线)
+#   v16_sign_flip:     ~0.58°, Seq02 ~0.55° (sign_flip直接生成反向样本)
+#   v16_perturb:       ~0.58°, Seq02 ~0.80° (扰动部分改善)
+#   v16_dual:          ~0.57°, Seq02 ~0.50° (双模式最优)
+#   v16_dual_pitch3:   ~0.54°, Seq02 ~0.55° (加P3可能略伤Seq02)
