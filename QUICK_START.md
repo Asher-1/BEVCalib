@@ -125,7 +125,7 @@ python run_generalization_eval.py --config configs/eval_generalization_all.yaml 
 python run_generalization_eval.py --config configs/eval_generalization_all.yaml \
   --eval_sample_step 2
 python run_generalization_eval.py --config configs/eval_generalization_all.yaml \
-  --eval_max_frames_per_seq 10000
+  --parallel -1 --eval_max_frames_per_seq 400
 ```
 
 YAML 中可在 `eval_params` 里设置采样与扰动范围（命令行 `--eval_sample_step` / `--eval_max_frames_per_seq` 会覆盖配置中的全局采样）：

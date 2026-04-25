@@ -476,6 +476,8 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
         cmd.extend(["--eval_max_frames_per_seq", str(EVAL_MAX_FRAMES_PER_SEQ)])
     if mcfg.get("data_balance"):
         cmd.extend(["--data_balance", str(mcfg["data_balance"])])
+    if mcfg.get("zero_image"):
+        cmd.append("--zero_image")
 
     return cmd, env, ckpt_path
 

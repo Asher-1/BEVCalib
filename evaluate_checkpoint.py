@@ -408,6 +408,8 @@ def evaluate_checkpoint(args):
     print(f"评估 Checkpoint: {args.ckpt_path}")
     if args.output_dir:
         print(f"输出目录: {args.output_dir}")
+    if getattr(args, 'zero_image', False):
+        print("⚠️  ABLATION MODE: --zero_image 已启用, 图像输入将置零 (仅LiDAR分支)")
     print("=" * 80)
     
     if not torch.cuda.is_available():
@@ -634,6 +636,8 @@ def evaluate_checkpoint(args):
             )
             
             resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+            if getattr(args, 'zero_image', False):
+                resize_imgs = torch.zeros_like(resize_imgs)
             pcs_np = np.array(pcs)[:, :, :3] if args.xyz_only > 0 else np.array(pcs)
             pcs = torch.from_numpy(pcs_np).float().to(device)
             gt_T_to_camera_torch = torch.from_numpy(gt_T_to_camera_np).float().to(device)
@@ -1249,6 +1253,8 @@ def compare_checkpoints(args):
             K_np = np.array(intrinsics)
 
             resize_imgs = torch.from_numpy(imgs_arr).permute(0, 3, 1, 2).float().to(device)
+            if getattr(args, 'zero_image', False):
+                resize_imgs = torch.zeros_like(resize_imgs)
             pcs_t = torch.from_numpy(pcs_np).float().to(device)
             gt_T_t = torch.from_numpy(gt_T_np).float().to(device)
             init_T_t = torch.from_numpy(init_T_np).float().to(device)
@@ -2052,6 +2058,8 @@ def main():
     parser.add_argument("--data_balance", type=int, default=0,
                        help="Balanced evaluation mode (0=micro only, 1/2=macro primary). "
                             "When >0, PRIMARY_METRIC uses macro-averaged (per-sequence equal weight).")
+    parser.add_argument("--zero_image", action='store_true', default=False,
+                       help="Zero-out image input (ablation: test LiDAR-only without camera branch)")
     
     args = parser.parse_args()
 

@@ -2,6 +2,10 @@
 BEVCalib inference wrapper -- clean forward path without loss computation.
 Used for model export (drinfer/ONNX) and standalone inference benchmarking.
 
+Includes SequenceMedianAggregator for production deployment: accumulates
+per-frame predictions across a sequence, then returns a robust aggregated
+calibration via rotation matrix median (SVD-projected) + translation median.
+
 IMPORTANT: set BEV_ZBOUND_STEP env var *before* importing this module so that
 bev_settings.py picks up the correct Z resolution.
 """
@@ -10,6 +14,7 @@ import sys
 import torch
 import torch.nn as nn
 import numpy as np
+from collections import deque
 
 _KITTI_DIR = os.path.join(os.path.dirname(__file__), '..', 'kitti-bev-calib')
 if _KITTI_DIR not in sys.path:
@@ -113,6 +118,119 @@ class BEVCalibInference(nn.Module):
             T_gt_expected[:, :3, 3] = init_T_to_camera[:, :3, 3]
 
         return T_gt_expected
+
+
+class SequenceMedianAggregator:
+    """
+    Production-ready sequence-level median aggregator for BEVCalib predictions.
+
+    Accumulates per-frame 4x4 transform predictions and produces a robust
+    aggregate via element-wise rotation matrix median (SVD-projected to SO(3))
+    and element-wise translation median.
+
+    Usage (streaming mode -- accumulate then query):
+        agg = SequenceMedianAggregator(min_frames=5, max_frames=100)
+        for frame in sequence:
+            pred_T = model(img, pc, init_T, post_T, K)
+            agg.add(pred_T)              # (B, 4, 4) or (4, 4) numpy/torch
+            if agg.ready:
+                calib = agg.aggregate()  # (4, 4) numpy
+        agg.reset()                      # start new sequence
+
+    Usage (batch mode -- all frames at once):
+        Ts = [model(img_i, ...).cpu().numpy() for img_i in seq]
+        calib = SequenceMedianAggregator.aggregate_batch(Ts)
+    """
+
+    def __init__(self, min_frames=5, max_frames=200):
+        self.min_frames = min_frames
+        self.max_frames = max_frames
+        self._buffer = deque(maxlen=max_frames)
+
+    def reset(self):
+        self._buffer.clear()
+
+    def add(self, pred_T):
+        """Add one or more predictions. Accepts (4,4), (B,4,4), numpy or torch."""
+        if isinstance(pred_T, torch.Tensor):
+            pred_T = pred_T.detach().cpu().numpy()
+        if pred_T.ndim == 2:
+            self._buffer.append(pred_T.copy())
+        elif pred_T.ndim == 3:
+            for i in range(pred_T.shape[0]):
+                self._buffer.append(pred_T[i].copy())
+
+    @property
+    def ready(self):
+        return len(self._buffer) >= self.min_frames
+
+    @property
+    def count(self):
+        return len(self._buffer)
+
+    def aggregate(self):
+        """Return the SVD-projected rotation median + translation median as (4,4)."""
+        if not self._buffer:
+            raise RuntimeError("No predictions to aggregate. Call add() first.")
+        return self.aggregate_batch(list(self._buffer))
+
+    @staticmethod
+    def _rotation_matrix_median_svd(Rs):
+        """Element-wise median of rotation matrices + SVD projection to SO(3)."""
+        R_med_raw = np.median(Rs, axis=0)
+        U, _, Vt = np.linalg.svd(R_med_raw)
+        R_median = U @ Vt
+        if np.linalg.det(R_median) < 0:
+            U[:, -1] *= -1
+            R_median = U @ Vt
+        return R_median
+
+    @staticmethod
+    def aggregate_batch(pred_Ts):
+        """
+        Compute median calibration from a list of (4,4) transform arrays.
+
+        Args:
+            pred_Ts: list of numpy (4,4) LiDAR->Camera transforms
+
+        Returns:
+            median_T: (4,4) numpy, the aggregated calibration
+        """
+        Ts = np.array(pred_Ts)
+        Rs = Ts[:, :3, :3]
+        ts = Ts[:, :3, 3]
+
+        R_median = SequenceMedianAggregator._rotation_matrix_median_svd(Rs)
+        t_median = np.median(ts, axis=0)
+
+        median_T = np.eye(4, dtype=np.float64)
+        median_T[:3, :3] = R_median
+        median_T[:3, 3] = t_median
+        return median_T
+
+    def get_confidence(self):
+        """
+        Return a per-axis consistency score (lower = more confident).
+        Uses the angular spread of predictions in axis-angle representation.
+        """
+        if len(self._buffer) < 2:
+            return None
+        from scipy.spatial.transform import Rotation as R
+        median_T = self.aggregate()
+        R_med = median_T[:3, :3]
+        angles = []
+        for T in self._buffer:
+            R_delta = T[:3, :3] @ R_med.T
+            rotvec = R.from_matrix(R_delta).as_rotvec()
+            angles.append(np.degrees(rotvec))
+        angles = np.array(angles)
+        return {
+            'roll_std': float(np.std(angles[:, 0])),
+            'pitch_std': float(np.std(angles[:, 1])),
+            'yaw_std': float(np.std(angles[:, 2])),
+            'total_std': float(np.std(np.linalg.norm(angles, axis=1))),
+            'n_frames': len(self._buffer),
+        }
 
 
 def _detect_use_mlp_head(state_dict):
@@ -402,3 +520,32 @@ def load_bevcalib_inference(
         print(f"[load] Token packing enabled: max_attn_tokens={max_attn_tokens} "
               f"(BEV {bev_h}x{bev_w}={bev_h * bev_w})")
     return wrapper, epoch
+
+
+def load_bevcalib_with_aggregation(
+    ckpt_path: str,
+    min_frames=5,
+    max_frames=200,
+    **kwargs,
+):
+    """
+    Load BEVCalib + create a SequenceMedianAggregator for production deployment.
+
+    Returns:
+        wrapper:    BEVCalibInference model
+        aggregator: SequenceMedianAggregator (call .add() per frame, .aggregate() for result)
+        epoch:      training epoch
+
+    Example:
+        model, agg, epoch = load_bevcalib_with_aggregation("ckpt_best_val.pth")
+        for img, pc, init_T, post_T, K in sequence_frames:
+            pred_T = model(img, pc, init_T, post_T, K)
+            agg.add(pred_T)
+        calibration = agg.aggregate()       # robust (4,4) result
+        confidence = agg.get_confidence()   # per-axis std in degrees
+        agg.reset()                         # ready for next sequence
+    """
+    wrapper, epoch = load_bevcalib_inference(ckpt_path, **kwargs)
+    aggregator = SequenceMedianAggregator(
+        min_frames=min_frames, max_frames=max_frames)
+    return wrapper, aggregator, epoch
