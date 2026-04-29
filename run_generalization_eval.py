@@ -468,6 +468,8 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
         cmd.extend(["--voxel_mode", str(mcfg["voxel_mode"])])
     if mcfg.get("scatter_reduce"):
         cmd.extend(["--scatter_reduce", str(mcfg["scatter_reduce"])])
+    if mcfg.get("fuser_type"):
+        cmd.extend(["--fuser_type", str(mcfg["fuser_type"])])
     if mcfg.get("to_bev_mode"):
         cmd.extend(["--to_bev_mode", str(mcfg["to_bev_mode"])])
     if EVAL_SAMPLE_STEP is not None:

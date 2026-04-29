@@ -1,0 +1,218 @@
+# BEVCalib V22 诊断实验 — 梯度分析驱动的优化 (v2 修正版)
+#
+# 背景发现 (来自 analyze_gradient_flow.py):
+#   1. backbone_lr_scale=0.1 导致 backbone 有效更新速度仅为 head 的 1/55
+#   2. rotation_pred 2个参数吃掉 90% 的 head 梯度 (L2=70~97)
+#   3. rotation_only 模式丢失了平移梯度的隐性监督
+#   4. 官方仓库使用统一 LR(5e-5) + 联合优化 + 大扰动范围(20°/1.5m)
+#
+# 实验设计 (7组 Quick 实验, 本地 8GPU, ~2h/experiment):
+#
+#   Phase A: Backbone LR 消融 (保持 lr=1e-4, rotation_only, 仅改 backbone_lr_scale)
+#     A1: backbone_lr_scale=0.1 → backbone=1e-5   (v21 基线)
+#     A2: backbone_lr_scale=0.5 → backbone=5e-5   (= 官方 backbone 绝对值)
+#     A3: backbone_lr_scale=1.0 → backbone=1e-4   (统一 LR, 超过官方)
+#
+#   Phase B: 官方策略递进 (lr=5e-5, scale=1.0, 逐步靠近官方完整配置)
+#     B1: lr=5e-5, scale=1.0, rotation_only        (官方 LR + 仅旋转)
+#     B2: lr=5e-5, scale=1.0, joint, 5°/0.15m      (加入联合优化, 小扰动)
+#     B3: lr=5e-5, scale=1.0, joint, 20°/1.5m      (完整官方配置复现)
+#
+#   Phase C: 交叉验证
+#     C1: lr=1e-4, scale=0.5, joint, 5°/0.15m      (高 LR + 联合优化)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v22_diagnosis.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v22_diagnosis.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 5
+  max_retries: 2
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 16
+    ddp_auto_scale: 0
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 3
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.03
+    augment_intrinsic_cxcy: 0.03
+
+    max_frames_per_seq: 10000
+    num_epochs: 400
+    eval_epoches: 50
+    early_stopping_patience: 30
+    seed: 42
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # Phase A: Backbone LR 消融
+  #   保持 lr=1e-4, rotation_only=true, 仅改 backbone_lr_scale
+  # =========================================================================
+
+  # A1: v21 基线 (backbone=1e-5)
+  - name: "v22_A1_lr010_rotonly"
+    description: "A1基线: backbone=1e-5 (lr=1e-4, scale=0.1)"
+    dataset: "all"
+    version: "v22_A1_lr010_rotonly"
+
+  # A2: backbone 匹配官方绝对值 (backbone=5e-5)
+  - name: "v22_A2_lr050_rotonly"
+    description: "A2: backbone=5e-5 (lr=1e-4, scale=0.5, =官方backbone LR)"
+    dataset: "all"
+    version: "v22_A2_lr050_rotonly"
+    params:
+      backbone_lr_scale: 0.5
+
+  # A3: 统一 LR (backbone=head=1e-4, 超过官方)
+  - name: "v22_A3_lr100_rotonly"
+    description: "A3: backbone=1e-4 (统一LR, 是官方的2x)"
+    dataset: "all"
+    version: "v22_A3_lr100_rotonly"
+    params:
+      backbone_lr_scale: 1.0
+
+  # =========================================================================
+  # Phase B: 官方策略递进
+  #   lr=5e-5, scale=1.0 (统一 LR = 官方), 逐步加入联合优化和大扰动
+  # =========================================================================
+
+  # B1: 官方 LR + 仅旋转 (vs A2 对比: 相同 backbone LR, 不同 head LR)
+  - name: "v22_B1_lr5e5_rotonly"
+    description: "B1: 全网络5e-5, rotation_only (官方LR策略)"
+    dataset: "all"
+    version: "v22_B1_lr5e5_rotonly"
+    params:
+      learning_rate: 5e-5
+      backbone_lr_scale: 1.0
+
+  # B2: 官方 LR + 联合优化 + 小扰动
+  - name: "v22_B2_lr5e5_joint_5deg"
+    description: "B2: 全网络5e-5, 联合优化, 5°/0.15m, FP32(官方同)"
+    dataset: "all"
+    version: "v22_B2_lr5e5_joint_5deg"
+    params:
+      learning_rate: 5e-5
+      backbone_lr_scale: 1.0
+      rotation_only: false
+      no_amp: 1
+
+  # B3: 完整官方配置复现 (5e-5 + 联合 + 20°/1.5m + 无增强 + 简化loss)
+  - name: "v22_B3_official_replica"
+    description: "B3: 完整官方配置 (5e-5, joint, 20°/1.5m, 无增强, FP32)"
+    dataset: "all"
+    version: "v22_B3_official_replica"
+    params:
+      learning_rate: 5e-5
+      backbone_lr_scale: 1.0
+      rotation_only: false
+      no_amp: 1
+      angle_range_deg: 20
+      trans_range: 1.5
+      enable_axis_loss: false
+      weight_axis_rotation: 0.0
+      augment_pitch_sign_flip_prob: 0.0
+      augment_pitch_flip_prob: 0.0
+      augment_color_jitter: 0.0
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_intrinsic: 0.0
+      augment_intrinsic_cxcy: 0.0
+
+  # =========================================================================
+  # Phase C: 交叉验证
+  #   解答: 高 LR (1e-4) + 联合优化是否比官方 LR (5e-5) 更好?
+  # =========================================================================
+
+  # C1: 高 LR + 联合优化 (vs B2 对比: 相同联合优化, 不同 LR)
+  - name: "v22_C1_lr1e4_joint_5deg"
+    description: "C1: backbone=5e-5 (lr=1e-4,scale=0.5), 联合优化, 5°/0.15m, FP32"
+    dataset: "all"
+    version: "v22_C1_lr1e4_joint_5deg"
+    params:
+      backbone_lr_scale: 0.5
+      rotation_only: false
+      no_amp: 1
+
+# ============================================================================
+# V22 实验矩阵 (v2 修正版)
+# ============================================================================
+#
+#   | 实验 | Base LR | BB Scale | BB LR   | Head LR | Joint | Angle | Trans | Aug  | Axis Loss |
+#   |------|---------|----------|---------|---------|-------|-------|-------|------|-----------|
+#   | A1   | 1e-4    | 0.1      | 1e-5    | 1e-4    | No    | 5°    | 0.15  | v21  | Yes       |
+#   | A2   | 1e-4    | 0.5      | 5e-5 ★  | 1e-4    | No    | 5°    | 0.15  | v21  | Yes       |
+#   | A3   | 1e-4    | 1.0      | 1e-4    | 1e-4    | No    | 5°    | 0.15  | v21  | Yes       |
+#   | B1   | 5e-5    | 1.0      | 5e-5 ★  | 5e-5    | No    | 5°    | 0.15  | v21  | Yes       |
+#   | B2   | 5e-5    | 1.0      | 5e-5 ★  | 5e-5    | Yes   | 5°    | 0.15  | v21  | Yes       |
+#   | B3   | 5e-5    | 1.0      | 5e-5 ★  | 5e-5    | Yes   | 20°   | 1.5   | None | No        |
+#   | C1   | 1e-4    | 0.5      | 5e-5 ★  | 1e-4    | Yes   | 5°    | 0.15  | v21  | Yes       |
+#
+#   ★ = 匹配官方 backbone LR
+#
+# 关键对比链:
+#   1. Backbone LR 影响:      A1 → A2 → A3       (控制变量: backbone_lr_scale)
+#   2. 绝对 LR 影响:           A3 vs B1            (统一LR: 1e-4 vs 5e-5)
+#   3. Head LR 差异:           A2 vs B1            (相同 BB LR, Head 1e-4 vs 5e-5)
+#   4. 联合优化贡献:           B1 vs B2            (控制: 仅加入 translation)
+#   5. 扰动范围 + 极简:        B2 vs B3            (控制: 扰动 + loss + aug)
+#   6. 高LR联合 vs 官方联合:   C1 vs B2            (Head 1e-4 vs 5e-5, 都联合+5°)
+#   7. 联合优化 @ 不同 LR:     A2 vs C1            (相同 LR, 仅加 joint)
+#
+# 预期:
+#   - A2 > A1: backbone LR 提升直接改善 (验证梯度诊断)
+#   - A3 > A2: 更高 backbone LR 进一步提升, 或 backbone 过拟合
+#   - B1 vs A2: head LR 降低是否影响收敛? (5e-5 vs 1e-4)
+#   - B2 > B1: 联合优化提供额外梯度信号, 尤其改善 Pitch
+#   - B3: 官方能达到什么水平? (小数据 + 大扰动可能不匹配)
+#   - C1 vs B2: 高 head LR + 联合优化可能是最佳组合

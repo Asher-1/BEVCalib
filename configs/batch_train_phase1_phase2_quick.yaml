@@ -1,0 +1,136 @@
+# Phase 1 + Phase 2 对照实验矩阵
+#
+# 基于最佳模型 v20-v8recipe-pitch-wt3 配置 (spconv, z=5, wt=1:3:1)
+# 4 个实验:
+#   1. baseline:     concat fuser, no cam dropout (对照组)
+#   2. diff-only:    diff fuser, no cam dropout (Phase 1)
+#   3. dropout-only: concat fuser, cam_drop=0.3 (Phase 2)
+#   4. diff+dropout: diff fuser, cam_drop=0.3 (Phase 1+2)
+#
+# 用法:
+#   bash batch_train.sh configs/batch_train_phase1_phase2.yaml
+#   bash batch_train.sh --dry-run configs/batch_train_phase1_phase2.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+
+    max_frames_per_seq: 500
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+
+    fuser_type: "concat"
+    cam_drop_prob: 0.0
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # Exp 1: Baseline (复现 v20-v8recipe-pitch-wt3)
+  # =========================================================================
+  - name: "phase12_baseline_quick"
+    description: "对照组: concat fuser, no cam dropout"
+    dataset: "all"
+    version: "phase12_baseline_quick"
+
+  # =========================================================================
+  # Exp 2: Phase 1 — BEV Difference Map only
+  # =========================================================================
+  - name: "phase12_diff_only_quick"
+    description: "Phase 1: BEVDiffFuser (pc + |cam-pc| + cam*pc)"
+    dataset: "all"
+    version: "phase12_diff_only_quick"
+    params:
+      fuser_type: "diff"
+
+  # =========================================================================
+  # Exp 3: Phase 2 — Camera Branch Dropout only
+  # =========================================================================
+  - name: "phase12_dropout_only_quick"
+    description: "Phase 2: concat fuser + cam_drop=0.3"
+    dataset: "all"
+    version: "phase12_dropout_only_quick"
+    params:
+      cam_drop_prob: 0.3
+
+  # =========================================================================
+  # Exp 4: Phase 1 + Phase 2 combined
+  # =========================================================================
+  - name: "phase12_diff_dropout_quick"
+    description: "Phase 1+2: BEVDiffFuser + cam_drop=0.3"
+    dataset: "all"
+    version: "phase12_diff_dropout_quick"
+    params:
+      fuser_type: "diff"
+      cam_drop_prob: 0.3
+
+# ============================================================================
+# 实验矩阵总结
+# ============================================================================
+#
+#   | 实验              | Fuser  | Cam Dropout | 预期         |
+#   |-------------------|--------|-------------|--------------|
+#   | baseline          | concat | 0           | ~0.646° (参考) |
+#   | diff-only         | diff   | 0           | < 0.60°      |
+#   | dropout-only      | concat | 0.3         | < 0.64°      |
+#   | diff+dropout      | diff   | 0.3         | < 0.55°      |
+#
+# 评估:
+#   对每个模型运行 test_data_v2 泛化评估 + Camera bypass 实验

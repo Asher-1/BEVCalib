@@ -22,7 +22,7 @@ global:
 defaults:
   env:
     BEV_ZBOUND_STEP: 4.0           # Z=5 分支默认；Z=10 实验在条目内改为 2.0
-    USE_DRCV_BACKEND: 1
+    USE_DRCV_BACKEND: 0
     HF_HUB_OFFLINE: 1
 
   params:

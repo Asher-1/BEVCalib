@@ -66,24 +66,29 @@ class LSS(nn.Module):
                      post_cam2ego_rot,
                      post_cam2ego_trans,
                      ):
-        img_rots, img_trans, cam_intrins, img_post_rots, img_post_trans = cam2ego_rot, cam2ego_trans, cam_intrins, post_cam2ego_rot, post_cam2ego_trans
-        B, N, _ = img_trans.shape
-        # restore data augmentation and convert to original image space
-        points = self.frustum - img_post_trans.view(B, N, 1, 1, 1, 3) # (B, N, D, fH, fW, 3)
-        points = torch.linalg.inv(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
-        # before : (B, N, D, fH, fW, (x, y, z), 1), image space
-        points = torch.cat(
-            (
-                points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3], # x * z, y * z
-                points[:, :, :, :, :, 2:3] # z
-            ),
-            5,
-        )
-        # after : (B, N, D, fH, fW, (x * z, y * z, z), 1), transfrom from image space to camera space, the frustum transforms from cuboid to pyramid. 
+        with torch.cuda.amp.autocast(enabled=False):
+            img_rots = cam2ego_rot.float()
+            img_trans = cam2ego_trans.float()
+            cam_intrins = cam_intrins.float()
+            img_post_rots = post_cam2ego_rot.float()
+            img_post_trans = post_cam2ego_trans.float()
+            B, N, _ = img_trans.shape
+            # restore data augmentation and convert to original image space
+            points = self.frustum.float() - img_post_trans.view(B, N, 1, 1, 1, 3) # (B, N, D, fH, fW, 3)
+            points = torch.linalg.inv(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+            # before : (B, N, D, fH, fW, (x, y, z), 1), image space
+            points = torch.cat(
+                (
+                    points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3], # x * z, y * z
+                    points[:, :, :, :, :, 2:3] # z
+                ),
+                5,
+            )
+            # after : (B, N, D, fH, fW, (x * z, y * z, z), 1), transfrom from image space to camera space, the frustum transforms from cuboid to pyramid. 
 
-        combine = img_rots.matmul(torch.linalg.inv(cam_intrins))
-        points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
-        points += img_trans.view(B, N, 1, 1, 1, 3) # To ego space
+            combine = img_rots.matmul(torch.linalg.inv(cam_intrins))
+            points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
+            points += img_trans.view(B, N, 1, 1, 1, 3) # To ego space
 
         return points 
 
@@ -162,23 +167,28 @@ class GaussianLSS(nn.Module):
                      post_cam2ego_rot,
                      post_cam2ego_trans,
                      ):
-        img_rots, img_trans, cam_intrins, img_post_rots, img_post_trans = cam2ego_rot, cam2ego_trans, cam_intrins, post_cam2ego_rot, post_cam2ego_trans
-        B, N, _ = img_trans.shape
-        points = self.frustum - img_post_trans.view(B, N, 1, 1, 1, 3) # (B, N, D, fH, fW, 3)
-        points = torch.linalg.inv(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
-        # before : (B, N, D, fH, fW, (x, y, z), 1), image space
-        points = torch.cat(
-            (
-                points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3], # x * z, y * z
-                points[:, :, :, :, :, 2:3] # z
-            ),
-            5,
-        )
-        # after : (B, N, D, fH, fW, (x * z, y * z, z), 1), transfrom from image space to camera space, the frustum transforms from cuboid to pyramid. 
+        with torch.cuda.amp.autocast(enabled=False):
+            img_rots = cam2ego_rot.float()
+            img_trans = cam2ego_trans.float()
+            cam_intrins = cam_intrins.float()
+            img_post_rots = post_cam2ego_rot.float()
+            img_post_trans = post_cam2ego_trans.float()
+            B, N, _ = img_trans.shape
+            points = self.frustum.float() - img_post_trans.view(B, N, 1, 1, 1, 3) # (B, N, D, fH, fW, 3)
+            points = torch.linalg.inv(img_post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+            # before : (B, N, D, fH, fW, (x, y, z), 1), image space
+            points = torch.cat(
+                (
+                    points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3], # x * z, y * z
+                    points[:, :, :, :, :, 2:3] # z
+                ),
+                5,
+            )
+            # after : (B, N, D, fH, fW, (x * z, y * z, z), 1), transfrom from image space to camera space, the frustum transforms from cuboid to pyramid. 
 
-        combine = img_rots.matmul(torch.linalg.inv(cam_intrins))
-        points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
-        points += img_trans.view(B, N, 1, 1, 1, 3) # To ego space
+            combine = img_rots.matmul(torch.linalg.inv(cam_intrins))
+            points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
+            points += img_trans.view(B, N, 1, 1, 1, 3) # To ego space
 
         return points 
 

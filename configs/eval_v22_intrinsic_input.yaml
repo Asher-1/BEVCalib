@@ -1,0 +1,80 @@
+# V22 intrinsic_input 消融评估
+#
+# 来源: batch8_train_all_v22_intrinsic_input.yaml
+#   v22_intr_input, v22_intr_input_aug, v22_baseline
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_intrinsic_input.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_intrinsic_input.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/v22_intrinsic_input_eval"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # =========================================================================
+  # v22_intr_input — intrinsic_input + scene 增强 (无 intrinsic aug)
+  # =========================================================================
+  - label: "v22_intr_input"
+    dir_name: "model_small_5deg_v22_intr_input"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    intrinsic_input: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "intrinsic_input head + scene aug, no intrinsic aug"
+
+  # =========================================================================
+  # v22_intr_input_aug — intrinsic_input + intrinsic aug 消融
+  # =========================================================================
+  - label: "v22_intr_input_aug"
+    dir_name: "model_small_5deg_v22_intr_input_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    intrinsic_input: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "intrinsic_input + intrinsic aug (±3%)"
+
+  # =========================================================================
+  # v22_baseline — 无 intrinsic_input (scene 增强对照)
+  # =========================================================================
+  - label: "v22_baseline"
+    dir_name: "model_small_5deg_v22_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    intrinsic_input: 0
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "no intrinsic_input, scene aug only"

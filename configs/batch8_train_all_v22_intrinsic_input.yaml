@@ -1,0 +1,125 @@
+# BEVCalib V22 — 内参感知预测头
+#
+# 设计理念:
+#   V21 评估结论:
+#   - V21 内参增强(augment_intrinsic=±3%)反而让 Seq 07/08 更差(+30%/+16%)
+#   - 原因: 增强扰动BEV特征精度, 训练误差从0.12°→0.54°, 精度损失>鲁棒性收益
+#   - v21-gen-no-intr(无内参增强)在Seq 07上比gen-full好0.35°
+#
+# V22 策略:
+#   不用内参增强(不扰动BEV特征), 而是显式传入内参给prediction head
+#   模型从"盲猜内参"→"知道内参", 消除标定偏差放大
+#   架构: V20 最优(spconv+Z5+hard+sum) + intrinsic_input head
+#   增强: 保留V21的scene增强(pitch_flip/sign_flip/color), 移除intrinsic aug
+#
+# 实验矩阵:
+#   1. v22_intr_input:    intrinsic_input + scene增强(无intrinsic aug)
+#   2. v22_intr_input_aug:  intrinsic_input + scene增强 + intrinsic aug(对比)
+#   3. v22_no_intr_input: 无intrinsic_input, 只有scene增强(= v21-gen-no-intr 复现)
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # Scene augmentation (保留V21, 移除intrinsic aug)
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+
+    # 默认不使用intrinsic augmentation
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    max_frames_per_seq: 10000
+    early_stopping_patience: 30
+    seed: 42
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # 实验 1: V22 intrinsic_input + scene增强 (主实验)
+  # =========================================================================
+  # 不扰动BEV特征, 显式告诉模型内参是什么
+  # 预期: 精度接近V20(0.646°), Seq 07/08 不再恶化
+  - name: "v22_intr_input"
+    description: "V22: intrinsic_input head + scene增强(无intrinsic aug)"
+    dataset: "all"
+    version: "v22_intr_input"
+    params:
+      intrinsic_input: true
+
+  # =========================================================================
+  # 实验 2: V22 intrinsic_input + scene增强 + intrinsic aug (消融)
+  # =========================================================================
+  # 如果模型知道真实内参, intrinsic aug还有没有额外收益?
+  - name: "v22_intr_input_aug"
+    description: "V22 消融: intrinsic_input + intrinsic aug(验证组合效果)"
+    dataset: "all"
+    version: "v22_intr_input_aug"
+    params:
+      intrinsic_input: true
+      augment_intrinsic: 0.03
+      augment_intrinsic_cxcy: 0.03
+
+  # =========================================================================
+  # 实验 3: 对照 (= v21-gen-no-intr 复现, 确认baseline)
+  # =========================================================================
+  - name: "v22_baseline"
+    description: "V22 对照: scene增强, 无intrinsic_input, 无intrinsic aug"
+    dataset: "all"
+    version: "v22_baseline"

@@ -1,0 +1,117 @@
+# Phase 1+2 泛化评估配置
+#
+# 4 个对照实验模型 (基于 v20 best recipe: spconv, z=5, wt=1:3:1):
+#   1. baseline:     concat fuser, no cam dropout
+#   2. diff-only:    BEVDiffFuser, no cam dropout
+#   3. dropout-only: concat fuser, cam_drop=0.3
+#   4. diff+dropout: BEVDiffFuser + cam_drop=0.3
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_phase12.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_phase12.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/phase1_phase2"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_phase12"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # =========================================================================
+  # Exp 1: Baseline (concat fuser, no cam dropout)
+  # =========================================================================
+  - label: "phase12-baseline"
+    dir_name: "model_small_5deg_phase12_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "phase12"
+    mode_desc: "baseline: spconv, z=5, wt=1:3:1, concat fuser, no cam dropout"
+
+  # =========================================================================
+  # Exp 2: Phase 1 — BEV Difference Map only
+  # =========================================================================
+  - label: "phase12-diff-only"
+    dir_name: "model_small_5deg_phase12_diff_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "diff"
+    angle_deg: 5
+    z_voxels: 5
+    version: "phase12"
+    mode_desc: "Phase 1: BEVDiffFuser (pc + |cam-pc| + cam*pc), no cam dropout"
+
+  # =========================================================================
+  # Exp 3: Phase 2 — Camera Branch Dropout only
+  # =========================================================================
+  - label: "phase12-dropout-only"
+    dir_name: "model_small_5deg_phase12_dropout_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "phase12"
+    mode_desc: "Phase 2: concat fuser + cam_drop_prob=0.3"
+
+  # =========================================================================
+  # Exp 4: Phase 1+2 combined
+  # =========================================================================
+  - label: "phase12-diff-dropout"
+    dir_name: "model_small_5deg_phase12_diff_dropout"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "diff"
+    angle_deg: 5
+    z_voxels: 5
+    version: "phase12"
+    mode_desc: "Phase 1+2: BEVDiffFuser + cam_drop_prob=0.3"
+
+# ============================================================================
+# 评估矩阵
+# ============================================================================
+#
+#   | 模型              | Fuser  | Cam Drop | 对比基准                  |
+#   |-------------------|--------|----------|--------------------------|
+#   | baseline          | concat | 0        | v20-v8recipe-pitch-wt3   |
+#   | diff-only         | diff   | 0        | Phase 1 效果             |
+#   | dropout-only      | concat | 0.3      | Phase 2 效果             |
+#   | diff+dropout      | diff   | 0.3      | Phase 1+2 联合效果       |
+#
+# 评估完成后:
+#   1. 与 generalization_eval_test_models2_v3 中最佳模型对比
+#   2. 对每个模型额外运行 Camera bypass 实验验证 Camera 贡献

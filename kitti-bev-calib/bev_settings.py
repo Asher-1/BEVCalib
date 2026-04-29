@@ -74,6 +74,23 @@ ybound = _config["ybound"]
 zbound = _config["zbound"]
 d_conf = _config["d_conf"]
 
+# ========== 内参统计量 (intrinsic_input 归一化用) ==========
+# 从训练数据 21 个 sequence 的 P2 矩阵统计得到
+# 更换训练数据时需重新统计
+KITTI_INTRINSIC_STATS = {
+    "mean": [718.856, 718.814, 607.193, 185.216],
+    "std":  [1.0, 1.0, 1.0, 1.0],
+}
+CUSTOM_INTRINSIC_STATS = {
+    "mean": [7184.76, 7287.10, 1922.60, 1084.05],
+    "std":  [38.19, 38.35, 17.53, 13.38],
+}
+
+if DATASET_TYPE.lower() == "kitti":
+    intrinsic_stats = KITTI_INTRINSIC_STATS
+else:
+    intrinsic_stats = CUSTOM_INTRINSIC_STATS
+
 # ========== 通用参数 ==========
 down_ratio = 8
 

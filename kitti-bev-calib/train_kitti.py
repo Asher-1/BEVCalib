@@ -359,6 +359,7 @@ def parse_args():
     parser.add_argument("--step_size", type=int, default=100)
     parser.add_argument("--scheduler", type=int, default=-1)
     parser.add_argument("--pretrain_ckpt", type=str, default=None)
+    parser.add_argument("--resume_ckpt", type=str, default=None, help="Resume training from a full checkpoint (restores epoch, optimizer, scheduler, scaler)")
     parser.add_argument("--use_custom_dataset", type=int, default=0, help="使用 CustomDataset (1) 还是 KittiDataset (0)")
     # 图像尺寸参数
     parser.add_argument("--target_width", type=int, default=None, help="目标图像宽度 (默认: KITTI=704, 自定义4K=640)")
@@ -378,6 +379,8 @@ def parse_args():
     parser.add_argument("--enable_vis", type=int, default=1, help="是否启用点云投影可视化 (1=启用, 0=禁用)")
     parser.add_argument("--enable_ckpt_eval", type=int, default=1, help="是否在保存checkpoint时进行评估 (1=启用, 0=禁用)")
     parser.add_argument("--compile", type=int, default=0, help="使用 torch.compile 加速模型 (1=启用, 0=禁用)")
+    parser.add_argument("--no_amp", type=int, default=0, help="禁用 AMP 混合精度训练 (1=禁用FP16, 用FP32; 0=默认FP16)")
+    parser.add_argument("--amp_bf16", type=int, default=0, help="AMP 使用 bfloat16 替代 float16 (减少溢出风险, 需GPU支持)")
     parser.add_argument("--rotation_only", type=int, default=0,
                         help="仅优化旋转 (1=仅旋转, 0=旋转+平移同时优化)")
     parser.add_argument("--enable_axis_loss", type=int, default=0,
@@ -415,6 +418,13 @@ def parse_args():
     parser.add_argument("--scatter_reduce", type=str, default="sum",
                         choices=["sum", "mean"],
                         help="Scatter voxelization reduce: sum(match hard) or mean(dr_voxelization style)")
+    parser.add_argument("--fuser_type", type=str, default="concat",
+                        choices=["concat", "diff"],
+                        help="BEV fuser: concat(ConvFuser) or diff(BEVDiffFuser with difference map)")
+    parser.add_argument("--cam_drop_prob", type=float, default=0.0,
+                        help="Camera branch dropout probability during training (0=disabled)")
+    parser.add_argument("--intrinsic_input", action="store_true", default=False,
+                        help="Feed normalized intrinsics (fx,fy,cx,cy) to prediction head")
     parser.add_argument("--lr_schedule", type=str, default="step",
                         choices=["step", "cosine_warm_restarts"],
                         help="LR scheduler type")
@@ -947,6 +957,9 @@ def main():
             voxel_mode=args.voxel_mode,
             to_bev_mode=args.to_bev_mode,
             scatter_reduce=args.scatter_reduce,
+            fuser_type=args.fuser_type,
+            cam_drop_prob=args.cam_drop_prob,
+            intrinsic_input=args.intrinsic_input,
         ).to(device)
 
     if args.pretrain_ckpt is not None:
@@ -982,13 +995,36 @@ def main():
 
     backbone_params = []
     head_params = []
+    _backbone_param_set = set()
+    _module_param_map = {}
     for name, param in raw_model.named_parameters():
         if not param.requires_grad:
             continue
         if 'img_branch' in name or 'pc_branch' in name:
             backbone_params.append(param)
+            _backbone_param_set.add(id(param))
         else:
             head_params.append(param)
+        mod = name.split('.')[0]
+        if mod not in _module_param_map:
+            _module_param_map[mod] = []
+        _module_param_map[mod].append(param)
+
+    def _compute_grad_norms():
+        """Compute per-group gradient L2 norms (backbone, head, per-module)."""
+        bb_sq, hd_sq = 0.0, 0.0
+        mod_sq = {m: 0.0 for m in _module_param_map}
+        for mod, params in _module_param_map.items():
+            for p in params:
+                if p.grad is None:
+                    continue
+                g2 = p.grad.data.norm(2).item() ** 2
+                mod_sq[mod] += g2
+                if id(p) in _backbone_param_set:
+                    bb_sq += g2
+                else:
+                    hd_sq += g2
+        return bb_sq ** 0.5, hd_sq ** 0.5, {m: v ** 0.5 for m, v in mod_sq.items()}
 
     backbone_lr = args.lr * args.backbone_lr_scale
     optimizer = torch.optim.AdamW([
@@ -1000,6 +1036,7 @@ def main():
         tprint(f"Differential LR: backbone={backbone_lr:.2e} ({len(backbone_params)} params), "
                f"heads={args.lr:.2e} ({len(head_params)} params)")
 
+    scheduler = None
     scheduler_choice = args.scheduler > 0
     if scheduler_choice:
         if args.lr_schedule == "cosine_warm_restarts":
@@ -1023,11 +1060,28 @@ def main():
     if is_main:
         tprint(f"Random seed: {args.seed} (cudnn.benchmark=True)")
 
-    use_amp = torch.cuda.is_available()
+    use_amp = torch.cuda.is_available() and not args.no_amp
     amp_dtype = torch.float16
-    scaler = GradScaler(enabled=use_amp)
-    if use_amp and is_main:
-        tprint(f"AMP enabled with {amp_dtype}, GradScaler=on")
+    if args.amp_bf16 and torch.cuda.is_bf16_supported():
+        try:
+            _t1 = torch.randn(1, 1, 4, 4, dtype=torch.bfloat16, device='cuda')
+            torch.nn.functional.interpolate(_t1, size=(8, 8), mode='bilinear', align_corners=False)
+            torch.nn.functional.interpolate(_t1, scale_factor=2, mode='bilinear', align_corners=False)
+            amp_dtype = torch.bfloat16
+            del _t1
+        except RuntimeError:
+            if is_main:
+                tprint("WARNING: --amp_bf16 requested but F.interpolate(bf16) not supported, falling back to fp16")
+    _init_scale_exp = max(8, 14 - int(np.log2(max(world_size, 1))))
+    _init_scale = 2 ** _init_scale_exp
+    scaler = GradScaler(enabled=use_amp, init_scale=_init_scale,
+                        growth_factor=1.5, growth_interval=1000,
+                        backoff_factor=0.5)
+    if is_main:
+        if use_amp:
+            tprint(f"AMP enabled with {amp_dtype}, GradScaler(init=2^{_init_scale_exp}, grow=1.5x/1000steps)")
+        else:
+            tprint(f"AMP disabled (--no_amp=1), training in FP32")
 
     grad_accum_steps = max(1, args.grad_accum_steps)
     if grad_accum_steps > 1 and is_main:
@@ -1105,10 +1159,85 @@ def main():
         tprint("  • Pose Error - Trans: translation error with Forward/Lateral/Height breakdown")
         tprint("=" * 80)
     
+    start_epoch = 0
+    if args.resume_ckpt is not None:
+        resume_path = args.resume_ckpt
+        if resume_path == "auto":
+            _candidates = []
+            for _f in sorted(os.listdir(ckpt_save_dir)):
+                if _f.startswith("ckpt_") and _f.endswith(".pth") and _f not in ("ckpt_best_val.pth",):
+                    try:
+                        _ep = int(_f.replace("ckpt_", "").replace(".pth", "").replace("emergency_ep", ""))
+                        _candidates.append((_ep, os.path.join(ckpt_save_dir, _f)))
+                    except ValueError:
+                        continue
+            if _candidates:
+                _candidates.sort(key=lambda x: x[0], reverse=True)
+                resume_path = _candidates[0][1]
+                if is_main:
+                    tprint(f"Auto-resume: found {resume_path} (epoch {_candidates[0][0]})")
+            else:
+                resume_path = None
+                if is_main:
+                    tprint(f"Auto-resume: no checkpoint found in {ckpt_save_dir}, starting from scratch")
+        if resume_path is not None and os.path.isfile(resume_path):
+            ckpt = torch.load(resume_path, map_location=device)
+            model_to_load = model.module if use_ddp else model
+            model_to_load.load_state_dict(ckpt['model_state_dict'])
+            if 'optimizer_state_dict' in ckpt:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            if 'scheduler_state_dict' in ckpt and scheduler is not None and ckpt['scheduler_state_dict'] is not None:
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            elif scheduler is not None and 'epoch' in ckpt:
+                for _ in range(ckpt['epoch']):
+                    scheduler.step()
+            if 'scaler_state_dict' in ckpt and ckpt['scaler_state_dict'] is not None:
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
+            start_epoch = ckpt.get('epoch', 0)
+            if 'best_train' in ckpt and ckpt['best_train'] is not None:
+                best_train = ckpt['best_train']
+            if 'best_val' in ckpt and ckpt['best_val'] is not None:
+                best_val = ckpt['best_val']
+            if is_main:
+                tprint(f"Resumed from {resume_path}: epoch={start_epoch}, "
+                       f"best_val_rot={best_val.get('rot', 'N/A')}")
+        if use_ddp:
+            dist.barrier()
+
     training_start_time = time.time()
     epoch_times = []
 
-    for epoch in range(num_epochs):
+    def _emergency_save(epoch_num, reason=""):
+        """Save checkpoint on crash so --resume_ckpt auto can recover."""
+        if not is_main:
+            return
+        try:
+            epath = os.path.join(ckpt_save_dir, f"ckpt_emergency_ep{epoch_num}.pth")
+            model_to_save = model.module if use_ddp else model
+            torch.save({
+                'model_state_dict': model_to_save.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch_num,
+                'best_val': best_val,
+                'emergency': True,
+                'reason': reason,
+            }, epath)
+            tprint(f"Emergency checkpoint saved: {epath}")
+        except Exception as e2:
+            tprint(f"Failed to save emergency checkpoint: {e2}")
+
+    _current_epoch = [start_epoch]
+
+    def _sigterm_handler(sig, frame):
+        _emergency_save(_current_epoch[0], f"Signal {sig} (peer crash)")
+        import sys
+        sys.exit(128 + sig)
+
+    import signal
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    for epoch in range(start_epoch, num_epochs):
+        _current_epoch[0] = epoch
         if train_sampler is not None and hasattr(train_sampler, 'set_epoch'):
             train_sampler.set_epoch(epoch)
         model.train()
@@ -1125,6 +1254,7 @@ def main():
         out_init_loss_choice = epoch < 5
         t_data_total, t_prep_total, t_compute_total, t_vis_total = 0.0, 0.0, 0.0, 0.0
         vis_count = 0
+        _epoch_grad_accum = {'bb': [], 'hd': [], 'mod': {}}
         _bwd_profile_events = [] if raw_model._profile_modules else None
         _do_detailed_profile = raw_model._profile_modules
         t_h2d_total = 0.0
@@ -1228,22 +1358,150 @@ def main():
             if _bwd_profile_events is not None:
                 _bwd_ev = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
             with sync_ctx:
-                with autocast(enabled=use_amp, dtype=amp_dtype):
-                    T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice)
-                    total_loss = loss["total_loss"]
-                    if fd_mode == "supervision" and use_foundation_depth:
-                        ds_loss = raw_model.img_branch.get_depth_supervision_loss(alpha=args.depth_sup_alpha)
-                        total_loss = total_loss + ds_loss
-                        loss["depth_sup_loss"] = ds_loss
-                    if grad_accum_steps > 1:
-                        total_loss = total_loss / grad_accum_steps
+                try:
+                    with autocast(enabled=use_amp, dtype=amp_dtype):
+                        T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice)
+                        total_loss = loss["total_loss"]
+                        if fd_mode == "supervision" and use_foundation_depth:
+                            ds_loss = raw_model.img_branch.get_depth_supervision_loss(alpha=args.depth_sup_alpha)
+                            total_loss = total_loss + ds_loss
+                            loss["depth_sup_loss"] = ds_loss
+                        if grad_accum_steps > 1:
+                            total_loss = total_loss / grad_accum_steps
+                except RuntimeError as _fwd_err:
+                    if "CUDA" in str(_fwd_err) or "illegal" in str(_fwd_err):
+                        if is_main:
+                            tprint(f"  [CUDA GUARD] forward() failed at epoch {epoch+1} batch {batch_index}: {_fwd_err}")
+                        try:
+                            torch.cuda.synchronize()
+                        except RuntimeError:
+                            pass
+                        optimizer.zero_grad(set_to_none=True)
+                        global_step += 1
+                        t_iter_start = time.time()
+                        _cuda_error_count = getattr(main, '_cuda_error_count', 0) + 1
+                        main._cuda_error_count = _cuda_error_count
+                        if is_main:
+                            tprint(f"    Cumulative CUDA errors: {_cuda_error_count}")
+                        if _cuda_error_count >= 5:
+                            if is_main:
+                                tprint(f"  [CUDA GUARD] Too many CUDA errors ({_cuda_error_count}), saving emergency checkpoint and stopping...")
+                                _emer_path = os.path.join(ckpt_save_dir, f"ckpt_emergency_ep{epoch+1}.pth")
+                                try:
+                                    model_to_save = model.module if use_ddp else model
+                                    torch.save({
+                                        'epoch': epoch + 1,
+                                        'model_state_dict': model_to_save.state_dict(),
+                                        'optimizer_state_dict': optimizer.state_dict(),
+                                        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                                        'scaler_state_dict': scaler.state_dict(),
+                                        'train_loss': train_loss,
+                                        'train_noise': train_noise,
+                                        'eval_noise': eval_noise,
+                                        'rotation_only': rotation_only,
+                                        'best_train': best_train,
+                                        'best_val': best_val,
+                                        'args': vars(args),
+                                    }, _emer_path)
+                                    tprint(f"    Emergency checkpoint saved to {_emer_path}")
+                                except Exception:
+                                    tprint(f"    Failed to save emergency checkpoint")
+                            raise
+                        continue
+                    raise
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    if is_main:
+                        tprint(f"  [NaN GUARD] Skipping batch {batch_index}: "
+                               f"total_loss={total_loss.item()}, "
+                               + ", ".join(f"{k}={v.item() if torch.is_tensor(v) else v:.4f}"
+                                           for k, v in loss.items() if k != "total_loss"))
+                    optimizer.zero_grad(set_to_none=True)
+                    global_step += 1
+                    t_iter_start = time.time()
+                    continue
                 if _bwd_ev is not None:
                     _bwd_ev[0].record()
-                scaler.scale(total_loss).backward()
+                try:
+                    scaler.scale(total_loss).backward()
+                except RuntimeError as _bwd_err:
+                    if "CUDA" in str(_bwd_err) or "illegal" in str(_bwd_err):
+                        _cuda_error_count = getattr(main, '_cuda_error_count', 0) + 1
+                        main._cuda_error_count = _cuda_error_count
+                        if is_main:
+                            tprint(f"  [CUDA GUARD] backward() failed at batch {batch_index}: {_bwd_err}")
+                            try:
+                                tprint(f"    loss={total_loss.item():.4f}, scale={scaler.get_scale():.0f}")
+                            except RuntimeError:
+                                tprint(f"    (unable to read loss/scale after CUDA error)")
+                            tprint(f"    Cumulative CUDA errors: {_cuda_error_count}")
+                        optimizer.zero_grad(set_to_none=True)
+                        try:
+                            scaler.unscale_(optimizer)
+                        except RuntimeError:
+                            pass
+                        try:
+                            scaler.update()
+                        except (AssertionError, RuntimeError):
+                            if is_main:
+                                tprint(f"    scaler.update() failed, manually halving scale")
+                            _new_scale = max(scaler.get_scale() * 0.5, 1.0)
+                            scaler._scale = torch.tensor(_new_scale).to(scaler._scale.device)
+                            scaler._growth_tracker = torch.tensor(0).to(scaler._growth_tracker.device)
+                        try:
+                            torch.cuda.synchronize()
+                        except RuntimeError:
+                            pass
+                        if _cuda_error_count >= 3:
+                            if is_main:
+                                tprint(f"  [CUDA GUARD] Too many CUDA errors ({_cuda_error_count}), saving emergency checkpoint and stopping...")
+                                _emer_path = os.path.join(ckpt_save_dir, f"ckpt_emergency_ep{epoch+1}.pth")
+                                try:
+                                    model_to_save = model.module if use_ddp else model
+                                    torch.save({
+                                        'epoch': epoch + 1,
+                                        'model_state_dict': model_to_save.state_dict(),
+                                        'optimizer_state_dict': optimizer.state_dict(),
+                                        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                                        'scaler_state_dict': scaler.state_dict(),
+                                        'best_train': best_train,
+                                        'best_val': best_val,
+                                        'args': vars(args),
+                                    }, _emer_path)
+                                    tprint(f"    Emergency checkpoint saved to {_emer_path}")
+                                except Exception:
+                                    tprint(f"    Failed to save emergency checkpoint")
+                            raise
+                        global_step += 1
+                        t_iter_start = time.time()
+                        continue
+                    raise
                 if _bwd_ev is not None:
                     _bwd_ev[1].record()
             if not is_accum_step:
                 scaler.unscale_(optimizer)
+                _found_inf = sum(
+                    torch.isnan(p.grad).any().item() or torch.isinf(p.grad).any().item()
+                    for p in model.parameters() if p.grad is not None
+                )
+                if _found_inf > 0:
+                    if is_main:
+                        tprint(f"  [NaN GUARD] Inf/NaN in gradients at batch {batch_index}, "
+                               f"affected params: {_found_inf}. Skipping optimizer step.")
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.update()
+                    global_step += 1
+                    t_iter_start = time.time()
+                    continue
+                if is_main and batch_index % 50 == 0:
+                    bb_gn, hd_gn, mod_gn = _compute_grad_norms()
+                    _epoch_grad_accum['bb'].append(bb_gn)
+                    _epoch_grad_accum['hd'].append(hd_gn)
+                    for m, v in mod_gn.items():
+                        _epoch_grad_accum['mod'].setdefault(m, []).append(v)
+                    if writer is not None:
+                        writer.add_scalar('GradNorm/backbone', bb_gn, global_step)
+                        writer.add_scalar('GradNorm/head', hd_gn, global_step)
+                        writer.add_scalar('GradNorm/ratio_hd_bb', hd_gn / max(bb_gn, 1e-10), global_step)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
                 if _bwd_ev is not None:
                     _bwd_ev[2].record()
@@ -1376,6 +1634,17 @@ def main():
                            f"clip+optim={clip_avg+optim_avg:.1f}ms({(clip_avg+optim_avg)/total_step*100:.0f}%) | "
                            f"total={total_step:.1f}ms/step")
                 _bwd_profile_events = None
+            if _epoch_grad_accum['bb']:
+                ga = _epoch_grad_accum
+                avg_bb = sum(ga['bb']) / len(ga['bb'])
+                avg_hd = sum(ga['hd']) / len(ga['hd'])
+                ratio = avg_hd / max(avg_bb, 1e-10)
+                eff_ratio = ratio / args.backbone_lr_scale if args.backbone_lr_scale > 0 else float('inf')
+                tprint(f"  Grad norms (pre-clip avg): backbone={avg_bb:.4f}, head={avg_hd:.4f}, "
+                       f"ratio={ratio:.1f}x, eff_update_ratio={eff_ratio:.1f}x")
+                top_mods = sorted(ga['mod'].items(), key=lambda x: -sum(x[1])/len(x[1]))[:5]
+                mod_str = " | ".join(f"{m}={sum(v)/len(v):.2f}" for m, v in top_mods)
+                tprint(f"  Per-module grad: {mod_str}")
 
         if scheduler_choice:   
             scheduler.step()    
@@ -1453,6 +1722,8 @@ def main():
                 'epoch': epoch + 1,
                 'model_state_dict': model_to_save.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                'scaler_state_dict': scaler.state_dict(),
                 'train_loss': train_loss,
                 'train_noise': train_noise,
                 'eval_noise': eval_noise,
@@ -1810,6 +2081,8 @@ def main():
                     'epoch': epoch + 1,
                     'model_state_dict': model_to_save.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                    'scaler_state_dict': scaler.state_dict(),
                     'train_noise': train_noise,
                     'eval_noise': eval_noise,
                     'rotation_only': rotation_only,

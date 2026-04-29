@@ -445,7 +445,7 @@ def load_bevcalib_inference(
     ckpt_path: str,
     device: str = "cuda",
     img_shape=(360, 640),
-    rotation_only=True,
+    rotation_only=None,
     deformable=False,
     bev_encoder=True,
     use_mlp_head=None,
@@ -462,7 +462,7 @@ def load_bevcalib_inference(
         ckpt_path:     path to .pth checkpoint
         device:        'cuda' or 'cpu'
         img_shape:     (H, W) image dimensions
-        rotation_only: whether the model was trained in rotation-only mode
+        rotation_only: None=auto-detect from checkpoint, True=rotation-only, False=joint
         deformable:    whether the model uses deformable attention
         bev_encoder:   whether the model uses BEV encoder
         use_mlp_head:  None=auto-detect from checkpoint, True=MLP head, False=Linear head
@@ -486,7 +486,24 @@ def load_bevcalib_inference(
         use_mlp_head = _detect_use_mlp_head(state)
         print(f"[load] Auto-detected use_mlp_head={use_mlp_head}")
 
-    print(f"[load] voxel_mode={voxel_mode}, to_bev_mode={to_bev_mode}, scatter_reduce={scatter_reduce}")
+    if rotation_only is None:
+        if 'rotation_only' in ckpt:
+            rotation_only = bool(ckpt['rotation_only'])
+        elif 'optimize_translation' in ckpt:
+            rotation_only = not ckpt['optimize_translation']
+        else:
+            ckpt_args_ro = ckpt.get('args', {})
+            if 'rotation_only' in ckpt_args_ro:
+                rotation_only = bool(ckpt_args_ro['rotation_only'])
+            else:
+                has_trans = any('translation_pred' in k for k in state.keys())
+                rotation_only = not has_trans
+        print(f"[load] Auto-detected rotation_only={rotation_only}")
+
+    ckpt_args = ckpt.get('args', {})
+    _intrinsic_input = ckpt_args.get('intrinsic_input', False)
+    print(f"[load] voxel_mode={voxel_mode}, to_bev_mode={to_bev_mode}, scatter_reduce={scatter_reduce}"
+          f", rotation_only={rotation_only}{', intrinsic_input=True' if _intrinsic_input else ''}")
     model = BEVCalib(
         deformable=deformable,
         bev_encoder=bev_encoder,
@@ -497,6 +514,7 @@ def load_bevcalib_inference(
         to_bev_mode=to_bev_mode,
         scatter_reduce=scatter_reduce,
         bev_pool_factor=bev_pool_factor,
+        intrinsic_input=_intrinsic_input,
     )
 
     _adapt_proj_heads_to_checkpoint(model, state, device)

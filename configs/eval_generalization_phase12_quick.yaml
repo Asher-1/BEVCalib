@@ -1,0 +1,102 @@
+# Phase 1+2 Quick 实验泛化评估配置
+#
+# 可用实验 (Quick 版本, 8 GPU, max_frames=500):
+#   1. baseline_quick:   concat fuser, no cam dropout (400 epochs, 完整训练)
+#   2. diff_only_quick:  BEVDiffFuser, no cam dropout (61 epochs, 训练中断)
+#
+# 缺失实验 (未训练):
+#   - dropout_only: concat fuser + cam_drop=0.3
+#   - diff_dropout: BEVDiffFuser + cam_drop=0.3
+#
+# 参考基准:
+#   3. v21-quick-no-aug:  v21 最佳泛化模型 (0.655°), 作为对比基线
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_phase12_quick.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_generalization_phase12_quick.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_phase12_quick"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # =========================================================================
+  # Exp 1: Baseline (concat fuser, no cam dropout) — 400 epochs, 完整训练
+  # =========================================================================
+  - label: "phase12-baseline-quick"
+    dir_name: "model_small_5deg_phase12_baseline_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    fuser_type: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "phase12"
+    mode_desc: "baseline: concat fuser, no cam dropout (400 epochs)"
+
+  # =========================================================================
+  # Exp 2: Phase 1 — BEV Difference Map (61 epochs, 训练中断)
+  # =========================================================================
+  - label: "phase12-diff-only-quick"
+    dir_name: "model_small_5deg_phase12_diff_only_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "scatter"
+    scatter_reduce: "mean"
+    to_bev_mode: "concat"
+    fuser_type: "diff"
+    angle_deg: 5
+    z_voxels: 5
+    version: "phase12"
+    mode_desc: "Phase 1: BEVDiffFuser (61 epochs, 训练中断)"
+
+  # =========================================================================
+  # Reference: v21 最佳泛化模型 (对比基线)
+  # =========================================================================
+  - label: "v21-quick-no-aug-ref"
+    dir_name: "v21/model_small_5deg_v21_quick_no_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v21"
+    mode_desc: "v21 最佳泛化基线 (400 epochs, 无增强)"
+
+# ============================================================================
+# 评估矩阵
+# ============================================================================
+#
+#   | 模型                    | Fuser  | Cam Drop | Voxel   | Epochs | 状态     |
+#   |-------------------------|--------|----------|---------|--------|----------|
+#   | phase12-baseline-quick  | concat | 0        | scatter | 400    | 完整训练 |
+#   | phase12-diff-only-quick | diff   | 0        | scatter | 61     | 训练中断 |
+#   | v21-quick-no-aug-ref    | concat | 0        | hard    | 400    | 参考基线 |
+#
+# 关键对比:
+#   1. Diff fuser 效果:  baseline vs diff-only
+#   2. 与 v21 最佳对比:  baseline vs v21-quick-no-aug
+#   3. Voxel 模式差异:   baseline(scatter) vs v21(hard)

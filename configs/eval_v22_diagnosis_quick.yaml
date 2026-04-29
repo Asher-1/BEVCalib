@@ -1,0 +1,120 @@
+# V22 诊断实验 — Quick (单节点 8GPU)
+#
+# 来源: batch8_train_all_v22_diagnosis_quick.yaml
+#
+# 所有模型统一 eval_params: 5° / 0.15m; angle_deg 标注训练扰动档位。
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_diagnosis_quick.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_diagnosis_quick.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/v22_diagnosis_quick_eval"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # =========================================================================
+  # Phase A (quick)
+  # =========================================================================
+  - label: "v22-A1-lr010-rotonly-quick"
+    dir_name: "model_small_5deg_v22_A1_lr010_rotonly_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "A1 quick: lr010, rotation_only"
+
+  - label: "v22-A2-lr050-rotonly-quick"
+    dir_name: "model_small_5deg_v22_A2_lr050_rotonly_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "A2 quick: lr050, rotation_only"
+
+  - label: "v22-A3-lr100-rotonly-quick"
+    dir_name: "model_small_5deg_v22_A3_lr100_rotonly_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "A3 quick: lr100, rotation_only"
+
+  # =========================================================================
+  # Phase B (quick) — joint variants
+  # =========================================================================
+  - label: "v22-B1-lr050-joint-quick"
+    dir_name: "model_small_5deg_v22_B1_lr050_joint_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 0
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "B1 quick: joint, 5° train"
+
+  - label: "v22-B2-lr100-joint-mid-quick"
+    dir_name: "model_small_10deg_v22_B2_lr100_joint_mid_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 0
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 10
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "B2 quick: joint, 10° train"
+
+  - label: "v22-B3-lr100-joint-official-quick"
+    dir_name: "model_small_20deg_v22_B3_lr100_joint_official_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    rotation_only: 0
+    use_drcv: 0
+    use_mlp_head: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    angle_deg: 20
+    z_voxels: 5
+    version: "v22"
+    mode_desc: "B3 quick: joint, 20° official-style train (eval 5°/0.15m)"

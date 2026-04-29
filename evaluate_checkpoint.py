@@ -478,6 +478,7 @@ def evaluate_checkpoint(args):
     _voxel_mode = args.voxel_mode or ckpt_args.get('voxel_mode', 'hard')
     _scatter_reduce = args.scatter_reduce or ckpt_args.get('scatter_reduce', 'sum')
     _to_bev_mode = args.to_bev_mode or ckpt_args.get('to_bev_mode', 'concat')
+    _fuser_type = getattr(args, 'fuser_type', None) or ckpt_args.get('fuser_type', 'concat')
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
@@ -491,6 +492,8 @@ def evaluate_checkpoint(args):
         voxel_mode=_voxel_mode,
         to_bev_mode=_to_bev_mode,
         scatter_reduce=_scatter_reduce,
+        fuser_type=_fuser_type,
+        intrinsic_input=ckpt_args.get('intrinsic_input', False),
     ).to(device)
     print(f"   Voxel: mode={_voxel_mode}, scatter_reduce={_scatter_reduce}, to_bev={_to_bev_mode}"
           f"{' (from checkpoint)' if not args.voxel_mode else ''}")
@@ -1112,6 +1115,7 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
     _voxel_mode = getattr(args, 'voxel_mode', None) or ckpt_args.get('voxel_mode', 'hard')
     _scatter_reduce = getattr(args, 'scatter_reduce', None) or ckpt_args.get('scatter_reduce', 'sum')
     _to_bev_mode = getattr(args, 'to_bev_mode', None) or ckpt_args.get('to_bev_mode', 'concat')
+    _fuser_type = getattr(args, 'fuser_type', None) or ckpt_args.get('fuser_type', 'concat')
     model = BEVCalib(
         deformable=args.deformable > 0,
         bev_encoder=args.bev_encoder > 0,
@@ -1125,6 +1129,8 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
         voxel_mode=_voxel_mode,
         to_bev_mode=_to_bev_mode,
         scatter_reduce=_scatter_reduce,
+        fuser_type=_fuser_type,
+        intrinsic_input=ckpt_args.get('intrinsic_input', False),
     ).to(device)
     state_dict = _auto_permute_spconv_weights(state_dict, model)
     _adapt_model_to_checkpoint(model, state_dict, device)
@@ -2042,6 +2048,9 @@ def main():
     parser.add_argument("--scatter_reduce", type=str, default=None,
                        choices=["sum", "mean"],
                        help="Scatter reduce mode (auto-detected from checkpoint if omitted)")
+    parser.add_argument("--fuser_type", type=str, default=None,
+                       choices=["concat", "diff"],
+                       help="BEV fuser type (auto-detected from checkpoint if omitted)")
     parser.add_argument("--to_bev_mode", type=str, default=None,
                        choices=["concat", "learned", "sum"],
                        help="Sparse-to-BEV mode (auto-detected from checkpoint if omitted)")

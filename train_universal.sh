@@ -135,6 +135,7 @@ AUGMENT_PC_DROPOUT=""
 AUGMENT_COLOR_JITTER=""
 AUGMENT_INTRINSIC=""
 AUGMENT_INTRINSIC_CXCY=""
+INTRINSIC_INPUT=0
 EVAL_ANGLE_RANGE_DEG=""
 EARLY_STOPPING_PATIENCE=""
 SEED=""
@@ -316,6 +317,12 @@ while [[ $# -gt 0 ]]; do
             TO_BEV_MODE="$2"; shift 2 ;;
         --scatter_reduce)
             SCATTER_REDUCE="$2"; shift 2 ;;
+        --fuser_type)
+            FUSER_TYPE="$2"; shift 2 ;;
+        --cam_drop_prob)
+            CAM_DROP_PROB="$2"; shift 2 ;;
+        --intrinsic_input)
+            INTRINSIC_INPUT=1; shift ;;
         --eval_angle_range_deg)
             EVAL_ANGLE_RANGE_DEG="$2"; shift 2 ;;
         --eval_trans_range)
@@ -326,6 +333,12 @@ while [[ $# -gt 0 ]]; do
             SEED="$2"; shift 2 ;;
         --pretrain_ckpt)
             PRETRAIN_CKPT="$2"; shift 2 ;;
+        --resume_ckpt)
+            RESUME_CKPT="$2"; shift 2 ;;
+        --no_amp)
+            NO_AMP="$2"; shift 2 ;;
+        --amp_bf16)
+            AMP_BF16="$2"; shift 2 ;;
         --num_epochs)
             NUM_EPOCHS_OVERRIDE="$2"; shift 2 ;;
         --save_ckpt_per_epoches)
@@ -981,6 +994,9 @@ OPTIM_FLAGS=""
 [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
 [ -n "$SEED" ] && OPTIM_FLAGS="$OPTIM_FLAGS --seed $SEED"
 [ -n "$PRETRAIN_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --pretrain_ckpt $PRETRAIN_CKPT"
+[ -n "$RESUME_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --resume_ckpt $RESUME_CKPT"
+[ -n "$NO_AMP" ] && OPTIM_FLAGS="$OPTIM_FLAGS --no_amp $NO_AMP"
+[ -n "$AMP_BF16" ] && OPTIM_FLAGS="$OPTIM_FLAGS --amp_bf16 $AMP_BF16"
 [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_geodesic_loss $USE_GEODESIC_LOSS"
 [ -n "$USE_MLP_HEAD" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_mlp_head $USE_MLP_HEAD"
 [ -n "$USE_FOUNDATION_DEPTH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_foundation_depth $USE_FOUNDATION_DEPTH"
@@ -994,6 +1010,9 @@ OPTIM_FLAGS=""
 [ -n "$VOXEL_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --voxel_mode $VOXEL_MODE"
 [ -n "$TO_BEV_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --to_bev_mode $TO_BEV_MODE"
 [ -n "$SCATTER_REDUCE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --scatter_reduce $SCATTER_REDUCE"
+[ -n "$FUSER_TYPE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --fuser_type $FUSER_TYPE"
+[ -n "$CAM_DROP_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --cam_drop_prob $CAM_DROP_PROB"
+[ "$INTRINSIC_INPUT" -eq 1 ] && OPTIM_FLAGS="$OPTIM_FLAGS --intrinsic_input"
 [ -n "$ENABLE_VIS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_vis $ENABLE_VIS"
 [ -n "$VIS_FREQ" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_freq $VIS_FREQ"
 [ -n "$VALIDATE_DATA" ] && OPTIM_FLAGS="$OPTIM_FLAGS --validate_data $VALIDATE_DATA"
@@ -1043,6 +1062,8 @@ if [ -n "$DDP_NGPUS" ]; then
         export NCCL_DEBUG_SUBSYS=INIT,NET
         export NCCL_BLOCKING_WAIT=1
         export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+        export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:-23}
+        export NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT:-13}
         export DDP_TIMEOUT_MINUTES=${DDP_TIMEOUT_MINUTES:-$(( RDZV_TIMEOUT / 60 + 10 ))}
 
         RDZV_ID="${RDZV_ID:-bevcalib_${MASTER_PORT}}"

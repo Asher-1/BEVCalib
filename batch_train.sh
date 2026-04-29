@@ -171,6 +171,10 @@ GLOBAL_DRY_RUN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(
 BATCH_LOG_DIR=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('batch_log_dir', 'logs'))" 2>/dev/null)
 WAIT_TIME=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('wait_between_experiments', 10))" 2>/dev/null)
 GLOBAL_FORCE_RERUN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('force_rerun', False))" 2>/dev/null)
+MAX_RETRIES=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('max_retries', 0))" 2>/dev/null)
+RETRY_DELAY=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('retry_delay', 30))" 2>/dev/null)
+MAX_RETRIES=${MAX_RETRIES:-0}
+RETRY_DELAY=${RETRY_DELAY:-30}
 
 # TensorBoard 端口 (从 defaults.params.tensorboard_port 读取)
 TB_PORT=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); p=c.get('defaults',{}).get('params',{}) or {}; v=p.get('tensorboard_port'); print(v if v is not None else 6006)" 2>/dev/null)
@@ -474,6 +478,10 @@ if params.get('use_compile', False):
 if params.get('rotation_only', False):
     args.append("--rotation_only")
 
+# intrinsic_input
+if params.get('intrinsic_input', False):
+    args.append("--intrinsic_input")
+
 # enable_axis_loss
 if params.get('enable_axis_loss', False):
     args.append("--enable_axis_loss")
@@ -508,6 +516,9 @@ OPTIM_PARAMS = [
     ('early_stopping_patience', '--early_stopping_patience'),
     ('seed', '--seed'),
     ('pretrain_ckpt', '--pretrain_ckpt'),
+    ('resume_ckpt', '--resume_ckpt'),
+    ('no_amp', '--no_amp'),
+    ('amp_bf16', '--amp_bf16'),
     ('num_epochs', '--num_epochs'),
     ('save_ckpt_per_epoches', '--save_ckpt_per_epoches'),
     ('use_geodesic_loss', '--use_geodesic_loss'),
@@ -521,6 +532,8 @@ OPTIM_PARAMS = [
     ('voxel_mode', '--voxel_mode'),
     ('to_bev_mode', '--to_bev_mode'),
     ('scatter_reduce', '--scatter_reduce'),
+    ('fuser_type', '--fuser_type'),
+    ('cam_drop_prob', '--cam_drop_prob'),
     ('max_frames_per_seq', '--max_frames_per_seq'),
     ('sample_step', '--sample_step'),
     ('eval_epoches', '--eval_epoches'),
@@ -592,6 +605,7 @@ log "配置文件: $CONFIG_FILE"
 log "实验总数: $TOTAL"
 [ "$FORCE_RERUN" -eq 1 ] && log "强制模式: 已启用 (--force / YAML force_rerun)"
 [ -n "$SKIP_PATTERN" ] && log "跳过模式: '$SKIP_PATTERN' (匹配的实验将被跳过)"
+[ "$MAX_RETRIES" -gt 0 ] && log "自动重试: max_retries=$MAX_RETRIES, retry_delay=${RETRY_DELAY}s (失败后自动 --resume_ckpt auto)"
 [ -n "$_NODE_RANK" ] && log "节点: node_rank=$_NODE_RANK $([ "$_IS_MASTER" -eq 1 ] && echo '(master)' || echo '(worker)')"
 log "日志: 每个实验输出到 logs/<dataset>/model_*/train.log"
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -690,18 +704,8 @@ PYTHON_INFO
         continue
     fi
     
-    # 构建训练命令
-    CMD=$(build_train_command "$i" "$CONFIG_JSON")
-    log "命令: $CMD"
-    
-    if [ "$DRY_RUN" -eq 1 ]; then
-        log "[DRY-RUN] 跳过执行"
-        continue
-    fi
-    
     # 推导具体实验的日志目录（与start_training.sh保持一致）
     # 格式: logs/{DATASET_DIR}/model_small_{angle}deg_{VERSION}
-    # DATASET_DIR 已做名称映射（如 all -> all_training_data）
     ANGLE_INT=$(python3 -c "print(int(float('$ANGLE')))" 2>/dev/null || echo "5")
     EXPERIMENT_LOG_DIR="$SCRIPT_DIR/logs/$DATASET_DIR/model_small_${ANGLE_INT}deg_${VERSION}"
     
@@ -715,15 +719,30 @@ PYTHON_INFO
     
     # 检查实验是否已完成（基于 checkpoint 文件判断，兼容多机 DDP）
     # Worker 节点永远不跳过 — 必须加入 DDP 集群
-    _EXP_CKPT_DIR="$EXPERIMENT_LOG_DIR/checkpoint"
-    if [ "$FORCE_RERUN" -eq 0 ] && [ "$_IS_MASTER" -eq 1 ] && \
-       [ -d "$_EXP_CKPT_DIR" ] && [ "$(find "$_EXP_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ]; then
-        _N_CKPT=$(find "$_EXP_CKPT_DIR" -name '*.pth' -type f | wc -l)
+    # train_kitti.py saves checkpoints under {exp_dir}/{label}/checkpoint/
+    _N_CKPT=0
+    _EXP_CKPT_DIR=""
+    if [ "$FORCE_RERUN" -eq 0 ] && [ "$_IS_MASTER" -eq 1 ] && [ -d "$EXPERIMENT_LOG_DIR" ]; then
+        _N_CKPT=$(find "$EXPERIMENT_LOG_DIR" -path '*/checkpoint/*.pth' -type f 2>/dev/null | wc -l)
+        if [ "$_N_CKPT" -gt 0 ]; then
+            _EXP_CKPT_DIR=$(find "$EXPERIMENT_LOG_DIR" -path '*/checkpoint/*.pth' -type f 2>/dev/null | head -1 | xargs dirname)
+        fi
+    fi
+    if [ "$_N_CKPT" -gt 0 ]; then
         SKIPPED=$((SKIPPED + 1))
         log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
         log "  原因: 检测到已有 checkpoint 文件 (${_N_CKPT}个)"
         log "  路径: $_EXP_CKPT_DIR"
         log "  如需重新训练，请删除该目录或使用 --force 参数"
+        continue
+    fi
+    
+    # 构建训练命令
+    CMD=$(build_train_command "$i" "$CONFIG_JSON")
+    log "命令: $CMD"
+    
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "[DRY-RUN] 跳过执行"
         continue
     fi
     
@@ -733,25 +752,55 @@ PYTHON_INFO
         start_tensorboard "$EXPERIMENT_LOG_DIR"
     fi
     
-    START_TIME=$(date +%s)
-    
     NOISE_FILTER="Grad strides do not match bucket view strides|bucket_view\.sizes\(\)|grad\.sizes\(\) = \[|_execution_engine\.run_backward\(  # Calls"
     
-    set +e
-    yes y 2>/dev/null | eval "$CMD" 2>&1 | \
-        grep --line-buffered -v -E "$NOISE_FILTER"
-    EXIT_CODE=${PIPESTATUS[1]}
-    set -e
+    ATTEMPT=0
+    EXP_SUCCESS=0
+    while [ $ATTEMPT -le "$MAX_RETRIES" ]; do
+        ATTEMPT_LABEL=""
+        CURRENT_CMD="$CMD"
+        if [ $ATTEMPT -gt 0 ]; then
+            ATTEMPT_LABEL=" (重试 $ATTEMPT/$MAX_RETRIES)"
+            log "等待 ${RETRY_DELAY}s 释放GPU资源后重试..."
+            sleep "$RETRY_DELAY"
+            if echo "$CURRENT_CMD" | grep -q -- "--resume_ckpt"; then
+                CURRENT_CMD=$(echo "$CURRENT_CMD" | sed 's/--resume_ckpt [^ ]*/--resume_ckpt auto/')
+            else
+                CURRENT_CMD=$(echo "$CURRENT_CMD" | sed 's/--fg/--resume_ckpt auto --fg/')
+            fi
+            log "断点续训命令: $CURRENT_CMD"
+        fi
+        
+        log "开始训练${ATTEMPT_LABEL}..."
+        START_TIME=$(date +%s)
+        
+        set +e
+        yes y 2>/dev/null | eval "$CURRENT_CMD" 2>&1 | \
+            grep --line-buffered -v -E "$NOISE_FILTER"
+        EXIT_CODE=${PIPESTATUS[1]}
+        set -e
+        
+        END_TIME=$(date +%s)
+        ELAPSED=$(( END_TIME - START_TIME ))
+        HOURS=$(( ELAPSED / 3600 ))
+        MINS=$(( (ELAPSED % 3600) / 60 ))
+        
+        if [ $EXIT_CODE -eq 0 ]; then
+            log "实验 [$EXP_NUM/$TOTAL] 完成 ✓ (耗时: ${HOURS}h${MINS}m)${ATTEMPT_LABEL}"
+            EXP_SUCCESS=1
+            break
+        else
+            log "实验 [$EXP_NUM/$TOTAL] 异常退出 (耗时: ${HOURS}h${MINS}m, exit=$EXIT_CODE)${ATTEMPT_LABEL}"
+            if [ $ATTEMPT -lt "$MAX_RETRIES" ]; then
+                log "将自动重试 (--resume_ckpt auto)，剩余重试次数: $((MAX_RETRIES - ATTEMPT))"
+            fi
+        fi
+        
+        ATTEMPT=$((ATTEMPT + 1))
+    done
     
-    END_TIME=$(date +%s)
-    ELAPSED=$(( END_TIME - START_TIME ))
-    HOURS=$(( ELAPSED / 3600 ))
-    MINS=$(( (ELAPSED % 3600) / 60 ))
-    
-    if [ $EXIT_CODE -eq 0 ]; then
-        log "实验 [$EXP_NUM/$TOTAL] 完成 ✓ (耗时: ${HOURS}h${MINS}m)"
-    else
-        log "实验 [$EXP_NUM/$TOTAL] 异常退出 (耗时: ${HOURS}h${MINS}m, exit=$EXIT_CODE)"
+    if [ $EXP_SUCCESS -eq 0 ]; then
+        log "实验 [$EXP_NUM/$TOTAL] 在 $((MAX_RETRIES + 1)) 次尝试后仍然失败"
         log "⚠️  继续执行下一组实验..."
     fi
     

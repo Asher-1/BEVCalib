@@ -253,6 +253,7 @@ AUGMENT_PC_DROPOUT=""
 AUGMENT_COLOR_JITTER=""
 AUGMENT_INTRINSIC=""
 AUGMENT_INTRINSIC_CXCY=""
+INTRINSIC_INPUT=""
 EVAL_ANGLE=""
 EARLY_STOPPING_PATIENCE=""
 SEED=""
@@ -364,6 +365,14 @@ while [[ $# -gt 0 ]]; do
             TO_BEV_MODE="$2"; shift 2 ;;
         --scatter_reduce)
             SCATTER_REDUCE="$2"; shift 2 ;;
+        --fuser_type)
+            FUSER_TYPE="$2"; shift 2 ;;
+        --cam_drop_prob)
+            CAM_DROP_PROB="$2"; shift 2 ;;
+        --intrinsic_input)
+            INTRINSIC_INPUT="--intrinsic_input"
+            shift
+            ;;
         --eval_angle)
             EVAL_ANGLE="$2"; shift 2 ;;
         --eval_trans_range)
@@ -374,6 +383,12 @@ while [[ $# -gt 0 ]]; do
             SEED="$2"; shift 2 ;;
         --pretrain_ckpt)
             PRETRAIN_CKPT="$2"; shift 2 ;;
+        --resume_ckpt)
+            RESUME_CKPT="$2"; shift 2 ;;
+        --no_amp)
+            NO_AMP="$2"; shift 2 ;;
+        --amp_bf16)
+            AMP_BF16="$2"; shift 2 ;;
         --num_epochs)
             NUM_EPOCHS="$2"; shift 2 ;;
         --save_ckpt_per_epoches)
@@ -984,6 +999,9 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
+    [ -n "$RESUME_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --resume_ckpt $RESUME_CKPT"
+    [ -n "$NO_AMP" ] && OPTIM_ARGS="$OPTIM_ARGS --no_amp $NO_AMP"
+    [ -n "$AMP_BF16" ] && OPTIM_ARGS="$OPTIM_ARGS --amp_bf16 $AMP_BF16"
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
     [ -n "$SAVE_CKPT_PER_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --save_ckpt_per_epoches $SAVE_CKPT_PER_EPOCHES"
     [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
@@ -1001,6 +1019,9 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
     [ -n "$TO_BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --to_bev_mode $TO_BEV_MODE"
     [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
+    [ -n "$FUSER_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --fuser_type $FUSER_TYPE"
+    [ -n "$CAM_DROP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --cam_drop_prob $CAM_DROP_PROB"
+    [ -n "$INTRINSIC_INPUT" ] && OPTIM_ARGS="$OPTIM_ARGS $INTRINSIC_INPUT"
     [ -n "$ENABLE_VIS" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_vis $ENABLE_VIS"
     [ -n "$VIS_FREQ" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_freq $VIS_FREQ"
     [ -n "$VIS_SAMPLES" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_samples $VIS_SAMPLES"
@@ -1125,6 +1146,9 @@ else
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
+    [ -n "$RESUME_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --resume_ckpt $RESUME_CKPT"
+    [ -n "$NO_AMP" ] && OPTIM_ARGS="$OPTIM_ARGS --no_amp $NO_AMP"
+    [ -n "$AMP_BF16" ] && OPTIM_ARGS="$OPTIM_ARGS --amp_bf16 $AMP_BF16"
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
     [ -n "$SAVE_CKPT_PER_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --save_ckpt_per_epoches $SAVE_CKPT_PER_EPOCHES"
     [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
@@ -1142,6 +1166,9 @@ else
     [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
     [ -n "$TO_BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --to_bev_mode $TO_BEV_MODE"
     [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
+    [ -n "$FUSER_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --fuser_type $FUSER_TYPE"
+    [ -n "$CAM_DROP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --cam_drop_prob $CAM_DROP_PROB"
+    [ -n "$INTRINSIC_INPUT" ] && OPTIM_ARGS="$OPTIM_ARGS $INTRINSIC_INPUT"
     [ -n "$ENABLE_VIS" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_vis $ENABLE_VIS"
     [ -n "$VIS_FREQ" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_freq $VIS_FREQ"
     [ -n "$VIS_SAMPLES" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_samples $VIS_SAMPLES"

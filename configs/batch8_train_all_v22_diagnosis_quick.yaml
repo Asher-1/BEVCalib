@@ -1,0 +1,186 @@
+# BEVCalib V22 诊断实验 — 梯度分析驱动的优化
+#
+# 背景发现 (来自 analyze_gradient_flow.py):
+#   1. backbone_lr_scale=0.1 导致 backbone 有效更新速度仅为 head 的 1/55
+#   2. rotation_pred 2个参数吃掉 90% 的 head 梯度 (L2=70~97)
+#   3. rotation_only 模式丢失了平移梯度的隐性监督
+#   4. 官方仓库使用统一 LR + 联合优化 + 大扰动范围
+#
+# 实验设计 (6组 Quick 实验, 本地 8GPU, ~2h/experiment):
+#
+#   Phase A: Backbone LR 消融 (rotation_only, 现有 loss 设计不变)
+#     A1: backbone_lr_scale=0.1  (v21 基线)
+#     A2: backbone_lr_scale=0.5  (缩小更新差距到 ~11x)
+#     A3: backbone_lr_scale=1.0  (官方策略: 统一 LR)
+#
+#   Phase B: 联合优化 + LR 消融 (rotation_only=false)
+#     B1: rotation_only=false + lr_scale=0.5
+#     B2: rotation_only=false + lr_scale=1.0 + trans_range=0.5 (接近官方)
+#     B3: rotation_only=false + lr_scale=1.0 + trans_range=1.0 + angle=10° (官方配置)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v22_diagnosis.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v22_diagnosis.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 5
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+
+    use_compile: false
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 3
+    backbone_lr_scale: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.03
+    augment_intrinsic_cxcy: 0.03
+
+    max_frames_per_seq: 500
+    num_epochs: 400
+    eval_epoches: 50
+    early_stopping_patience: 30
+    seed: 42
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # Phase A: Backbone LR 消融 (rotation_only=true, 仅改 backbone_lr_scale)
+  # =========================================================================
+
+  # A1: 基线 (复现 v21_quick_full)
+  - name: "v22_A1_lr010_rotonly_quick"
+    description: "A1基线: backbone_lr_scale=0.1, rotation_only (v21复现)"
+    dataset: "all"
+    version: "v22_A1_lr010_rotonly_quick"
+
+  # A2: backbone_lr_scale=0.5
+  - name: "v22_A2_lr050_rotonly_quick"
+    description: "A2: backbone_lr_scale=0.5, 缩小到~11x更新差距"
+    dataset: "all"
+    version: "v22_A2_lr050_rotonly_quick"
+    params:
+      backbone_lr_scale: 0.5
+
+  # A3: backbone_lr_scale=1.0 (官方策略)
+  - name: "v22_A3_lr100_rotonly_quick"
+    description: "A3: backbone_lr_scale=1.0, 统一LR (官方策略)"
+    dataset: "all"
+    version: "v22_A3_lr100_rotonly_quick"
+    params:
+      backbone_lr_scale: 1.0
+
+  # =========================================================================
+  # Phase B: 联合优化 (rotation_only=false, 同时优化旋转和平移)
+  # =========================================================================
+
+  # B1: 联合优化 + lr_scale=0.5
+  - name: "v22_B1_lr050_joint_quick"
+    description: "B1: 联合优化 + backbone_lr=0.5 + 5°/0.15m"
+    dataset: "all"
+    version: "v22_B1_lr050_joint_quick"
+    params:
+      rotation_only: false
+      backbone_lr_scale: 0.5
+
+  # B2: 联合优化 + 统一LR + 中等扰动
+  - name: "v22_B2_lr100_joint_mid_quick"
+    description: "B2: 联合优化 + 统一LR + 10°/0.5m"
+    dataset: "all"
+    version: "v22_B2_lr100_joint_mid_quick"
+    params:
+      rotation_only: false
+      backbone_lr_scale: 1.0
+      angle_range_deg: 10
+      trans_range: 0.5
+
+  # B3: 复现官方配置 (联合优化 + 统一LR + 大扰动)
+  - name: "v22_B3_lr100_joint_official_quick"
+    description: "B3: 类官方配置 + 统一LR + 20°/1.5m + 简化loss"
+    dataset: "all"
+    version: "v22_B3_lr100_joint_official_quick"
+    params:
+      rotation_only: false
+      backbone_lr_scale: 1.0
+      angle_range_deg: 20
+      trans_range: 1.5
+      enable_axis_loss: false
+      weight_axis_rotation: 0.0
+      augment_pitch_sign_flip_prob: 0.0
+      augment_pitch_flip_prob: 0.0
+      augment_color_jitter: 0.0
+      augment_pc_jitter: 0.0
+      augment_pc_dropout: 0.0
+      augment_intrinsic: 0.0
+      augment_intrinsic_cxcy: 0.0
+
+# ============================================================================
+# V22 实验矩阵
+# ============================================================================
+#
+#   | 实验 | backbone_lr | rot_only | angle | trans | axis_loss | 增强  | 对比目标                    |
+#   |------|-------------|----------|-------|-------|-----------|------|-----------------------------|
+#   | A1   | 0.1 (1e-5)  | yes      | 5°    | 0.15  | yes       | v21  | v21 基线复现                |
+#   | A2   | 0.5 (5e-5)  | yes      | 5°    | 0.15  | yes       | v21  | backbone LR 提升 5x         |
+#   | A3   | 1.0 (1e-4)  | yes      | 5°    | 0.15  | yes       | v21  | 统一 LR (官方策略)          |
+#   | B1   | 0.5 (5e-5)  | no       | 5°    | 0.15  | yes       | v21  | 联合优化 + 中等 LR          |
+#   | B2   | 1.0 (1e-4)  | no       | 10°   | 0.5   | yes       | v21  | 联合优化 + 中等扰动         |
+#   | B3   | 1.0 (1e-4)  | no       | 20°   | 1.5   | no        | none | 复现官方极简配置            |
+#
+# 关键对比:
+#   1. Backbone LR 影响:        A1 vs A2 vs A3
+#   2. 联合优化 vs 仅旋转:      A2 vs B1, A3 vs B2
+#   3. 扰动范围影响:             B1 vs B2 vs B3
+#   4. 增强+复杂loss vs 极简:   A3 vs B3
+#   5. 全面最优 vs v21 基线:     winner vs A1
+#
+# 预期:
+#   - A2/A3 应该比 A1 有明显提升 (backbone 不再被冻结)
+#   - B1/B2 应该比 A2/A3 更好 (平移梯度提供额外监督)
+#   - B3 可能最差 (小数据 + 大扰动可能不匹配) 或意外最好 (官方策略)

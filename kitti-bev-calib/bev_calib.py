@@ -6,6 +6,7 @@ from losses.losses import realworld_loss
 from losses.quat_tools import quaternion_from_matrix
 from deformable_attention import DeformableAttention
 from BEVEncoder.BEVEncoder import BEVEncoder
+import bev_settings
 
 
 class DropPath(nn.Module):
@@ -36,6 +37,33 @@ class ConvFuser(nn.Sequential):
 
     def forward(self, img_bev_feat, pc_bev_feat):
         return super().forward(torch.cat([img_bev_feat, pc_bev_feat], dim=1))
+
+
+class BEVDiffFuser(nn.Module):
+    """BEV-space Difference Map Fuser inspired by DST-Calib.
+
+    Instead of simple concat, explicitly encodes cross-modal differences:
+      - pc_bev_feat:           LiDAR geometric features (anchor)
+      - |cam - pc|:            absolute difference (calibration error signal)
+      - cam * pc:              element-wise interaction (alignment reinforcement)
+    """
+    def __init__(self, img_in_channel, pc_in_channel, out_channel):
+        super().__init__()
+        assert img_in_channel == pc_in_channel, (
+            f"BEVDiffFuser requires equal channel dims for diff/interact ops, "
+            f"got img={img_in_channel} vs pc={pc_in_channel}")
+        in_ch = pc_in_channel * 3
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_channel, 1),
+            nn.BatchNorm2d(out_channel),
+            nn.ReLU(True)
+        )
+
+    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
+    def forward(self, img_bev_feat, pc_bev_feat):
+        diff = (img_bev_feat - pc_bev_feat).abs()
+        interact = img_bev_feat * pc_bev_feat
+        return self.conv(torch.cat([pc_bev_feat, diff, interact], dim=1))
     
 class deformable_transformer_layer(nn.Module):
     def __init__(self, 
@@ -103,11 +131,15 @@ class BEVCalib(nn.Module):
                  voxel_mode = "hard",
                  to_bev_mode = "concat",
                  scatter_reduce = "sum",
+                 fuser_type = "concat",
+                 cam_drop_prob = 0.0,
+                 intrinsic_input = False,
                 ):
         super(BEVCalib, self).__init__()
         self.use_mlp_head = use_mlp_head
         self.rotation_only = rotation_only
         self.bev_pool_factor = bev_pool_factor
+        self.intrinsic_input = intrinsic_input
         self._profile_modules = False
         self._profile_events = []
         self._profile_accum = {}
@@ -129,11 +161,19 @@ class BEVCalib(nn.Module):
         self.bev_shape = (self.img_branch.nx[0].item(), self.img_branch.nx[1].item())
         self.embed_dim = self.img_branch.out_channels + self.pc_branch.out_channels
         self.num_heads = num_heads
-        self.conv_fuser = ConvFuser(
-            self.img_branch.out_channels,
-            self.pc_branch.out_channels,
-            self.embed_dim
-        )
+        self.cam_drop_prob = cam_drop_prob
+        if fuser_type == "diff":
+            self.conv_fuser = BEVDiffFuser(
+                self.img_branch.out_channels,
+                self.pc_branch.out_channels,
+                self.embed_dim
+            )
+        else:
+            self.conv_fuser = ConvFuser(
+                self.img_branch.out_channels,
+                self.pc_branch.out_channels,
+                self.embed_dim
+            )
         self.pose_embed = nn.Parameter(
                         torch.zeros(1,
                                     self.embed_dim,
@@ -156,16 +196,28 @@ class BEVCalib(nn.Module):
             num_layers = num_layers * 4
         )
         self.head_drop = nn.Dropout(head_dropout)
+        head_in_dim = self.embed_dim
+        if self.intrinsic_input:
+            self.intrinsic_proj = nn.Sequential(
+                nn.Linear(4, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+            )
+            self.register_buffer('intr_mean',
+                torch.tensor(bev_settings.intrinsic_stats['mean']))
+            self.register_buffer('intr_std',
+                torch.tensor(bev_settings.intrinsic_stats['std']))
+            head_in_dim = self.embed_dim + 32
         if self.use_mlp_head:
             if not self.rotation_only:
                 self.translation_pred = self._build_regression_head(
-                    self.embed_dim, 3, head_dropout)
+                    head_in_dim, 3, head_dropout)
             self.rotation_pred = self._build_regression_head(
-                self.embed_dim, 4, head_dropout)
+                head_in_dim, 4, head_dropout)
         else:
             if not self.rotation_only:
-                self.translation_pred = nn.Linear(self.embed_dim, 3)
-            self.rotation_pred = nn.Linear(self.embed_dim, 4)
+                self.translation_pred = nn.Linear(head_in_dim, 3)
+            self.rotation_pred = nn.Linear(head_in_dim, 4)
         self.loss_fn = realworld_loss(
             rotation_only=rotation_only,
             enable_axis_loss=enable_axis_loss,
@@ -233,10 +285,11 @@ class BEVCalib(nn.Module):
         Returns:
             R: (B, 3, 3)
         """
-        q_norm = q.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        q = q.float()
+        q_norm = q.norm(dim=1, keepdim=True).clamp(min=1e-6)
         q = q / q_norm
         B = q.shape[0]
-        R = torch.zeros(B, 3, 3).to(q.device)
+        R = torch.zeros(B, 3, 3, dtype=torch.float32, device=q.device)
         R[:, 0, 0] = 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2)
         R[:, 0, 1] = 2 * (q[:, 1] * q[:, 2] - q[:, 0] * q[:, 3])
         R[:, 0, 2] = 2 * (q[:, 1] * q[:, 3] + q[:, 0] * q[:, 2])
@@ -286,7 +339,7 @@ class BEVCalib(nn.Module):
         init_T_to_camera = init_T_to_camera.unsqueeze(1)
         post_cam2ego_T = post_cam2ego_T.unsqueeze(1)
         cam_intrinsic = cam_intrinsic.unsqueeze(1)
-        cam2ego_T = torch.linalg.inv(init_T_to_camera)
+        cam2ego_T = torch.linalg.inv(init_T_to_camera.float())
         cam_bev_feats, cam_bev_mask = self.img_branch(cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic, post_cam2ego_T=post_cam2ego_T, imgs=img) # B, C, H, W
 
         if profiling:
@@ -297,6 +350,13 @@ class BEVCalib(nn.Module):
 
         if profiling:
             _ev[2].record()
+
+        if self.training and self.cam_drop_prob > 0:
+            drop_flag = torch.rand(1, device=cam_bev_feats.device)
+            if torch.distributed.is_initialized():
+                torch.distributed.broadcast(drop_flag, src=0)
+            if drop_flag.item() < self.cam_drop_prob:
+                cam_bev_feats = cam_bev_feats * 0
 
         x = self.conv_fuser(cam_bev_feats, pc_bev_feats) # B, C, H, W
         if self.bev_encoder_use:
@@ -345,6 +405,12 @@ class BEVCalib(nn.Module):
             _ev[4].record()
 
         x = self.head_drop(x)
+        if self.intrinsic_input:
+            K = cam_intrinsic.squeeze(1)  # (B, 3, 3)
+            intr_vec = torch.stack([K[:, 0, 0], K[:, 1, 1], K[:, 0, 2], K[:, 1, 2]], dim=-1)  # (B, 4)
+            intr_normed = (intr_vec - self.intr_mean) / self.intr_std
+            intr_feat = self.intrinsic_proj(intr_normed)  # (B, 32)
+            x = torch.cat([x, intr_feat], dim=-1)  # (B, C+32)
         if not self.rotation_only:
             translation = self.translation_pred(x)
         else:
