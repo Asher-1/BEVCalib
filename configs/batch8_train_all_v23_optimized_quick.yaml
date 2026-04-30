@@ -3,7 +3,7 @@
 # 与 batch8_train_all_v23_optimized.yaml 相同实验设计, 但:
 #   - nnodes: 1 (本地 8 GPU)
 #   - batch_size: 16 (单节点更大 batch)
-#   - max_frames_per_seq: 500 (快速采样)
+#   - max_frames_per_seq: 1000 (快速采样)
 #   - num_epochs: 400 (保持)
 #   - version 后缀 _quick
 #
@@ -178,7 +178,7 @@ experiments:
 # Quick 版本差异 (vs 32N full):
 #   - nnodes: 1 (8 GPU, eff_batch=128)
 #   - batch_size: 16
-#   - max_frames_per_seq: 500
+#   - max_frames_per_seq: 1000
 #   - warmup_epochs: 3
 #   - version 后缀 _quick
 # ============================================================================
