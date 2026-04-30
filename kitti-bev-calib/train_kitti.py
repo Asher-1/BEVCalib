@@ -601,6 +601,26 @@ def collate_fn(batch):
 
     return imgs, pcs, masks, gt_T_to_camera, intrinsics
 
+def _build_ckpt_metadata(model, args):
+    """Build model_config + env metadata for checkpoint (checkpoint-first eval)."""
+    raw_model = model.module if hasattr(model, 'module') else model
+    meta = {
+        'model_config': {
+            'rotation_only': raw_model.rotation_only,
+            'intrinsic_input': getattr(raw_model, 'intrinsic_input', False),
+            'deformable': getattr(raw_model, 'deformable', False),
+            'bev_encoder_use': getattr(raw_model, 'bev_encoder_use', True),
+            'bev_pool_factor': getattr(raw_model, 'bev_pool_factor', 0),
+        },
+        'env': {
+            'torch_version': torch.__version__,
+            'cuda_version': getattr(torch.version, 'cuda', 'N/A'),
+            'gpu_name': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu',
+        },
+    }
+    return meta
+
+
 def main():
     args = parse_args()
     
@@ -1718,7 +1738,7 @@ def main():
         if is_main and (epoch == num_epochs - 1 or (args.save_ckpt_per_epoches > 0 and (epoch + 1) % args.save_ckpt_per_epoches == 0)):
             ckpt_path = os.path.join(ckpt_save_dir, f"ckpt_{epoch+1}.pth")
             model_to_save = model.module if use_ddp else model
-            torch.save({
+            _ckpt_data = {
                 'epoch': epoch + 1,
                 'model_state_dict': model_to_save.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -1732,8 +1752,10 @@ def main():
                 'epoch_val_errors': last_epoch_val_errors,
                 'best_train': best_train,
                 'best_val': best_val,
-                'args': vars(args) 
-            }, ckpt_path)
+                'args': vars(args),
+            }
+            _ckpt_data.update(_build_ckpt_metadata(model, args))
+            torch.save(_ckpt_data, ckpt_path)
             tprint(f"Checkpoint saved to {ckpt_path}")
             
             if args.enable_ckpt_eval > 0 and is_main:
@@ -2077,7 +2099,7 @@ def main():
                 early_stop_counter = 0
                 best_ckpt_path = os.path.join(ckpt_save_dir, "ckpt_best_val.pth")
                 model_to_save = model.module if use_ddp else model
-                torch.save({
+                _best_data = {
                     'epoch': epoch + 1,
                     'model_state_dict': model_to_save.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
@@ -2091,7 +2113,9 @@ def main():
                     'best_train': best_train,
                     'best_val': best_val,
                     'args': vars(args),
-                }, best_ckpt_path)
+                }
+                _best_data.update(_build_ckpt_metadata(model, args))
+                torch.save(_best_data, best_ckpt_path)
                 tprint(f"Best val model saved to {best_ckpt_path} "
                        f"(val_rot={val_pose_errors['rot_error']:.4f}°)")
             else:

@@ -1,0 +1,184 @@
+# BEVCalib V23 Quick — 本地 1 节点快速验证
+#
+# 与 batch8_train_all_v23_optimized.yaml 相同实验设计, 但:
+#   - nnodes: 1 (本地 8 GPU)
+#   - batch_size: 16 (单节点更大 batch)
+#   - max_frames_per_seq: 500 (快速采样)
+#   - num_epochs: 400 (保持)
+#   - version 后缀 _quick
+#
+# 预计每个实验 ~2h, 8 个实验 ~16h 串行
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 5
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 3
+    backbone_lr_scale: 0.5
+    step_size: 80
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    intrinsic_input: true
+
+    max_frames_per_seq: 1000
+    num_epochs: 400
+    eval_epoches: 50
+    early_stopping_patience: 30
+    seed: 42
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # Phase A: 核心对照
+  # =========================================================================
+
+  - name: "v23_A1_rotonly_quick"
+    description: "V23-A1q: A2 LR + intrinsic_input + rotation_only"
+    dataset: "all"
+    version: "v23_A1_rotonly_quick"
+    params:
+      rotation_only: true
+
+  - name: "v23_A2_joint_quick"
+    description: "V23-A2q: A2 LR + intrinsic_input + joint"
+    dataset: "all"
+    version: "v23_A2_joint_quick"
+
+  # =========================================================================
+  # Phase B: 正则化消融
+  # =========================================================================
+
+  - name: "v23_B1_camdrop_quick"
+    description: "V23-B1q: joint + cam_drop=0.15"
+    dataset: "all"
+    version: "v23_B1_camdrop_quick"
+    params:
+      cam_drop_prob: 0.15
+
+  - name: "v23_B2_dropout_quick"
+    description: "V23-B2q: joint + 强dropout (dp=0.2, hd=0.2)"
+    dataset: "all"
+    version: "v23_B2_dropout_quick"
+    params:
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+
+  - name: "v23_B3_intr_aug_quick"
+    description: "V23-B3q: joint + intrinsic_aug ±5%"
+    dataset: "all"
+    version: "v23_B3_intr_aug_quick"
+    params:
+      augment_intrinsic: 0.05
+      augment_intrinsic_cxcy: 0.05
+
+  - name: "v23_B4_strong_aug_quick"
+    description: "V23-B4q: joint + 强增强"
+    dataset: "all"
+    version: "v23_B4_strong_aug_quick"
+    params:
+      augment_color_jitter: 0.30
+      augment_pc_jitter: 0.04
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
+
+  # =========================================================================
+  # Phase C: 全组合
+  # =========================================================================
+
+  - name: "v23_C1_full_quick"
+    description: "V23-C1q: joint + 全正则化组合"
+    dataset: "all"
+    version: "v23_C1_full_quick"
+    params:
+      cam_drop_prob: 0.15
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+      augment_intrinsic: 0.05
+      augment_intrinsic_cxcy: 0.05
+      augment_color_jitter: 0.30
+      augment_pc_jitter: 0.04
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
+
+  - name: "v23_C2_full_cosine_quick"
+    description: "V23-C2q: 全正则化 + CosineWarmRestarts"
+    dataset: "all"
+    version: "v23_C2_full_cosine_quick"
+    params:
+      cam_drop_prob: 0.15
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+      augment_intrinsic: 0.05
+      augment_intrinsic_cxcy: 0.05
+      augment_color_jitter: 0.30
+      augment_pc_jitter: 0.04
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+
+# ============================================================================
+# Quick 版本差异 (vs 32N full):
+#   - nnodes: 1 (8 GPU, eff_batch=128)
+#   - batch_size: 16
+#   - max_frames_per_seq: 500
+#   - warmup_epochs: 3
+#   - version 后缀 _quick
+# ============================================================================

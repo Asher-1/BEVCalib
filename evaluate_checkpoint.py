@@ -372,6 +372,127 @@ def _resolve_perturbation_from_ckpt(args, checkpoint):
               f"per_axis_prob={args.per_axis_prob} (从checkpoint恢复)")
 
 
+def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
+    """Resolve model construction params: CLI > checkpoint > default.
+
+    Returns a dict of kwargs ready for BEVCalib(**resolved).
+    """
+    _log = (lambda *a: None) if quiet else (lambda *a: print(*a))
+    resolved = {}
+    sources = {}
+
+    if getattr(args, 'use_mlp_head', -1) >= 0:
+        resolved['use_mlp_head'] = args.use_mlp_head > 0
+        sources['use_mlp_head'] = 'cli'
+    else:
+        resolved['use_mlp_head'] = 'rotation_pred.0.weight' in state_dict
+        sources['use_mlp_head'] = 'auto-detect'
+
+    _STR_PARAMS = {
+        'voxel_mode':     ('voxel_mode',      'hard'),
+        'scatter_reduce': ('scatter_reduce',   'sum'),
+        'to_bev_mode':    ('to_bev_mode',      'concat'),
+        'fuser_type':     ('fuser_type',       'concat'),
+        'depth_model_type': ('depth_model_type', 'midas_small'),
+        'fd_mode':        ('fd_mode',          'replace'),
+    }
+    for key, (ckpt_key, default) in _STR_PARAMS.items():
+        cli_val = getattr(args, key, None)
+        if cli_val is not None:
+            resolved[key] = cli_val
+            sources[key] = 'cli'
+        elif ckpt_key in ckpt_args:
+            resolved[key] = ckpt_args[ckpt_key]
+            sources[key] = 'checkpoint'
+        else:
+            resolved[key] = default
+            sources[key] = 'default'
+
+    _BOOL_PARAMS = {
+        'deformable':           ('deformable',           False),
+        'bev_encoder':          ('bev_encoder',          True),
+        'use_foundation_depth': ('use_foundation_depth', False),
+    }
+    for key, (ckpt_key, default) in _BOOL_PARAMS.items():
+        cli_val = getattr(args, key, -1)
+        if cli_val >= 0:
+            resolved[key] = cli_val > 0
+            sources[key] = 'cli'
+        elif ckpt_key in ckpt_args:
+            val = ckpt_args[ckpt_key]
+            resolved[key] = (val > 0) if isinstance(val, (int, float)) else bool(val)
+            sources[key] = 'checkpoint'
+        else:
+            resolved[key] = default
+            sources[key] = 'default'
+
+    _INT_PARAMS = {
+        'bev_pool_factor': ('bev_pool_factor', 0),
+    }
+    for key, (ckpt_key, default) in _INT_PARAMS.items():
+        cli_val = getattr(args, key, -1)
+        if cli_val >= 0:
+            resolved[key] = cli_val
+            sources[key] = 'cli'
+        elif ckpt_key in ckpt_args:
+            resolved[key] = int(ckpt_args[ckpt_key])
+            sources[key] = 'checkpoint'
+        else:
+            resolved[key] = default
+            sources[key] = 'default'
+
+    resolved['intrinsic_input'] = ckpt_args.get('intrinsic_input', False)
+    sources['intrinsic_input'] = 'checkpoint' if 'intrinsic_input' in ckpt_args else 'default'
+
+    ckpt_sourced = [f"{k}={resolved[k]}" for k, s in sources.items() if s == 'checkpoint']
+    if ckpt_sourced:
+        _log(f"   [checkpoint-first] auto-detected: {', '.join(ckpt_sourced)}")
+    cli_overrides = [f"{k}={resolved[k]}" for k, s in sources.items() if s == 'cli']
+    if cli_overrides:
+        _log(f"   [checkpoint-first] cli overrides: {', '.join(cli_overrides)}")
+
+    return resolved
+
+
+def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False):
+    """Build BEVCalib model from checkpoint with auto-detected params.
+
+    Returns (model, ckpt_args, resolved_params).
+    """
+    state_dict = checkpoint['model_state_dict']
+    ckpt_args = checkpoint.get('args', {})
+    p = _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=quiet)
+
+    img_shape = (args.target_height, args.target_width)
+    model = BEVCalib(
+        deformable=p['deformable'],
+        bev_encoder=p['bev_encoder'],
+        img_shape=img_shape,
+        rotation_only=rotation_only,
+        use_mlp_head=p['use_mlp_head'],
+        bev_pool_factor=p['bev_pool_factor'],
+        use_foundation_depth=p['use_foundation_depth'],
+        depth_model_type=p['depth_model_type'],
+        fd_mode=p['fd_mode'] if p['use_foundation_depth'] else 'replace',
+        voxel_mode=p['voxel_mode'],
+        to_bev_mode=p['to_bev_mode'],
+        scatter_reduce=p['scatter_reduce'],
+        fuser_type=p['fuser_type'],
+        intrinsic_input=p['intrinsic_input'],
+    ).to(device)
+
+    state_dict = _auto_permute_spconv_weights(state_dict, model)
+    _adapt_model_to_checkpoint(model, state_dict, device)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if not quiet:
+        if missing:
+            print(f"   Missing keys: {missing}")
+        if unexpected:
+            print(f"   Unexpected keys (skipped): {unexpected}")
+    model.eval()
+    return model, ckpt_args, p
+
+
 def _format_elapsed(seconds):
     """Format elapsed seconds to human-readable string."""
     if seconds < 60:
@@ -463,51 +584,13 @@ def evaluate_checkpoint(args):
     # 从 checkpoint 自动恢复扰动参数（如果 CLI 未显式指定）
     _resolve_perturbation_from_ckpt(args, checkpoint)
     
-    # 创建模型
-    state_dict = checkpoint['model_state_dict']
-    if args.use_mlp_head >= 0:
-        use_mlp_head = args.use_mlp_head > 0
-    else:
-        use_mlp_head = 'rotation_pred.0.weight' in state_dict
+    # 创建模型 (checkpoint-first: 架构参数自动从 checkpoint 检测)
     print(f"\n2. 初始化模型（图像尺寸: {args.target_width}x{args.target_height}）...")
-    print(f"   回归头类型: {'MLP (V6)' if use_mlp_head else 'Linear (V5及更早)'}"
-          f"{' (auto-detected)' if args.use_mlp_head < 0 else ''}")
-    _use_fd = getattr(args, 'use_foundation_depth', 0) > 0
-    _fd_mode = getattr(args, 'fd_mode', 'replace') if _use_fd else 'replace'
-    ckpt_args = checkpoint.get('args', {})
-    _voxel_mode = args.voxel_mode or ckpt_args.get('voxel_mode', 'hard')
-    _scatter_reduce = args.scatter_reduce or ckpt_args.get('scatter_reduce', 'sum')
-    _to_bev_mode = args.to_bev_mode or ckpt_args.get('to_bev_mode', 'concat')
-    _fuser_type = getattr(args, 'fuser_type', None) or ckpt_args.get('fuser_type', 'concat')
-    model = BEVCalib(
-        deformable=args.deformable > 0,
-        bev_encoder=args.bev_encoder > 0,
-        img_shape=(args.target_height, args.target_width),
-        rotation_only=rotation_only,
-        use_mlp_head=use_mlp_head,
-        bev_pool_factor=args.bev_pool_factor,
-        use_foundation_depth=_use_fd,
-        depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
-        fd_mode=_fd_mode,
-        voxel_mode=_voxel_mode,
-        to_bev_mode=_to_bev_mode,
-        scatter_reduce=_scatter_reduce,
-        fuser_type=_fuser_type,
-        intrinsic_input=ckpt_args.get('intrinsic_input', False),
-    ).to(device)
-    print(f"   Voxel: mode={_voxel_mode}, scatter_reduce={_scatter_reduce}, to_bev={_to_bev_mode}"
-          f"{' (from checkpoint)' if not args.voxel_mode else ''}")
-    if _use_fd:
-        print(f"   Foundation Depth: model={getattr(args, 'depth_model_type', 'midas_small')}, mode={_fd_mode}")
-    
-    state_dict = _auto_permute_spconv_weights(state_dict, model)
-    _adapt_model_to_checkpoint(model, state_dict, device)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if missing:
-        print(f"   Missing keys: {missing}")
-    if unexpected:
-        print(f"   Unexpected keys (skipped): {unexpected}")
-    model.eval()
+    model, ckpt_args, _p = _build_model_from_ckpt(args, checkpoint, device, rotation_only)
+    print(f"   回归头类型: {'MLP (V6)' if _p['use_mlp_head'] else 'Linear (V5及更早)'}")
+    print(f"   Voxel: mode={_p['voxel_mode']}, scatter_reduce={_p['scatter_reduce']}, to_bev={_p['to_bev_mode']}")
+    if _p['use_foundation_depth']:
+        print(f"   Foundation Depth: model={_p['depth_model_type']}, mode={_p['fd_mode']}")
     print(f"   ✓ 模型加载完成")
     
     # 加载数据集
@@ -1104,38 +1187,7 @@ def _load_model_from_ckpt(ckpt_path, device, args, rotation_only):
     checkpoint = torch.load(ckpt_path, map_location=device)
     epoch = checkpoint.get('epoch', 'unknown')
 
-    state_dict = checkpoint['model_state_dict']
-    if args.use_mlp_head >= 0:
-        use_mlp_head = args.use_mlp_head > 0
-    else:
-        use_mlp_head = 'rotation_pred.0.weight' in state_dict
-    _use_fd = getattr(args, 'use_foundation_depth', 0) > 0
-    _fd_mode = getattr(args, 'fd_mode', 'replace') if _use_fd else 'replace'
-    ckpt_args = checkpoint.get('args', {})
-    _voxel_mode = getattr(args, 'voxel_mode', None) or ckpt_args.get('voxel_mode', 'hard')
-    _scatter_reduce = getattr(args, 'scatter_reduce', None) or ckpt_args.get('scatter_reduce', 'sum')
-    _to_bev_mode = getattr(args, 'to_bev_mode', None) or ckpt_args.get('to_bev_mode', 'concat')
-    _fuser_type = getattr(args, 'fuser_type', None) or ckpt_args.get('fuser_type', 'concat')
-    model = BEVCalib(
-        deformable=args.deformable > 0,
-        bev_encoder=args.bev_encoder > 0,
-        img_shape=(args.target_height, args.target_width),
-        rotation_only=rotation_only,
-        use_mlp_head=use_mlp_head,
-        bev_pool_factor=args.bev_pool_factor,
-        use_foundation_depth=_use_fd,
-        depth_model_type=getattr(args, 'depth_model_type', 'midas_small'),
-        fd_mode=_fd_mode,
-        voxel_mode=_voxel_mode,
-        to_bev_mode=_to_bev_mode,
-        scatter_reduce=_scatter_reduce,
-        fuser_type=_fuser_type,
-        intrinsic_input=ckpt_args.get('intrinsic_input', False),
-    ).to(device)
-    state_dict = _auto_permute_spconv_weights(state_dict, model)
-    _adapt_model_to_checkpoint(model, state_dict, device)
-    model.load_state_dict(state_dict, strict=False)
-    model.eval()
+    model, _, _ = _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=True)
 
     train_err = checkpoint.get('epoch_train_errors', None)
     val_err = checkpoint.get('epoch_val_errors', None)
@@ -2025,8 +2077,10 @@ def main():
                        help="验证集比例（默认0.2，与训练时80/20划分一致）")
     parser.add_argument("--use_full_dataset", action='store_true', default=False,
                        help="使用全量数据集评估（跨数据集泛化测试时使用，忽略 validate_sample_ratio）")
-    parser.add_argument("--deformable", type=int, default=0, help="是否使用 deformable attention")
-    parser.add_argument("--bev_encoder", type=int, default=1, help="是否使用 BEV encoder")
+    parser.add_argument("--deformable", type=int, default=-1,
+                       help="是否使用 deformable attention (-1=从checkpoint自动检测)")
+    parser.add_argument("--bev_encoder", type=int, default=-1,
+                       help="是否使用 BEV encoder (-1=从checkpoint自动检测)")
     parser.add_argument("--xyz_only", type=int, default=1, help="是否只使用 XYZ 坐标")
     parser.add_argument("--vis_points", type=int, default=80000, help="可视化最大点数")
     parser.add_argument("--vis_point_radius", type=int, default=1, help="可视化点半径")
@@ -2038,8 +2092,8 @@ def main():
                             "设为-1时自动从checkpoint中读取（默认-1）")
     parser.add_argument("--use_mlp_head", type=int, default=-1,
                        help="回归头类型 (1=MLP, 0=Linear, -1=自动从checkpoint检测)")
-    parser.add_argument("--bev_pool_factor", type=int, default=0,
-                       help="BEV spatial avg-pool factor (0=disabled, 2=2x2 pool)")
+    parser.add_argument("--bev_pool_factor", type=int, default=-1,
+                       help="BEV spatial avg-pool factor (-1=从checkpoint自动检测, 0=disabled, 2=2x2 pool)")
     parser.add_argument("--use_drcv", action='store_true', default=False,
                        help="Use drcv sparse conv backend (env var handled before import)")
     parser.add_argument("--voxel_mode", type=str, default=None,
@@ -2056,8 +2110,8 @@ def main():
                        help="Sparse-to-BEV mode (auto-detected from checkpoint if omitted)")
     parser.add_argument("--eval_seed", type=int, default=42,
                        help="Fixed seed for perturbation generation, ensuring reproducible evaluation (default: 42)")
-    parser.add_argument("--use_foundation_depth", type=int, default=0,
-                       help="Use Foundation Depth (MiDaS) for LSS (1=enable, 0=disable)")
+    parser.add_argument("--use_foundation_depth", type=int, default=-1,
+                       help="Use Foundation Depth (MiDaS) for LSS (-1=从checkpoint自动检测, 1=enable, 0=disable)")
     parser.add_argument("--depth_model_type", type=str, default="midas_small",
                        help="Depth model type for Foundation Depth (default: midas_small)")
     parser.add_argument("--fd_mode", type=str, default="replace",

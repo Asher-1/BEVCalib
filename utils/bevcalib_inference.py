@@ -31,6 +31,7 @@ class BEVCalibInference(nn.Module):
         super().__init__()
         self.model = model
         self.rotation_only = model.rotation_only
+        self.intrinsic_input = getattr(model, 'intrinsic_input', False)
         self.max_attn_tokens = max_attn_tokens
 
     @torch.no_grad()
@@ -96,6 +97,13 @@ class BEVCalibInference(nn.Module):
             x = m.transformer(x, src_key_padding_mask=padding_mask)
             valid_mask = bev_mask_f.unsqueeze(-1)
             x = (x * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
+
+        if self.intrinsic_input:
+            K = cam_intrinsic  # (B, 3, 3)
+            intr_vec = torch.stack([K[:, 0, 0], K[:, 1, 1], K[:, 0, 2], K[:, 1, 2]], dim=-1)
+            intr_normed = (intr_vec - m.intr_mean) / m.intr_std
+            intr_feat = m.intrinsic_proj(intr_normed)
+            x = torch.cat([x, intr_feat], dim=-1)
 
         if not self.rotation_only:
             translation = m.translation_pred(x)

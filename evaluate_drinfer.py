@@ -122,7 +122,8 @@ def parse_args():
                    help="测试数据采样步长 (每隔N帧取1帧, None=使用全部帧)")
     p.add_argument("--eval_max_frames_per_seq", type=int, default=None,
                    help="测试集每序列最多帧数 (均匀下采样; 与 eval_sample_step 互斥)")
-    p.add_argument("--rotation_only", type=int, default=1)
+    p.add_argument("--rotation_only", type=int, default=-1,
+                   help="仅优化旋转 (-1=从checkpoint自动检测, 1=仅旋转, 0=旋转+平移)")
     p.add_argument("--vis_interval", type=int, default=200)
     p.add_argument("--vis_points", type=int, default=8000)
     p.add_argument("--vis_point_radius", type=int, default=2)
@@ -172,17 +173,21 @@ def _resolve_from_checkpoint(args):
             args.to_bev_mode = _get("to_bev_mode", "concat")
         if args.use_mlp_head == -1:
             args.use_mlp_head = 1 if _get("use_mlp_head", 0) else 0
-        rot = _get("rotation_only", None)
-        if rot is not None and args.rotation_only == 1:
-            args.rotation_only = 1 if rot else 0
-        if args.bev_pool_factor == 0:
+        if args.rotation_only == -1:
+            rot = _get("rotation_only", None)
+            if rot is not None:
+                args.rotation_only = 1 if rot else 0
+            elif 'rotation_only' in ckpt:
+                args.rotation_only = 1 if ckpt['rotation_only'] else 0
+            else:
+                args.rotation_only = 0
+            print(f"  [checkpoint-first] rotation_only={args.rotation_only} (auto-detected)")
+        if args.bev_pool_factor <= 0:
             args.bev_pool_factor = _get("bev_pool_factor", 0)
-        if args.deformable == 0:
+        if args.deformable <= 0:
             args.deformable = 1 if _get("deformable", False) else 0
-        if not hasattr(args, 'bev_encoder') or args.bev_encoder is None:
+        if not hasattr(args, 'bev_encoder') or getattr(args, 'bev_encoder', None) is None:
             args.bev_encoder = 1 if _get("bev_encoder", True) else 0
-        else:
-            args.bev_encoder = 1
         if not hasattr(args, 'perturb_distribution'):
             args.perturb_distribution = _get('perturb_distribution', 'uniform')
         if not hasattr(args, 'per_axis_prob'):

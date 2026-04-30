@@ -1,0 +1,234 @@
+# BEVCalib V23 — 泛化优先配置
+#
+# 设计依据:
+#   V22 diagnosis 泛化评估 (关键发现):
+#   - B1 joint (bb=0.5, 1N): gen=0.665° ← 泛化冠军
+#   - A1 quick (bb=0.1, 1N): gen=0.670°
+#   - A2 full (bb=0.5, 16N): gen=1.027° ← 最差! (val=0.07° 训练冠军)
+#   → 训练精度最优 ≠ 泛化最优! 过拟合是核心瓶颈
+#   → joint 优化提供额外正则化, 改善泛化
+#   → 多节点大 batch 过拟合严重
+#
+#   V22 intrinsic_input 泛化评估:
+#   - v22_intr_input: gen=0.752°, v22_intr_input_aug: gen=0.732°
+#   → intrinsic_input 本身不能解决过拟合, 但提供有价值的内参感知
+#
+# V23 核心策略 (泛化优先):
+#   = joint 优化 (B1 冠军策略)
+#   + A2 LR 配置 (lr=1e-4, bb=0.5)
+#   + intrinsic_input (V22 验证有效)
+#   + 强正则化 (cam_drop / dropout / 强增强) 对抗大 batch 过拟合
+#
+# 实验矩阵:
+#   A: 核心对照 — rot_only vs joint
+#   B: 正则化消融 — cam_drop / dropout / intrinsic_aug
+#   C: 全组合 — 最强泛化配置
+#
+# 预期: gen_rot < 0.60°, val_rot < 0.10°
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    # V23: 默认 joint 优化 (B1 泛化冠军策略)
+    rotation_only: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    # A2 LR 配置 (训练精度最优, bb_lr=5e-5)
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.5
+    step_size: 80
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    # Scene augmentation
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    # V23: intrinsic_input 默认开启
+    intrinsic_input: true
+
+    max_frames_per_seq: 10000
+    early_stopping_patience: 30
+    seed: 42
+    eval_epoches: 50
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # Phase A: 核心对照
+  # =========================================================================
+
+  # A1: rot_only 对照 (确认 intrinsic_input + A2 LR 在 rotation_only 下的表现)
+  - name: "v23_A1_rotonly"
+    description: "V23-A1: A2 LR + intrinsic_input + rotation_only (对照)"
+    dataset: "all"
+    version: "v23_A1_rotonly"
+    params:
+      rotation_only: true
+
+  # A2: joint 基线 (将 B1 冠军配置 + intrinsic_input + A2 LR 结合)
+  - name: "v23_A2_joint"
+    description: "V23-A2: A2 LR + intrinsic_input + joint (核心实验)"
+    dataset: "all"
+    version: "v23_A2_joint"
+
+  # =========================================================================
+  # Phase B: 正则化消融 (全部基于 joint)
+  # =========================================================================
+
+  # B1: cam_drop=0.15 — 相机分支 dropout (阻止 camera-LiDAR 过拟合耦合)
+  - name: "v23_B1_camdrop"
+    description: "V23-B1: joint + cam_drop=0.15 (相机分支正则化)"
+    dataset: "all"
+    version: "v23_B1_camdrop"
+    params:
+      cam_drop_prob: 0.15
+
+  # B2: 更强 dropout (drop_path=0.2, head=0.2)
+  - name: "v23_B2_dropout"
+    description: "V23-B2: joint + 强 dropout (dp=0.2, hd=0.2)"
+    dataset: "all"
+    version: "v23_B2_dropout"
+    params:
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+
+  # B3: intrinsic_aug ±5% (增强内参多样性)
+  - name: "v23_B3_intr_aug"
+    description: "V23-B3: joint + intrinsic_aug ±5%"
+    dataset: "all"
+    version: "v23_B3_intr_aug"
+    params:
+      augment_intrinsic: 0.05
+      augment_intrinsic_cxcy: 0.05
+
+  # B4: 更强 scene 增强 (所有增强强度翻倍)
+  - name: "v23_B4_strong_aug"
+    description: "V23-B4: joint + 强增强 (color=0.3, pc_jitter=0.04)"
+    dataset: "all"
+    version: "v23_B4_strong_aug"
+    params:
+      augment_color_jitter: 0.30
+      augment_pc_jitter: 0.04
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
+
+  # =========================================================================
+  # Phase C: 全组合 — 最强泛化配置
+  # =========================================================================
+
+  # C1: cam_drop + 强 dropout + intrinsic_aug + 强增强
+  - name: "v23_C1_full"
+    description: "V23-C1: joint + cam_drop + 强dropout + intr_aug + 强增强"
+    dataset: "all"
+    version: "v23_C1_full"
+    params:
+      cam_drop_prob: 0.15
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+      augment_intrinsic: 0.05
+      augment_intrinsic_cxcy: 0.05
+      augment_color_jitter: 0.30
+      augment_pc_jitter: 0.04
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
+
+  # C2: C1 + CosineWarmRestarts (更平滑的 LR 衰减)
+  - name: "v23_C2_full_cosine"
+    description: "V23-C2: C1 全组合 + CosineWarmRestarts"
+    dataset: "all"
+    version: "v23_C2_full_cosine"
+    params:
+      cam_drop_prob: 0.15
+      drop_path_rate: 0.2
+      head_dropout: 0.2
+      augment_intrinsic: 0.05
+      augment_intrinsic_cxcy: 0.05
+      augment_color_jitter: 0.30
+      augment_pc_jitter: 0.04
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+
+# ============================================================================
+# V23 实验矩阵 (泛化优先)
+# ============================================================================
+#
+#   | 实验 | Joint | cam_drop | dp/hd    | intr_aug | scene_aug | LR sched | 对比目标    |
+#   |------|-------|----------|----------|----------|-----------|----------|-------------|
+#   | A1   | No    | 0        | 0.1/0.1  | 0%       | standard  | Step     | rot_only 对照|
+#   | A2   | Yes   | 0        | 0.1/0.1  | 0%       | standard  | Step     | joint 基线   |
+#   | B1   | Yes   | 0.15     | 0.1/0.1  | 0%       | standard  | Step     | +cam_drop    |
+#   | B2   | Yes   | 0        | 0.2/0.2  | 0%       | standard  | Step     | +强 dropout  |
+#   | B3   | Yes   | 0        | 0.1/0.1  | ±5%      | standard  | Step     | +intr_aug    |
+#   | B4   | Yes   | 0        | 0.1/0.1  | 0%       | strong    | Step     | +强增强      |
+#   | C1   | Yes   | 0.15     | 0.2/0.2  | ±5%      | strong    | Step     | 全组合       |
+#   | C2   | Yes   | 0.15     | 0.2/0.2  | ±5%      | strong    | CosineWR | 全组合+Cosine|
+#
+# 关键对比链:
+#   1. rot_only vs joint:    A1 vs A2 (核心: joint 是否泛化更好)
+#   2. cam_drop 效果:         A2 vs B1
+#   3. dropout 强度:          A2 vs B2
+#   4. intrinsic_aug 效果:    A2 vs B3
+#   5. scene_aug 强度:        A2 vs B4
+#   6. 全组合 vs 基线:        A2 vs C1
+#   7. LR schedule 效果:      C1 vs C2

@@ -412,10 +412,11 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
             "--trans_range", str(TRANS_RANGE),
             "--use_full_dataset",
             "--max_batches", "0",
-            "--rotation_only", str(mcfg["rotation_only"]),
             "--vis_interval", str(VIS_INTERVAL),
             "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
         ]
+        if "rotation_only" in mcfg:
+            cmd.extend(["--rotation_only", str(mcfg["rotation_only"])])
         if mcfg.get("compare_pytorch"):
             cmd.append("--compare_pytorch")
         if mcfg.get("model_name"):
@@ -440,16 +441,23 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
             "--trans_range", str(TRANS_RANGE),
             "--use_full_dataset",
             "--max_batches", "0",
-            "--rotation_only", str(mcfg["rotation_only"]),
             "--vis_interval", str(VIS_INTERVAL),
             "--batch_size", str(mcfg.get("batch_size", BATCH_SIZE)),
         ]
-    if mcfg.get("use_deformable"):
-        cmd.extend(["--deformable", "1"])
-    if "use_mlp_head" in mcfg:
-        cmd.extend(["--use_mlp_head", str(mcfg["use_mlp_head"])])
-    if "bev_pool_factor" in mcfg:
-        cmd.extend(["--bev_pool_factor", str(mcfg["bev_pool_factor"])])
+
+    # Checkpoint-first: model architecture params are auto-detected from
+    # checkpoint by evaluate_checkpoint.py.  Only pass when YAML explicitly
+    # overrides the checkpoint value (e.g. testing rotation_only=1 on a
+    # joint-trained model).
+    _OPTIONAL_OVERRIDES = [
+        "rotation_only", "deformable", "use_mlp_head", "bev_pool_factor",
+        "voxel_mode", "scatter_reduce", "to_bev_mode", "fuser_type",
+        "use_foundation_depth", "depth_model_type", "fd_mode",
+    ]
+    for p in _OPTIONAL_OVERRIDES:
+        if p in mcfg:
+            cmd.extend([f"--{p}", str(mcfg[p])])
+
     if "use_drcv" in mcfg:
         if mcfg["use_drcv"]:
             if not use_drinfer_backend:
@@ -458,20 +466,7 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
         else:
             env["USE_DRCV_BACKEND"] = "0"
     if mcfg.get("use_foundation_depth"):
-        cmd.extend(["--use_foundation_depth", str(mcfg["use_foundation_depth"])])
         env["HF_HUB_OFFLINE"] = "1"
-    if mcfg.get("depth_model_type"):
-        cmd.extend(["--depth_model_type", str(mcfg["depth_model_type"])])
-    if mcfg.get("fd_mode"):
-        cmd.extend(["--fd_mode", str(mcfg["fd_mode"])])
-    if mcfg.get("voxel_mode"):
-        cmd.extend(["--voxel_mode", str(mcfg["voxel_mode"])])
-    if mcfg.get("scatter_reduce"):
-        cmd.extend(["--scatter_reduce", str(mcfg["scatter_reduce"])])
-    if mcfg.get("fuser_type"):
-        cmd.extend(["--fuser_type", str(mcfg["fuser_type"])])
-    if mcfg.get("to_bev_mode"):
-        cmd.extend(["--to_bev_mode", str(mcfg["to_bev_mode"])])
     if EVAL_SAMPLE_STEP is not None:
         cmd.extend(["--eval_sample_step", str(EVAL_SAMPLE_STEP)])
     if EVAL_MAX_FRAMES_PER_SEQ is not None:
@@ -1104,11 +1099,19 @@ def generate_report(all_stats):
     lines.append("一、实验配置概况")
     lines.append("=" * 80)
     lines.append("")
-    lines.append("| 模型标签 | 训练角度 | Z体素 | 架构版本 | 优化模式 | Checkpoint |")
-    lines.append("| --- | ---: | ---: | --- | --- | --- |")
+    lines.append("| 模型标签 | 描述 | Checkpoint |")
+    lines.append("| --- | --- | --- |")
     for s in all_stats:
         c = s['config']
-        lines.append(f"| {s['label']} | {c['angle_deg']}deg | z={c['z_voxels']} | {c['version']} | {c['mode_desc']} | {c['ckpt']} |")
+        desc = c.get('mode_desc', '')
+        if not desc:
+            parts = []
+            if 'angle_deg' in c:
+                parts.append(f"{c['angle_deg']}deg")
+            if 'version' in c:
+                parts.append(c['version'])
+            desc = ', '.join(parts) if parts else s['label']
+        lines.append(f"| {s['label']} | {desc} | {c.get('ckpt', 'best_val')} |")
     lines.append("")
 
     # Section 2
@@ -1321,31 +1324,33 @@ def generate_report(all_stats):
 
     z_groups = {}
     for s in all_stats:
-        z = s['config']['z_voxels']
+        z = s['config'].get('z_voxels', 'auto')
         z_groups.setdefault(z, []).append(s)
 
-    lines.append("Z体素影响分析:")
-    for z in sorted(z_groups.keys()):
-        group = z_groups[z]
-        avg_rot = np.mean([s['rot_error_mean'] for s in group])
-        lines.append(f"  - z={z}: 平均Mean Rot = {avg_rot:.3f} deg ({len(group)}个模型)")
-    lines.append("")
+    if len(z_groups) > 1:
+        lines.append("Z体素影响分析:")
+        for z in sorted(z_groups.keys(), key=lambda x: (isinstance(x, str), x)):
+            group = z_groups[z]
+            avg_rot = np.mean([s['rot_error_mean'] for s in group])
+            lines.append(f"  - z={z}: 平均Mean Rot = {avg_rot:.3f} deg ({len(group)}个模型)")
+        lines.append("")
 
     angle_groups = {}
     for s in all_stats:
-        a = s['config']['angle_deg']
+        a = s['config'].get('angle_deg', 'auto')
         angle_groups.setdefault(a, []).append(s)
 
-    lines.append("训练角度影响分析:")
-    for a in sorted(angle_groups.keys()):
-        group = angle_groups[a]
-        avg_rot = np.mean([s['rot_error_mean'] for s in group])
-        lines.append(f"  - {a}deg训练: 平均Mean Rot = {avg_rot:.3f} deg ({len(group)}个模型)")
-    lines.append("")
+    if len(angle_groups) > 1:
+        lines.append("训练角度影响分析:")
+        for a in sorted(angle_groups.keys(), key=lambda x: (isinstance(x, str), x)):
+            group = angle_groups[a]
+            avg_rot = np.mean([s['rot_error_mean'] for s in group])
+            lines.append(f"  - {a}deg训练: 平均Mean Rot = {avg_rot:.3f} deg ({len(group)}个模型)")
+        lines.append("")
 
     mode_groups = {}
     for s in all_stats:
-        m = s['config']['mode_desc']
+        m = s['config'].get('mode_desc', s['label'])
         mode_groups.setdefault(m, []).append(s)
 
     lines.append("优化模式影响分析:")

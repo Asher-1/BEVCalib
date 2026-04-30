@@ -46,6 +46,7 @@ def load_model_and_data(args):
         voxel_mode=args.voxel_mode,
         scatter_reduce=args.scatter_reduce,
         to_bev_mode="concat",
+        intrinsic_input=ckpt_args.get('intrinsic_input', False),
     )
 
     state_dict = ckpt_data.get('model_state_dict', ckpt_data.get('state_dict', ckpt_data))
