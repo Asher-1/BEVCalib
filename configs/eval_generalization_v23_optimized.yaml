@@ -1,0 +1,79 @@
+# V23 泛化优先 — 泛化评估配置
+#
+# 来源: batch8_train_all_v23_optimized.yaml
+#   A1: rot_only 对照
+#   A2: joint 基线
+#   B1-B4: 正则化消融 (cam_drop / dropout / 点云增强 / 色彩增强)
+#   C1-C2: 全组合
+#
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；须保留 bev_zbound_step。
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v23_optimized.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v23_optimized.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v23"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v23_optimized_eval"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # Phase A: 核心对照
+  - label: "v23_A1_rotonly"
+    dir_name: "model_small_5deg_v23_A1_rotonly"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "A2 LR + rotation_only (对照)"
+
+  - label: "v23_A2_joint"
+    dir_name: "model_small_5deg_v23_A2_joint"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "A2 LR + joint (核心实验)"
+
+  # Phase B: 正则化消融
+  - label: "v23_B1_camdrop"
+    dir_name: "model_small_5deg_v23_B1_camdrop"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "joint + cam_drop=0.15"
+
+  - label: "v23_B2_dropout"
+    dir_name: "model_small_5deg_v23_B2_dropout"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "joint + drop_path=0.2, head_dropout=0.2"
+
+  - label: "v23_B3_pc_aug"
+    dir_name: "model_small_5deg_v23_B3_pc_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "joint + 强点云增强 (jitter=0.05, dropout=0.10)"
+
+  - label: "v23_B4_strong_aug"
+    dir_name: "model_small_5deg_v23_B4_strong_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "joint + 强增强 (color=0.3, pc_jitter=0.04)"
+
+  # Phase C: 全组合
+  - label: "v23_C1_full"
+    dir_name: "model_small_5deg_v23_C1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "joint + 全正则化组合"
+
+  - label: "v23_C2_full_cosine"
+    dir_name: "model_small_5deg_v23_C2_full_cosine"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "joint + 全正则化 + CosineWarmRestarts"

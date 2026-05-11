@@ -128,31 +128,38 @@ class BEVCalibInference(nn.Module):
         return T_gt_expected
 
 
-class SequenceMedianAggregator:
+class TemporalCalibrationAggregator:
     """
-    Production-ready sequence-level median aggregator for BEVCalib predictions.
+    Production-ready temporal aggregator for BEVCalib online calibration.
 
-    Accumulates per-frame 4x4 transform predictions and produces a robust
-    aggregate via element-wise rotation matrix median (SVD-projected to SO(3))
-    and element-wise translation median.
+    Implements the MEDW (axis-angle median) method that achieved BEST=0.085°
+    in V29-G3 evaluation — superior to element-wise matrix median + SVD.
 
-    Usage (streaming mode -- accumulate then query):
-        agg = SequenceMedianAggregator(min_frames=5, max_frames=100)
+    Supports two aggregation modes:
+      - 'axis_angle_median' (default, BEST): rotation → axis-angle → per-axis
+        median → exponential map back to SO(3). Best for zero-mean random noise.
+      - 'svd_mean': rotation matrix Euclidean mean → SVD projection to SO(3).
+
+    Usage (streaming -- accumulate then query):
+        agg = TemporalCalibrationAggregator(min_frames=50, max_frames=400)
         for frame in sequence:
             pred_T = model(img, pc, init_T, post_T, K)
-            agg.add(pred_T)              # (B, 4, 4) or (4, 4) numpy/torch
+            agg.add(pred_T)
             if agg.ready:
-                calib = agg.aggregate()  # (4, 4) numpy
-        agg.reset()                      # start new sequence
+                calib = agg.aggregate()   # (4, 4) numpy
+                conf = agg.get_confidence()
+        agg.reset()
 
-    Usage (batch mode -- all frames at once):
+    Usage (batch -- all frames at once):
         Ts = [model(img_i, ...).cpu().numpy() for img_i in seq]
-        calib = SequenceMedianAggregator.aggregate_batch(Ts)
+        calib = TemporalCalibrationAggregator.aggregate_batch(Ts)
     """
 
-    def __init__(self, min_frames=5, max_frames=200):
+    def __init__(self, min_frames=50, max_frames=400,
+                 method='axis_angle_median'):
         self.min_frames = min_frames
         self.max_frames = max_frames
+        self.method = method
         self._buffer = deque(maxlen=max_frames)
 
     def reset(self):
@@ -163,10 +170,10 @@ class SequenceMedianAggregator:
         if isinstance(pred_T, torch.Tensor):
             pred_T = pred_T.detach().cpu().numpy()
         if pred_T.ndim == 2:
-            self._buffer.append(pred_T.copy())
+            self._buffer.append(pred_T.astype(np.float64).copy())
         elif pred_T.ndim == 3:
             for i in range(pred_T.shape[0]):
-                self._buffer.append(pred_T[i].copy())
+                self._buffer.append(pred_T[i].astype(np.float64).copy())
 
     @property
     def ready(self):
@@ -177,59 +184,85 @@ class SequenceMedianAggregator:
         return len(self._buffer)
 
     def aggregate(self):
-        """Return the SVD-projected rotation median + translation median as (4,4)."""
+        """Return aggregated calibration as (4,4) numpy array."""
         if not self._buffer:
             raise RuntimeError("No predictions to aggregate. Call add() first.")
-        return self.aggregate_batch(list(self._buffer))
+        return self.aggregate_batch(list(self._buffer), method=self.method)
 
     @staticmethod
-    def _rotation_matrix_median_svd(Rs):
-        """Element-wise median of rotation matrices + SVD projection to SO(3)."""
-        R_med_raw = np.median(Rs, axis=0)
-        U, _, Vt = np.linalg.svd(R_med_raw)
-        R_median = U @ Vt
-        if np.linalg.det(R_median) < 0:
+    def _rotation_to_axis_angle(R):
+        """Convert 3x3 rotation matrix to axis-angle (3,) vector.
+        Uses scipy for numerical consistency with evaluate_checkpoint.py."""
+        from scipy.spatial.transform import Rotation as ScipyRot
+        return ScipyRot.from_matrix(R).as_rotvec()
+
+    @staticmethod
+    def _axis_angle_to_rotation(aa):
+        """Convert axis-angle (3,) vector to 3x3 rotation matrix.
+        Uses scipy for numerical consistency with evaluate_checkpoint.py."""
+        from scipy.spatial.transform import Rotation as ScipyRot
+        return ScipyRot.from_rotvec(aa).as_matrix()
+
+    @staticmethod
+    def _axis_angle_median(Rs):
+        """Per-axis median in axis-angle space → back to SO(3). (MEDW method)"""
+        aa_list = np.array([TemporalCalibrationAggregator._rotation_to_axis_angle(R)
+                            for R in Rs])
+        aa_median = np.median(aa_list, axis=0)
+        return TemporalCalibrationAggregator._axis_angle_to_rotation(aa_median)
+
+    @staticmethod
+    def _svd_mean(Rs):
+        """Euclidean mean of rotation matrices → SVD projection to SO(3)."""
+        R_mean = np.mean(Rs, axis=0)
+        U, _, Vt = np.linalg.svd(R_mean)
+        R_proj = U @ Vt
+        if np.linalg.det(R_proj) < 0:
             U[:, -1] *= -1
-            R_median = U @ Vt
-        return R_median
+            R_proj = U @ Vt
+        return R_proj
 
     @staticmethod
-    def aggregate_batch(pred_Ts):
+    def aggregate_batch(pred_Ts, method='axis_angle_median'):
         """
-        Compute median calibration from a list of (4,4) transform arrays.
+        Compute aggregated calibration from a list of (4,4) transform arrays.
 
         Args:
             pred_Ts: list of numpy (4,4) LiDAR->Camera transforms
+            method: 'axis_angle_median' (BEST) or 'svd_mean'
 
         Returns:
-            median_T: (4,4) numpy, the aggregated calibration
+            agg_T: (4,4) numpy, the aggregated calibration
         """
-        Ts = np.array(pred_Ts)
+        Ts = np.array(pred_Ts, dtype=np.float64)
         Rs = Ts[:, :3, :3]
         ts = Ts[:, :3, 3]
 
-        R_median = SequenceMedianAggregator._rotation_matrix_median_svd(Rs)
-        t_median = np.median(ts, axis=0)
+        if method == 'svd_mean':
+            R_agg = TemporalCalibrationAggregator._svd_mean(Rs)
+        else:
+            R_agg = TemporalCalibrationAggregator._axis_angle_median(Rs)
 
-        median_T = np.eye(4, dtype=np.float64)
-        median_T[:3, :3] = R_median
-        median_T[:3, 3] = t_median
-        return median_T
+        t_agg = np.median(ts, axis=0)
+
+        agg_T = np.eye(4, dtype=np.float64)
+        agg_T[:3, :3] = R_agg
+        agg_T[:3, 3] = t_agg
+        return agg_T
 
     def get_confidence(self):
         """
-        Return a per-axis consistency score (lower = more confident).
-        Uses the angular spread of predictions in axis-angle representation.
+        Return per-axis consistency score (lower = more confident).
+        Uses angular spread in axis-angle space relative to aggregated result.
         """
         if len(self._buffer) < 2:
             return None
-        from scipy.spatial.transform import Rotation as R
-        median_T = self.aggregate()
-        R_med = median_T[:3, :3]
+        agg_T = self.aggregate()
+        R_agg = agg_T[:3, :3]
         angles = []
         for T in self._buffer:
-            R_delta = T[:3, :3] @ R_med.T
-            rotvec = R.from_matrix(R_delta).as_rotvec()
+            R_delta = T[:3, :3] @ R_agg.T
+            rotvec = self._rotation_to_axis_angle(R_delta)
             angles.append(np.degrees(rotvec))
         angles = np.array(angles)
         return {
@@ -239,6 +272,9 @@ class SequenceMedianAggregator:
             'total_std': float(np.std(np.linalg.norm(angles, axis=1))),
             'n_frames': len(self._buffer),
         }
+
+
+SequenceMedianAggregator = TemporalCalibrationAggregator
 
 
 def _detect_use_mlp_head(state_dict):
@@ -510,8 +546,10 @@ def load_bevcalib_inference(
 
     ckpt_args = ckpt.get('args', {})
     _intrinsic_input = ckpt_args.get('intrinsic_input', False)
+    _fuser_type = ckpt_args.get('fuser_type', 'concat')
     print(f"[load] voxel_mode={voxel_mode}, to_bev_mode={to_bev_mode}, scatter_reduce={scatter_reduce}"
-          f", rotation_only={rotation_only}{', intrinsic_input=True' if _intrinsic_input else ''}")
+          f", rotation_only={rotation_only}, fuser_type={_fuser_type}"
+          f"{', intrinsic_input=True' if _intrinsic_input else ''}")
     model = BEVCalib(
         deformable=deformable,
         bev_encoder=bev_encoder,
@@ -523,6 +561,7 @@ def load_bevcalib_inference(
         scatter_reduce=scatter_reduce,
         bev_pool_factor=bev_pool_factor,
         intrinsic_input=_intrinsic_input,
+        fuser_type=_fuser_type,
     )
 
     _adapt_proj_heads_to_checkpoint(model, state, device)

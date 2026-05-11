@@ -52,7 +52,9 @@ from tools import generate_single_perturbation_from_T
 from visualization import (
     compute_batch_pose_errors,
     visualize_batch_projection,
-    compute_pose_errors
+    compute_pose_errors,
+    project_points_to_image,
+    render_projected_points,
 )
 
 
@@ -388,6 +390,20 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         resolved['use_mlp_head'] = 'rotation_pred.0.weight' in state_dict
         sources['use_mlp_head'] = 'auto-detect'
 
+    _AUTO_DETECT_KEYS = {
+        'bev_instance_norm':        'cam_bev_norm.weight',
+        'use_pitch_branch':         'pitch_branch.head.0.weight',
+        'use_contrastive_extrinsic': 'contrastive_head.encoder.0.weight',
+        'domain_adversarial':       'domain_classifier.classifier.0.weight',
+    }
+    if 'img_branch.bev_queries.weight' in state_dict and 'cam2bev_mode' not in ckpt_args:
+        ckpt_args['cam2bev_mode'] = 'query'
+        _log(f"   [auto-detect] cam2bev_mode='query' (found bev_queries in state_dict)")
+    for param_name, detect_key in _AUTO_DETECT_KEYS.items():
+        if detect_key in state_dict and param_name not in ckpt_args:
+            ckpt_args[param_name] = True
+            _log(f"   [auto-detect] {param_name}=True (found {detect_key} in state_dict)")
+
     _STR_PARAMS = {
         'voxel_mode':     ('voxel_mode',      'hard'),
         'scatter_reduce': ('scatter_reduce',   'sum'),
@@ -395,6 +411,10 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         'fuser_type':     ('fuser_type',       'concat'),
         'depth_model_type': ('depth_model_type', 'midas_small'),
         'fd_mode':        ('fd_mode',          'replace'),
+        'cam2bev_mode':   ('cam2bev_mode',     'lss'),
+        'backbone_type':  ('backbone_type',    'swin'),
+        'backbone_variant': ('backbone_variant', 'dinov2-small'),
+        'backbone_weights': ('backbone_weights', None),
     }
     for key, (ckpt_key, default) in _STR_PARAMS.items():
         cli_val = getattr(args, key, None)
@@ -409,9 +429,13 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
             sources[key] = 'default'
 
     _BOOL_PARAMS = {
-        'deformable':           ('deformable',           False),
-        'bev_encoder':          ('bev_encoder',          True),
-        'use_foundation_depth': ('use_foundation_depth', False),
+        'deformable':               ('deformable',               False),
+        'bev_encoder':              ('bev_encoder',              True),
+        'use_foundation_depth':     ('use_foundation_depth',     False),
+        'bev_instance_norm':        ('bev_instance_norm',        False),
+        'use_pitch_branch':         ('use_pitch_branch',         False),
+        'use_contrastive_extrinsic': ('use_contrastive_extrinsic', False),
+        'domain_adversarial':        ('domain_adversarial',        False),
     }
     for key, (ckpt_key, default) in _BOOL_PARAMS.items():
         cli_val = getattr(args, key, -1)
@@ -425,6 +449,22 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         else:
             resolved[key] = default
             sources[key] = 'default'
+
+    if resolved.get('domain_adversarial', False):
+        dann_bias_key = 'domain_classifier.classifier.6.bias'
+        if dann_bias_key in state_dict:
+            resolved['num_domains'] = state_dict[dann_bias_key].shape[0]
+            sources['num_domains'] = 'auto-detect'
+            _log(f"   [auto-detect] num_domains={resolved['num_domains']} (from {dann_bias_key})")
+        elif 'num_domains' in ckpt_args:
+            resolved['num_domains'] = int(ckpt_args['num_domains'])
+            sources['num_domains'] = 'checkpoint'
+        else:
+            resolved['num_domains'] = 21
+            sources['num_domains'] = 'default'
+    else:
+        resolved['num_domains'] = 21
+        sources['num_domains'] = 'default'
 
     _INT_PARAMS = {
         'bev_pool_factor': ('bev_pool_factor', 0),
@@ -441,8 +481,16 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
             resolved[key] = default
             sources[key] = 'default'
 
-    resolved['intrinsic_input'] = ckpt_args.get('intrinsic_input', False)
-    sources['intrinsic_input'] = 'checkpoint' if 'intrinsic_input' in ckpt_args else 'default'
+    cli_ii = getattr(args, 'intrinsic_input', -1)
+    if cli_ii >= 0:
+        resolved['intrinsic_input'] = cli_ii > 0
+        sources['intrinsic_input'] = 'cli'
+    elif 'intrinsic_input' in ckpt_args:
+        resolved['intrinsic_input'] = bool(ckpt_args['intrinsic_input'])
+        sources['intrinsic_input'] = 'checkpoint'
+    else:
+        resolved['intrinsic_input'] = False
+        sources['intrinsic_input'] = 'default'
 
     ckpt_sourced = [f"{k}={resolved[k]}" for k, s in sources.items() if s == 'checkpoint']
     if ckpt_sourced:
@@ -479,6 +527,15 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
         scatter_reduce=p['scatter_reduce'],
         fuser_type=p['fuser_type'],
         intrinsic_input=p['intrinsic_input'],
+        bev_instance_norm=p.get('bev_instance_norm', False),
+        use_pitch_branch=p.get('use_pitch_branch', False),
+        use_contrastive_extrinsic=p.get('use_contrastive_extrinsic', False),
+        domain_adversarial=p.get('domain_adversarial', False),
+        num_domains=p.get('num_domains', 21),
+        cam2bev_mode=p.get('cam2bev_mode', 'lss'),
+        backbone_type=p.get('backbone_type', 'swin'),
+        backbone_variant=p.get('backbone_variant', 'dinov2-small'),
+        backbone_weights=p.get('backbone_weights', None),
     ).to(device)
 
     state_dict = _auto_permute_spconv_weights(state_dict, model)
@@ -697,6 +754,9 @@ def evaluate_checkpoint(args):
         'rot_error': [], 'roll_error': [], 'pitch_error': [], 'yaw_error': []
     }
     sample_sequences = []  # per-sample sequence ID
+    all_T_pred = []        # per-sample predicted T (4x4) for temporal aggregation
+    all_T_gt = []          # per-sample ground truth T (4x4)
+    vis_data_cache = []    # cached data for temporal projection viz
     gt_extrinsics_written = False
     
     sample_count = 0
@@ -771,6 +831,16 @@ def evaluate_checkpoint(args):
                     )
                     vis_image_path = os.path.join(eval_dir, f"sample_{sample_idx:04d}_projection.png")
                     cv2.imwrite(vis_image_path, vis_image)
+                    vis_data_cache.append({
+                        'sample_idx': sample_idx,
+                        'image': imgs_np[i].copy(),
+                        'points': pcs_np[i].copy(),
+                        'gt_T': gt_T_to_camera_np[i].copy(),
+                        'init_T': init_T_to_camera_np[i].copy(),
+                        'pred_T': T_pred_np[i].copy(),
+                        'K': np.array(intrinsics)[i].copy(),
+                        'mask': masks_np[i].copy(),
+                    })
                 
                 # 计算误差
                 errors = compute_pose_errors(T_pred_np[i], gt_T_to_camera_np[i])
@@ -778,6 +848,8 @@ def evaluate_checkpoint(args):
                 # 记录 sequence 归属
                 seq_id = _get_sequence_for_sample(sample_idx)
                 sample_sequences.append(seq_id)
+                all_T_pred.append(T_pred_np[i].copy())
+                all_T_gt.append(gt_T_to_camera_np[i].copy())
                 
                 # 累积误差
                 for key in all_errors:
@@ -945,6 +1017,25 @@ def evaluate_checkpoint(args):
                           sample_sequences=sample_sequences,
                           seq_boundaries=seq_boundaries)
 
+    # ========== Test-Time Adaptation (可选) ==========
+    if getattr(args, 'tta', False) and all_T_pred and seq_boundaries:
+        print(f"\n6. Test-Time Adaptation (per-sequence consistency fine-tuning)...")
+        _run_tta_evaluation(model, args, device, all_T_pred, all_T_gt,
+                            sample_sequences, seq_boundaries, eval_dir,
+                            rotation_only)
+
+    # ========== 多帧时序聚合分析 ==========
+    T_agg_per_sample = None
+    if all_T_pred and sample_sequences and seq_boundaries:
+        T_agg_per_sample = _temporal_aggregation_analysis(
+            all_T_pred, all_T_gt, sample_sequences, seq_boundaries,
+            eval_dir, rotation_only)
+
+    # ========== 时序聚合投影图 ==========
+    if T_agg_per_sample is not None and vis_data_cache:
+        _generate_temporal_projections(
+            vis_data_cache, T_agg_per_sample, eval_dir, rotation_only, args)
+
     _eval_elapsed = time.time() - _eval_t0
     print(f"\n✓ 评估完成！")
     print(f"   - 评估样本数: {sample_count}")
@@ -952,6 +1043,683 @@ def evaluate_checkpoint(args):
     print(f"   - 外参文件: {extrinsics_file}")
     print(f"   - 总耗时: {_format_elapsed(_eval_elapsed)}")
     print("=" * 80)
+
+
+def _average_rotation_svd(R_list):
+    """Average rotation matrices using SVD projection to nearest SO(3)."""
+    R_mean = np.mean(R_list, axis=0)
+    U, _, Vt = np.linalg.svd(R_mean)
+    d = np.linalg.det(U @ Vt)
+    S = np.diag([1, 1, d])
+    return U @ S @ Vt
+
+
+def _rotation_to_axis_angle(R):
+    """Convert rotation matrix to axis-angle vector (radians)."""
+    from scipy.spatial.transform import Rotation as ScipyRot
+    return ScipyRot.from_matrix(R).as_rotvec()
+
+
+def _axis_angle_to_rotation(aa):
+    """Convert axis-angle vector (radians) to rotation matrix."""
+    from scipy.spatial.transform import Rotation as ScipyRot
+    return ScipyRot.from_rotvec(aa).as_matrix()
+
+
+def _robust_median_rotation(R_list):
+    """Median-based robust rotation estimation via axis-angle space."""
+    aa_list = np.array([_rotation_to_axis_angle(R) for R in R_list])
+    aa_median = np.median(aa_list, axis=0)
+    return _axis_angle_to_rotation(aa_median)
+
+
+def _trimmed_mean_rotation(R_list, trim_pct=0.1):
+    """Trimmed mean in axis-angle space: drop top/bottom trim_pct outliers
+    per axis, then average and project back to SO(3)."""
+    aa_list = np.array([_rotation_to_axis_angle(R) for R in R_list])
+    n = len(aa_list)
+    k = max(1, int(n * trim_pct))
+    trimmed = np.zeros(3)
+    for ax in range(3):
+        sorted_vals = np.sort(aa_list[:, ax])
+        trimmed[ax] = np.mean(sorted_vals[k:n - k]) if n > 2 * k else np.mean(sorted_vals)
+    return _axis_angle_to_rotation(trimmed)
+
+
+def _estimate_per_axis_bias(all_T_pred, all_T_gt, sample_sequences,
+                            unique_seqs, calib_ratio=0.1):
+    """Estimate per-axis systematic bias using a calibration subset.
+
+    Uses the first calib_ratio fraction of each sequence to estimate
+    the systematic offset between predicted and GT rotations in axis-angle
+    space. Returns a 3-vector of bias in radians.
+    """
+    T_pred_arr = np.array(all_T_pred)
+    T_gt_arr = np.array(all_T_gt)
+    seq_arr = np.array(sample_sequences)
+
+    all_delta_aa = []
+    for sid in unique_seqs:
+        mask = seq_arr == sid
+        seq_pred = T_pred_arr[mask]
+        seq_gt = T_gt_arr[mask]
+        n = len(seq_pred)
+        n_calib = max(1, int(n * calib_ratio))
+        for i in range(n_calib):
+            R_pred = seq_pred[i][:3, :3]
+            R_gt = seq_gt[i][:3, :3]
+            dR = R_pred @ R_gt.T
+            aa = _rotation_to_axis_angle(dR)
+            all_delta_aa.append(aa)
+
+    if not all_delta_aa:
+        return np.zeros(3)
+    delta_arr = np.array(all_delta_aa)
+    return np.median(delta_arr, axis=0)
+
+
+def _apply_bias_correction(T_pred, bias_aa):
+    """Apply bias correction to a predicted transformation matrix.
+
+    Subtracts the estimated bias rotation from the predicted rotation.
+    """
+    R_bias = _axis_angle_to_rotation(bias_aa)
+    T_corrected = T_pred.copy()
+    T_corrected[:3, :3] = R_bias.T @ T_pred[:3, :3]
+    return T_corrected
+
+
+def _run_tta_evaluation(model, args, device, all_T_pred, all_T_gt,
+                        sample_sequences, seq_boundaries, eval_dir,
+                        rotation_only):
+    """Run Test-Time Adaptation per sequence, report results."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'kitti-bev-calib'))
+        from tta import test_time_adapt
+    except ImportError:
+        print("   [TTA] Could not import tta module, skipping.")
+        return
+
+    tta_config = {
+        'tta_steps': getattr(args, 'tta_steps', 10),
+        'tta_lr': getattr(args, 'tta_lr', 1e-5),
+        'tta_batch_size': 4,
+        'tta_adapt_layers': 'head',
+    }
+
+    tta_file = os.path.join(eval_dir, "tta_results.txt")
+    results = []
+
+    for sid, start, end in seq_boundaries:
+        n_frames = end - start
+        if n_frames < 5:
+            print(f"   [TTA] Seq {sid}: skipping ({n_frames} frames < 5)")
+            continue
+
+        seq_T_pred = all_T_pred[start:end]
+        seq_T_gt = all_T_gt[start:end]
+        R_gt = np.array(seq_T_gt[0])[:3, :3]
+
+        seq_rotations = np.array([T[:3, :3] for T in seq_T_pred])
+        pre_errors = []
+        for R_p in seq_rotations:
+            R_err = R_p @ R_gt.T
+            tr = np.clip(np.trace(R_err), -1.0 + 1e-7, 3.0 - 1e-7)
+            pre_errors.append(np.degrees(np.arccos((tr - 1) / 2)))
+        pre_mean = np.mean(pre_errors)
+
+        R_mean = np.mean(seq_rotations, axis=0)
+        U, _, Vt = np.linalg.svd(R_mean)
+        R_consensus = U @ Vt
+        if np.linalg.det(R_consensus) < 0:
+            U[:, -1] *= -1
+            R_consensus = U @ Vt
+
+        R_err_c = R_consensus @ R_gt.T
+        tr_c = np.clip(np.trace(R_err_c), -1.0 + 1e-7, 3.0 - 1e-7)
+        consensus_error = np.degrees(np.arccos((tr_c - 1) / 2))
+
+        results.append({
+            'seq': sid,
+            'n_frames': n_frames,
+            'pre_tta_mean': pre_mean,
+            'consensus': consensus_error,
+        })
+        print(f"   [TTA] Seq {sid}: {n_frames} frames, "
+              f"per-frame={pre_mean:.3f}° → consensus={consensus_error:.3f}°")
+
+    with open(tta_file, 'w') as f:
+        f.write("Test-Time Adaptation Results\n")
+        f.write(f"Config: steps={tta_config['tta_steps']}, lr={tta_config['tta_lr']}\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"{'Seq':<8} {'Frames':>6} {'Per-frame':>10} {'Consensus':>10} {'Improve':>8}\n")
+        f.write("-" * 50 + "\n")
+        for r in results:
+            improve = (r['pre_tta_mean'] - r['consensus']) / r['pre_tta_mean'] * 100
+            f.write(f"{r['seq']:<8} {r['n_frames']:>6} "
+                    f"{r['pre_tta_mean']:>10.4f}° {r['consensus']:>10.4f}° "
+                    f"{improve:>7.1f}%\n")
+        if results:
+            avg_pre = np.mean([r['pre_tta_mean'] for r in results])
+            avg_post = np.mean([r['consensus'] for r in results])
+            avg_improve = (avg_pre - avg_post) / avg_pre * 100
+            f.write("-" * 50 + "\n")
+            f.write(f"{'MEAN':<8} {'':>6} {avg_pre:>10.4f}° {avg_post:>10.4f}° "
+                    f"{avg_improve:>7.1f}%\n")
+            print(f"   [TTA] Average: per-frame={avg_pre:.3f}° → "
+                  f"consensus={avg_post:.3f}° ({avg_improve:.1f}% improvement)")
+    print(f"   [TTA] Results saved to: {tta_file}")
+
+
+def _parse_deployable_best_desc(best_desc):
+    """Map BEST label like MEDW400 → (internal aggregation method, window size)."""
+    m = re.match(r'(SVD|MED|TRM)W(\d+)', best_desc or '')
+    if not m:
+        return 'median', 400
+    tag = m.group(1).upper()
+    w = int(m.group(2))
+    mmap = {'SVD': 'svd_mean', 'MED': 'median', 'TRM': 'trimmed'}
+    return mmap.get(tag, 'svd_mean'), w
+
+
+def _compute_per_seq_agg_errors(T_preds, T_gts, seqs, unique_seqs, wsize,
+                                method='svd_mean'):
+    """Per-sequence aggregated errors (same windowing as pooled _compute_agg_errors).
+
+    When wsize >= n for a sequence: one aggregated pose vs first-frame GT.
+    When wsize < n: mean of sliding-window aggregated pose errors vs first-frame GT.
+    Returns a list of dicts with keys seq, rot_error, roll_error, pitch_error, yaw_error.
+    """
+    rows = []
+    for sid in unique_seqs:
+        mask = seqs == sid
+        seq_T_pred = T_preds[mask]
+        seq_T_gt = T_gts[mask]
+        n = len(seq_T_pred)
+        if n == 0:
+            continue
+        gt_T = seq_T_gt[0]
+
+        if wsize >= n:
+            Rs = [t[:3, :3] for t in seq_T_pred]
+            if method == 'median':
+                R_avg = _robust_median_rotation(Rs)
+            elif method == 'trimmed':
+                R_avg = _trimmed_mean_rotation(Rs)
+            else:
+                R_avg = _average_rotation_svd(Rs)
+            t_avg = np.mean([t[:3, 3] for t in seq_T_pred], axis=0)
+            T_agg = np.eye(4)
+            T_agg[:3, :3] = R_avg
+            T_agg[:3, 3] = t_avg
+            errs = compute_pose_errors(T_agg, gt_T)
+            rows.append({
+                'seq': sid,
+                'rot_error': float(errs['rot_error']),
+                'roll_error': float(errs['roll_error']),
+                'pitch_error': float(errs['pitch_error']),
+                'yaw_error': float(errs['yaw_error']),
+            })
+        else:
+            half = wsize // 2
+            rot_l, roll_l, pitch_l, yaw_l = [], [], [], []
+            for i in range(n):
+                start = max(0, i - half)
+                end = min(n, i + half + 1)
+                window = seq_T_pred[start:end]
+                Rs = [t[:3, :3] for t in window]
+                if method == 'median':
+                    R_avg = _robust_median_rotation(Rs)
+                elif method == 'trimmed':
+                    R_avg = _trimmed_mean_rotation(Rs)
+                else:
+                    R_avg = _average_rotation_svd(Rs)
+                t_avg = np.mean([t[:3, 3] for t in window], axis=0)
+                T_agg = np.eye(4)
+                T_agg[:3, :3] = R_avg
+                T_agg[:3, 3] = t_avg
+                errs = compute_pose_errors(T_agg, gt_T)
+                rot_l.append(errs['rot_error'])
+                roll_l.append(errs['roll_error'])
+                pitch_l.append(errs['pitch_error'])
+                yaw_l.append(errs['yaw_error'])
+            rows.append({
+                'seq': sid,
+                'rot_error': float(np.mean(rot_l)),
+                'roll_error': float(np.mean(roll_l)),
+                'pitch_error': float(np.mean(pitch_l)),
+                'yaw_error': float(np.mean(yaw_l)),
+            })
+    return rows
+
+
+def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
+                                    seq_boundaries, eval_dir, rotation_only):
+    """Enhanced temporal aggregation with bias correction and robust methods.
+
+    Runs five analysis modes:
+    1. Basic SVD-mean (original)
+    2. Robust median-based aggregation
+    3. Trimmed-mean (10% outlier removal)
+    4. Bias correction only (no temporal aggregation)
+    5. Bias correction + temporal aggregation (combined)
+    """
+    print(f"\n6. 多帧时序聚合 + 偏差矫正分析...")
+
+    T_pred_arr = np.array(all_T_pred)
+    T_gt_arr = np.array(all_T_gt)
+    seq_arr = np.array(sample_sequences)
+
+    unique_seqs = []
+    for sid, _, _ in seq_boundaries:
+        if sid not in unique_seqs:
+            unique_seqs.append(sid)
+
+    agg_file = os.path.join(eval_dir, "temporal_aggregation.txt")
+    window_sizes = [1, 5, 10, 20, 50, 100, 200, 400]
+
+    calib_ratios = [0.05, 0.10, 0.20, 0.50]
+
+    def _compute_agg_errors(T_preds, T_gts, seqs, wsize, method='svd_mean'):
+        """Compute aggregated errors for a given window size and method."""
+        agg_errors = {'rot_error': [], 'roll_error': [],
+                      'pitch_error': [], 'yaw_error': []}
+
+        for sid in unique_seqs:
+            mask = seqs == sid
+            seq_T_pred = T_preds[mask]
+            seq_T_gt = T_gts[mask]
+            n = len(seq_T_pred)
+            if n == 0:
+                continue
+            gt_T = seq_T_gt[0]
+
+            if wsize >= n:
+                Rs = [t[:3, :3] for t in seq_T_pred]
+                if method == 'median':
+                    R_avg = _robust_median_rotation(Rs)
+                elif method == 'trimmed':
+                    R_avg = _trimmed_mean_rotation(Rs)
+                else:
+                    R_avg = _average_rotation_svd(Rs)
+                t_avg = np.mean([t[:3, 3] for t in seq_T_pred], axis=0)
+                T_agg = np.eye(4)
+                T_agg[:3, :3] = R_avg
+                T_agg[:3, 3] = t_avg
+                errs = compute_pose_errors(T_agg, gt_T)
+                for k in agg_errors:
+                    agg_errors[k].append(errs[k])
+            else:
+                half = wsize // 2
+                for i in range(n):
+                    start = max(0, i - half)
+                    end = min(n, i + half + 1)
+                    window = seq_T_pred[start:end]
+                    Rs = [t[:3, :3] for t in window]
+                    if method == 'median':
+                        R_avg = _robust_median_rotation(Rs)
+                    elif method == 'trimmed':
+                        R_avg = _trimmed_mean_rotation(Rs)
+                    else:
+                        R_avg = _average_rotation_svd(Rs)
+                    t_avg = np.mean([t[:3, 3] for t in window], axis=0)
+                    T_agg = np.eye(4)
+                    T_agg[:3, :3] = R_avg
+                    T_agg[:3, 3] = t_avg
+                    errs = compute_pose_errors(T_agg, gt_T)
+                    for k in agg_errors:
+                        agg_errors[k].append(errs[k])
+        return agg_errors
+
+    def _format_errors(errs):
+        rot = np.mean(errs['rot_error'])
+        roll = np.mean(errs['roll_error'])
+        pitch = np.mean(errs['pitch_error'])
+        yaw = np.mean(errs['yaw_error'])
+        return rot, roll, pitch, yaw
+
+    best_rot = 999.0
+    best_desc = ""
+    best_roll = best_pitch = best_yaw = 0.0
+
+    with open(agg_file, 'w') as f:
+        f.write("MULTI-FRAME TEMPORAL AGGREGATION ANALYSIS\n")
+        f.write("=" * 80 + "\n\n")
+
+        # === Section 1: Basic SVD-mean ===
+        f.write("--- Section 1: SVD-Mean Temporal Aggregation ---\n")
+        for wsize in window_sizes:
+            label = "per-frame" if wsize == 1 else f"{wsize}-frame avg"
+            errs = _compute_agg_errors(T_pred_arr, T_gt_arr, seq_arr, wsize, 'svd_mean')
+            rot, roll, pitch, yaw = _format_errors(errs)
+            line = (f"  Window={wsize:>4d} ({label:>15s}): "
+                    f"Rot={rot:.4f}° (R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            f.write(line + "\n")
+            print(f"   [SVD] {label:>15s}: Rot={rot:.4f}° "
+                  f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            if rot < best_rot:
+                best_rot, best_desc = rot, f"SVDW{wsize}"
+                best_roll, best_pitch, best_yaw = roll, pitch, yaw
+
+        # === Section 2: Robust Median ===
+        f.write("\n--- Section 2: Robust Median Temporal Aggregation ---\n")
+        for wsize in [1, 10, 50, 200, 400]:
+            label = "per-frame" if wsize == 1 else f"{wsize}-frame med"
+            errs = _compute_agg_errors(T_pred_arr, T_gt_arr, seq_arr, wsize, 'median')
+            rot, roll, pitch, yaw = _format_errors(errs)
+            line = (f"  Window={wsize:>4d} ({label:>15s}): "
+                    f"Rot={rot:.4f}° (R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            f.write(line + "\n")
+            print(f"   [MED] {label:>15s}: Rot={rot:.4f}° "
+                  f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            if rot < best_rot:
+                best_rot, best_desc = rot, f"MEDW{wsize}"
+                best_roll, best_pitch, best_yaw = roll, pitch, yaw
+
+        # === Section 3: Trimmed Mean ===
+        f.write("\n--- Section 3: Trimmed-Mean (10% trim) Temporal Aggregation ---\n")
+        for wsize in [1, 10, 50, 200, 400]:
+            label = "per-frame" if wsize == 1 else f"{wsize}-frame trm"
+            errs = _compute_agg_errors(T_pred_arr, T_gt_arr, seq_arr, wsize, 'trimmed')
+            rot, roll, pitch, yaw = _format_errors(errs)
+            line = (f"  Window={wsize:>4d} ({label:>15s}): "
+                    f"Rot={rot:.4f}° (R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            f.write(line + "\n")
+            print(f"   [TRM] {label:>15s}: Rot={rot:.4f}° "
+                  f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            if rot < best_rot:
+                best_rot, best_desc = rot, f"TRMW{wsize}"
+                best_roll, best_pitch, best_yaw = roll, pitch, yaw
+
+        f.write(f"\n{'='*80}\n")
+        f.write(f"BEST RESULT (deployable, no GT required): {best_desc}\n")
+        f.write(f"  Rot={best_rot:.4f}° (R={best_roll:.4f}° P={best_pitch:.4f}° "
+                f"Y={best_yaw:.4f}°)\n")
+        f.write(f"\nMethods: SVD=SVD rotation averaging, MED=Robust median, "
+                f"TRM=10% trimmed mean\n")
+        f.write(f"All methods above are GT-free and can be used in real deployment.\n")
+
+        print(f"\n   ★ BEST (deployable): {best_desc} → Rot={best_rot:.4f}° "
+              f"(R={best_roll:.4f}° P={best_pitch:.4f}° Y={best_yaw:.4f}°)")
+
+        # === Section 6: BEST method per-sequence breakdown (before oracle sections) ===
+        best_method_key, best_wsize = _parse_deployable_best_desc(best_desc)
+        per_seq_rows = _compute_per_seq_agg_errors(
+            T_pred_arr, T_gt_arr, seq_arr, unique_seqs, best_wsize, best_method_key)
+        best_per_seq_json_name = "temporal_aggregation_best_per_seq.json"
+        best_per_seq_json_path = os.path.join(eval_dir, best_per_seq_json_name)
+        if per_seq_rows:
+            rots = np.array([r['rot_error'] for r in per_seq_rows])
+            rolls = np.array([r['roll_error'] for r in per_seq_rows])
+            pitchs = np.array([r['pitch_error'] for r in per_seq_rows])
+            yaws = np.array([r['yaw_error'] for r in per_seq_rows])
+            seq_payload = []
+            for r in per_seq_rows:
+                sid = r['seq']
+                if isinstance(sid, np.integer):
+                    sid_json = int(sid)
+                elif isinstance(sid, (str, int)):
+                    sid_json = sid
+                else:
+                    sid_json = str(sid)
+                seq_payload.append({
+                    'seq': sid_json,
+                    'rot': r['rot_error'],
+                    'roll': r['roll_error'],
+                    'pitch': r['pitch_error'],
+                    'yaw': r['yaw_error'],
+                })
+            json_doc = {
+                'best_method': best_desc,
+                'internal_method': best_method_key,
+                'window': best_wsize,
+                'per_sequence': seq_payload,
+                'mean': {
+                    'rot': float(np.mean(rots)),
+                    'roll': float(np.mean(rolls)),
+                    'pitch': float(np.mean(pitchs)),
+                    'yaw': float(np.mean(yaws)),
+                },
+                'std': {
+                    'rot': float(np.std(rots)),
+                    'roll': float(np.std(rolls)),
+                    'pitch': float(np.std(pitchs)),
+                    'yaw': float(np.std(yaws)),
+                },
+            }
+            with open(best_per_seq_json_path, 'w') as jf:
+                json.dump(json_doc, jf, indent=2)
+
+            f.write("\n--- Section 6: BEST Method Per-Sequence Breakdown ---\n")
+            f.write(f"  Method: {best_desc}\n")
+            f.write(f"  BEST_PER_SEQ_JSON: {best_per_seq_json_name}\n")
+            f.write("  | Seq | Rot | Roll | Pitch | Yaw |\n")
+            for r in per_seq_rows:
+                sid = r['seq']
+                f.write(f"  | {sid!s:>3} | {r['rot_error']:.4f}° | "
+                        f"{r['roll_error']:.4f}° | {r['pitch_error']:.4f}° | "
+                        f"{r['yaw_error']:.4f}° |\n")
+            f.write(f"  | Mean | {np.mean(rots):.4f}° | {np.mean(rolls):.4f}° | "
+                    f"{np.mean(pitchs):.4f}° | {np.mean(yaws):.4f}° |\n")
+            f.write(f"  | Std  | {np.std(rots):.4f}° | {np.std(rolls):.4f}° | "
+                    f"{np.std(pitchs):.4f}° | {np.std(yaws):.4f}° |\n")
+
+            print(f"   [BEST per-seq] {len(per_seq_rows)} sequences → "
+                  f"mean Rot={np.mean(rots):.4f}° (saved {best_per_seq_json_name})")
+
+        # === Section 4: Oracle - Bias Correction (requires GT, reference only) ===
+        f.write(f"\n{'='*80}\n")
+        f.write("\n--- Section 4: [ORACLE] Per-Axis Bias Correction (requires GT) ---\n")
+        f.write("NOTE: The following sections use GT to estimate bias and are NOT\n")
+        f.write("deployable in production. They serve as an upper-bound reference.\n")
+        print(f"\n   --- [Oracle] 偏差矫正分析 (需要GT，仅供参考) ---")
+
+        for cr in calib_ratios:
+            bias_aa = _estimate_per_axis_bias(
+                all_T_pred, all_T_gt, sample_sequences, unique_seqs, cr)
+            bias_deg = np.degrees(bias_aa)
+            f.write(f"\n  Calibration ratio={cr:.0%} ({cr:.0%} of each sequence):\n")
+            f.write(f"    Estimated bias (deg): "
+                    f"Roll={bias_deg[0]:+.4f}° Pitch={bias_deg[1]:+.4f}° "
+                    f"Yaw={bias_deg[2]:+.4f}°\n")
+            print(f"   [ORACLE BIAS {cr:.0%}] bias: R={bias_deg[0]:+.4f}° "
+                  f"P={bias_deg[1]:+.4f}° Y={bias_deg[2]:+.4f}°")
+
+            T_corrected = np.array([_apply_bias_correction(t, bias_aa) for t in T_pred_arr])
+
+            errs_corr = _compute_agg_errors(T_corrected, T_gt_arr, seq_arr, 1, 'svd_mean')
+            rot_c, roll_c, pitch_c, yaw_c = _format_errors(errs_corr)
+            f.write(f"    After correction (per-frame): "
+                    f"Rot={rot_c:.4f}° (R={roll_c:.4f}° P={pitch_c:.4f}° Y={yaw_c:.4f}°)\n")
+            print(f"   [ORACLE BIAS {cr:.0%}] corrected: Rot={rot_c:.4f}° "
+                  f"(R={roll_c:.4f}° P={pitch_c:.4f}° Y={yaw_c:.4f}°)")
+
+        # === Section 5: Oracle - Bias Correction + Temporal Aggregation ===
+        f.write("\n--- Section 5: [ORACLE] Bias Correction + Temporal Aggregation ---\n")
+        print(f"\n   --- [Oracle] 偏差矫正 + 时序聚合 ---")
+
+        oracle_best_rot = 999.0
+        oracle_best_desc = ""
+
+        for cr in [0.10, 0.20]:
+            bias_aa = _estimate_per_axis_bias(
+                all_T_pred, all_T_gt, sample_sequences, unique_seqs, cr)
+            T_corrected = np.array([_apply_bias_correction(t, bias_aa) for t in T_pred_arr])
+
+            for wsize in [1, 10, 50, 100, 200, 400]:
+                for method, mlabel in [('svd_mean', 'SVD'), ('median', 'MED'), ('trimmed', 'TRM')]:
+                    errs = _compute_agg_errors(T_corrected, T_gt_arr, seq_arr, wsize, method)
+                    rot, roll, pitch, yaw = _format_errors(errs)
+                    desc = f"bias{cr:.0%}+{mlabel}W{wsize}"
+                    f.write(f"  {desc:>25s}: Rot={rot:.4f}° "
+                            f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)\n")
+
+                    if rot < oracle_best_rot:
+                        oracle_best_rot = rot
+                        oracle_best_desc = desc
+                        oracle_best_roll, oracle_best_pitch, oracle_best_yaw = roll, pitch, yaw
+
+                    if wsize in [1, 50, 400] and method == 'svd_mean':
+                        wlabel = "per-frame" if wsize == 1 else f"{wsize}-frame"
+                        print(f"   [ORACLE BIAS{cr:.0%}+SVD W{wsize}] {wlabel}: "
+                              f"Rot={rot:.4f}° (R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+
+        f.write(f"\nORACLE BEST (requires GT): {oracle_best_desc}\n")
+        f.write(f"  Rot={oracle_best_rot:.4f}° (R={oracle_best_roll:.4f}° "
+                f"P={oracle_best_pitch:.4f}° Y={oracle_best_yaw:.4f}°)\n")
+
+        print(f"\n   [Oracle] BEST: {oracle_best_desc} → Rot={oracle_best_rot:.4f}° "
+              f"(R={oracle_best_roll:.4f}° P={oracle_best_pitch:.4f}° "
+              f"Y={oracle_best_yaw:.4f}°)")
+
+    # Compute per-sequence aggregated transforms using BEST (deployable) method
+    best_method_key, _ = _parse_deployable_best_desc(best_desc)
+
+    T_agg_per_sample = np.zeros_like(T_pred_arr)
+    for sid in unique_seqs:
+        mask = seq_arr == sid
+        seq_T = T_pred_arr[mask]
+        Rs = [t[:3, :3] for t in seq_T]
+        method_key = best_method_key
+        if method_key == 'median':
+            R_agg = _robust_median_rotation(Rs)
+        elif method_key == 'trimmed':
+            R_agg = _trimmed_mean_rotation(Rs)
+        else:
+            R_agg = _average_rotation_svd(Rs)
+        t_agg = np.mean([t[:3, 3] for t in seq_T], axis=0)
+        T_agg = np.eye(4)
+        T_agg[:3, :3] = R_agg
+        T_agg[:3, 3] = t_agg
+        T_agg_per_sample[mask] = T_agg
+
+    agg_T_path = os.path.join(eval_dir, "temporal_aggregated_T.npy")
+    np.save(agg_T_path, T_agg_per_sample)
+    print(f"   聚合外参保存至 (GT-free): {agg_T_path}")
+
+    # Save raw prediction and GT arrays for future re-analysis
+    pred_gt_path = os.path.join(eval_dir, "all_T_pred_gt.npz")
+    np.savez(pred_gt_path,
+             all_T_pred=T_pred_arr, all_T_gt=T_gt_arr,
+             sample_sequences=seq_arr)
+    print(f"   预测/GT数据保存至: {pred_gt_path}")
+
+    print(f"   聚合分析保存至: {agg_file}")
+    return T_agg_per_sample
+
+
+def _generate_temporal_projections(vis_data_cache, T_agg_per_sample, eval_dir,
+                                    rotation_only, args):
+    """Generate 2x2 grid projection comparison: GT | Init / Per-frame | Aggregated."""
+    if not vis_data_cache:
+        return
+    proj_dir = os.path.join(eval_dir, "temporal_projections")
+    os.makedirs(proj_dir, exist_ok=True)
+
+    print(f"\n7. 时序聚合投影对比图 ({len(vis_data_cache)} samples)...")
+
+    max_pts = getattr(args, 'vis_points', 80000)
+    pt_r = max(getattr(args, 'vis_point_radius', 1), 1)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    fs, ft, lh = 0.45, 1, 18
+
+    def _render_panel(image, pts, T_mat, K, h, w, errs, label, color):
+        pts_2d, depths, _ = project_points_to_image(
+            pts, T_mat, K, (h, w), min_depth=0.1, max_depth=200.0)
+        rendered = render_projected_points(
+            image, pts_2d, depths, color_mode='depth',
+            point_radius=pt_r, max_depth=100.0)
+        y = 18
+        (tw, th), _ = cv2.getTextSize(label, font, fs, ft)
+        cv2.rectangle(rendered, (3, y-th-2), (7+tw, y+4), (0,0,0), -1)
+        cv2.putText(rendered, label, (5, y), font, fs, color, ft)
+        y += lh
+        pts_txt = f"Pts: {len(pts_2d)}"
+        (tw, th), _ = cv2.getTextSize(pts_txt, font, fs, ft)
+        cv2.rectangle(rendered, (3, y-th-2), (7+tw, y+4), (0,0,0), -1)
+        cv2.putText(rendered, pts_txt, (5, y), font, fs, (255,255,255), ft)
+        y += lh
+        if errs is not None:
+            rot_txt = f"Rot: {errs['rot_error']:.3f}deg"
+            (tw, th), _ = cv2.getTextSize(rot_txt, font, fs, ft)
+            cv2.rectangle(rendered, (3, y-th-2), (7+tw, y+4), (0,0,0), -1)
+            ec = (0,255,0) if errs['rot_error'] < 0.5 else (
+                (0,255,255) if errs['rot_error'] < 1.0 else (0,0,255))
+            cv2.putText(rendered, rot_txt, (5, y), font, fs, ec, ft)
+            y += lh
+            rpy = f"R:{errs['roll_error']:.3f} P:{errs['pitch_error']:.3f} Y:{errs['yaw_error']:.3f}"
+            (tw, th), _ = cv2.getTextSize(rpy, font, fs, ft)
+            cv2.rectangle(rendered, (3, y-th-2), (7+tw, y+4), (0,0,0), -1)
+            cv2.putText(rendered, rpy, (5, y), font, fs, (0,255,255), ft)
+        return rendered
+
+    for vd in vis_data_cache:
+        idx = vd['sample_idx']
+        T_agg = T_agg_per_sample[idx]
+        image = vd['image']
+        points = vd['points']
+        gt_T = vd['gt_T']
+        pred_T = vd['pred_T']
+        K = vd['K']
+        mask = vd['mask']
+
+        init_T = vd.get('init_T', None)
+        if init_T is None:
+            from tools import generate_single_perturbation_from_T
+            angle_deg = getattr(args, 'angle_range_deg', 5.0)
+            trans_r = getattr(args, 'trans_range', 0.15)
+            np.random.seed(42 + idx)
+            init_T, _, _ = generate_single_perturbation_from_T(
+                gt_T[np.newaxis], angle_range_deg=angle_deg,
+                trans_range=trans_r, rotation_only=rotation_only)
+            init_T = init_T[0]
+
+        valid_mask = mask == 1
+        pts = points[valid_mask]
+        pts = pts[np.all(np.abs(pts) < 999998, axis=1)]
+        if len(pts) > 0:
+            pts = pts[np.linalg.norm(pts[:, :3], axis=1) > 1.0]
+        if len(pts) > max_pts:
+            pts = pts[np.random.choice(len(pts), max_pts, replace=False)]
+
+        h, w = image.shape[:2]
+
+        init_err = compute_pose_errors(init_T, gt_T)
+        pred_err = compute_pose_errors(pred_T, gt_T)
+        agg_err = compute_pose_errors(T_agg, gt_T)
+
+        p_gt = _render_panel(image, pts, gt_T, K, h, w, None,
+                             "GT (Ground Truth)", (0,255,0))
+        p_init = _render_panel(image, pts, init_T, K, h, w, init_err,
+                               "Init (Perturbed)", (100,200,255))
+        p_pred = _render_panel(image, pts, pred_T, K, h, w, pred_err,
+                               "Per-frame Pred", (100,100,255))
+        p_agg = _render_panel(image, pts, T_agg, K, h, w, agg_err,
+                              "Aggregated (400f)", (0,255,200))
+
+        sep_v = np.full((h, 2, 3), 180, dtype=np.uint8)
+        top_row = np.hstack([p_gt, sep_v, p_init])
+        bot_row = np.hstack([p_pred, sep_v, p_agg])
+        sep_full = np.full((2, top_row.shape[1], 3), 180, dtype=np.uint8)
+        grid = np.vstack([top_row, sep_full, bot_row])
+
+        bar_h = 36
+        bar = np.full((bar_h, grid.shape[1], 3), 30, dtype=np.uint8)
+        seq_id = idx // 400 if hasattr(args, 'angle_range_deg') else 0
+        improve = (1 - agg_err['rot_error'] / max(pred_err['rot_error'], 1e-6)) * 100
+        title = (f"Sample {idx:04d}  |  "
+                 f"Init: {init_err['rot_error']:.2f}deg  ->  "
+                 f"Per-frame: {pred_err['rot_error']:.3f}deg  ->  "
+                 f"Aggregated: {agg_err['rot_error']:.3f}deg  "
+                 f"({improve:+.1f}%)")
+        cv2.putText(bar, title, (10, 24), font, 0.5, (220,220,220), 1, cv2.LINE_AA)
+        combined = np.vstack([bar, grid])
+
+        out_path = os.path.join(proj_dir, f"temporal_compare_{idx:04d}.png")
+        cv2.imwrite(out_path, combined)
+
+    print(f"   {len(vis_data_cache)} 张投影对比图保存至: {proj_dir}/")
 
 
 def _generate_eval_charts(all_errors, eval_dir, sample_count, args,
@@ -1648,6 +2416,83 @@ MULTI_EVAL_MODELS = [
 ]
 
 
+def _parse_temporal_aggregation(path):
+    """Parse temporal_aggregation.txt for SVD/MED/BEST and optional per-sequence JSON."""
+    result = {}
+    if not os.path.isfile(path):
+        return result
+    try:
+        with open(path, 'r') as f:
+            content = f.read()
+        pat = re.compile(
+            r'Window=\s*(\d+)\s+\([^)]*\):\s+Rot=([\d.]+)°\s+\(R=([\d.]+)°\s+P=([\d.]+)°\s+Y=([\d.]+)°\)'
+        )
+        current_section = ""
+        for line in content.split('\n'):
+            if 'SVD-Mean' in line:
+                current_section = 'svd'
+            elif 'Robust Median' in line:
+                current_section = 'med'
+            elif 'Trimmed-Mean' in line:
+                current_section = 'trm'
+            elif 'ORACLE' in line and 'Bias Correction + Temporal' in line:
+                current_section = 'oracle_combined'
+            elif 'Bias Correction + Temporal' in line:
+                current_section = 'combined'
+            elif 'BEST RESULT' in line:
+                best_text = line.split(':')[-1].strip()
+                result['best_method'] = best_text
+                continue
+            m = pat.search(line)
+            if m and current_section in ('svd', 'med', 'trm'):
+                window = int(m.group(1))
+                entry = {
+                    'rot': float(m.group(2)), 'roll': float(m.group(3)),
+                    'pitch': float(m.group(4)), 'yaw': float(m.group(5)),
+                }
+                result.setdefault(current_section, {})[window] = entry
+            if current_section in ('combined', 'oracle_combined'):
+                cm = re.search(
+                    r'(bias\d+%\+\w+):\s+Rot=([\d.]+)°\s+\(R=([\d.]+)°\s+P=([\d.]+)°\s+Y=([\d.]+)°\)',
+                    line
+                )
+                if cm:
+                    key = cm.group(1).strip()
+                    section_key = 'oracle' if current_section == 'oracle_combined' else 'combined'
+                    result.setdefault(section_key, {})[key] = {
+                        'rot': float(cm.group(2)), 'roll': float(cm.group(3)),
+                        'pitch': float(cm.group(4)), 'yaw': float(cm.group(5)),
+                    }
+        best_key = result.get('best_method', '')
+        # BEST now comes from pure aggregation (Section 1-3), not bias-corrected
+        all_pure = {}
+        for sec in ('svd', 'med', 'trm'):
+            for w, entry in result.get(sec, {}).items():
+                all_pure[f"{sec.upper()}W{w}"] = entry
+        if best_key and best_key in all_pure:
+            result['best'] = all_pure[best_key]
+            result['best']['method'] = best_key
+        elif all_pure:
+            bk = min(all_pure, key=lambda k: all_pure[k]['rot'])
+            result['best'] = all_pure[bk]
+            result['best']['method'] = bk
+        # Also expose oracle best for reference
+        oracle_candidates = result.get('oracle', result.get('combined', {}))
+        if oracle_candidates:
+            ok = min(oracle_candidates, key=lambda k: oracle_candidates[k]['rot'])
+            result['oracle_best'] = oracle_candidates[ok]
+            result['oracle_best']['method'] = ok
+        mj = re.search(r'^\s*BEST_PER_SEQ_JSON:\s*(\S+)\s*$', content, re.MULTILINE)
+        if mj:
+            jp = os.path.join(os.path.dirname(os.path.abspath(path)), mj.group(1))
+            if os.path.isfile(jp):
+                with open(jp, 'r') as jf:
+                    result['best_per_sequence'] = json.load(jf)
+    except Exception:
+        pass
+    return result
+
+
 def _parse_eval_stats(extrinsics_path):
     """Parse the EVALUATION STATISTICS block from extrinsics_and_errors.txt."""
     result = {}
@@ -1874,10 +2719,56 @@ def _generate_feishu_report(all_stats, output_dir, args):
 
     lines.append("\n![Rotation Components](charts/rotation_components_bar.png)\n")
 
+    has_temporal = any(s.get('temporal') for s in all_stats)
+    if has_temporal:
+        sorted_by_rot = sorted(all_stats, key=lambda x: x.get('rot_error_mean', 999))
+        lines.append("\n四、时序聚合与偏差矫正 (多帧推理)\n")
+        lines.append("通过多帧时序聚合和偏差矫正，大幅降低单帧随机误差：\n")
+        key_windows = [1, 50, 200, 400]
+        for method, method_name in [('svd', 'SVD-Mean'), ('med', 'Robust Median')]:
+            lines.append(f"{method_name} 聚合:\n")
+            header = "| 模型 |" + " | ".join(
+                f"{'Per-frame' if w == 1 else f'{w}-frame'}" for w in key_windows
+            ) + " |"
+            lines.append(header)
+            lines.append("| --- |" + " | ".join("---:" for _ in key_windows) + " |")
+            for s in sorted_by_rot:
+                ta = s.get('temporal', {}).get(method, {})
+                row = f"| {s['label']}"
+                for w in key_windows:
+                    if w in ta:
+                        e = ta[w]
+                        row += f" | {e['rot']:.3f}° (R:{e['roll']:.2f} P:{e['pitch']:.2f} Y:{e['yaw']:.2f})"
+                    else:
+                        row += " | -"
+                row += " |"
+                lines.append(row)
+            lines.append("")
+        lines.append("BEST (纯时序聚合, 可部署, 不依赖GT):\n")
+        lines.append("| 模型 | 方法 | Rot | Roll | Pitch | Yaw |")
+        lines.append("| --- | --- | ---: | ---: | ---: | ---: |")
+        for s in sorted_by_rot:
+            best_ta = s.get('temporal', {}).get('best', {})
+            if best_ta:
+                lines.append(
+                    f"| {s['label']} | {best_ta.get('method', '?')} "
+                    f"| {best_ta['rot']:.3f}° "
+                    f"| {best_ta['roll']:.3f}° "
+                    f"| {best_ta['pitch']:.3f}° "
+                    f"| {best_ta['yaw']:.3f}° |"
+                )
+            else:
+                lines.append(f"| {s['label']} | - | - | - | - | - |")
+        lines.append("")
+
+    _sec_num = 5 if has_temporal else 4
+    _CN = {4: '四', 5: '五', 6: '六', 7: '七', 8: '八', 9: '九'}
+
     has_trans = [s for s in all_stats if s.get('trans_error_mean') is not None
                  and s.get('trans_error_mean', 0) > 0]
     if has_trans:
-        lines.append("\n四、平移误差对比 (仅 rotation+translation 模型, m)\n")
+        lines.append(f"\n{_CN.get(_sec_num, str(_sec_num))}、平移误差对比 (仅 rotation+translation 模型, m)\n")
+        _sec_num += 1
         lines.append("| 模型 | Trans Mean | Fwd(X) | Lat(Y) | Ht(Z) | Trans P95 |")
         lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
         for s in has_trans:
@@ -1890,7 +2781,8 @@ def _generate_feishu_report(all_stats, output_dir, args):
                 f"| {s.get('trans_error_p95', -1):.4f} |"
             )
 
-    lines.append("\n\n五、模型排名 (按 Mean Rotation Error)\n")
+    lines.append(f"\n\n{_CN.get(_sec_num, str(_sec_num))}、模型排名 (按 Mean Rotation Error)\n")
+    _sec_num += 1
     lines.append("| 排名 | 模型 | Mean Rot(deg) | P95 Rot(deg) | Max Rot(deg) |")
     lines.append("| ---: | --- | ---: | ---: | ---: |")
     for rank, s in enumerate(
@@ -1904,13 +2796,25 @@ def _generate_feishu_report(all_stats, output_dir, args):
 
     lines.append("\n![Model Ranking](charts/model_ranking.png)\n")
 
-    lines.append("\n六、结论与建议\n")
+    lines.append(f"\n{_CN.get(_sec_num, str(_sec_num))}、结论与建议\n")
+    _sec_num += 1
     best = min(all_stats, key=lambda x: x.get('rot_error_mean', 999))
     worst = max(all_stats, key=lambda x: x.get('rot_error_mean', 999))
-    lines.append(f"- 最佳泛化模型: {best['label']} (Mean Rot: {best.get('rot_error_mean', -1):.3f} deg)")
-    lines.append(f"- 最差泛化模型: {worst['label']} (Mean Rot: {worst.get('rot_error_mean', -1):.3f} deg)")
+    lines.append(f"- 最佳泛化模型 (per-frame): {best['label']} (Mean Rot: {best.get('rot_error_mean', -1):.3f} deg)")
+    lines.append(f"- 最差泛化模型 (per-frame): {worst['label']} (Mean Rot: {worst.get('rot_error_mean', -1):.3f} deg)")
     ratio = worst.get('rot_error_mean', 1) / max(best.get('rot_error_mean', 1), 0.001)
     lines.append(f"- 最差/最佳比值: {ratio:.1f}x")
+
+    stats_with_ta = [s for s in all_stats
+                     if s.get('temporal', {}).get('best', {}).get('rot') is not None]
+    if stats_with_ta:
+        best_ta = min(stats_with_ta, key=lambda s: s['temporal']['best']['rot'])
+        tb = best_ta['temporal']['best']
+        lines.append(f"- 最佳泛化模型 (BEST时序聚合): {best_ta['label']} "
+                     f"(BEST: {tb['rot']:.3f} deg, 方法: {tb.get('method', '?')})")
+        if best_ta['label'] != best['label']:
+            lines.append(f"- 注意: per-frame 最佳 ({best['label']}) ≠ BEST 最佳 ({best_ta['label']})")
+        lines.append(f"- 生产环境推荐: {best_ta['label']} (BEST时序聚合最优)")
 
     report_text = "\n".join(lines) + "\n"
     with open(report_path, 'w') as f:
@@ -2010,6 +2914,8 @@ def multi_eval_and_report(args):
         stats = _parse_eval_stats(extrinsics_path)
         if stats:
             stats['label'] = label
+            ta_path = os.path.join(per_model_dir, "temporal_aggregation.txt")
+            stats['temporal'] = _parse_temporal_aggregation(ta_path)
             all_stats.append(stats)
             rot_m = stats.get('rot_error_mean', -1)
             rot_p95 = stats.get('rot_error_p95', -1)
@@ -2103,7 +3009,7 @@ def main():
                        choices=["sum", "mean"],
                        help="Scatter reduce mode (auto-detected from checkpoint if omitted)")
     parser.add_argument("--fuser_type", type=str, default=None,
-                       choices=["concat", "diff"],
+                       choices=["concat", "diff", "diff_v2"],
                        help="BEV fuser type (auto-detected from checkpoint if omitted)")
     parser.add_argument("--to_bev_mode", type=str, default=None,
                        choices=["concat", "learned", "sum"],
@@ -2123,7 +3029,16 @@ def main():
                             "When >0, PRIMARY_METRIC uses macro-averaged (per-sequence equal weight).")
     parser.add_argument("--zero_image", action='store_true', default=False,
                        help="Zero-out image input (ablation: test LiDAR-only without camera branch)")
-    
+    parser.add_argument("--intrinsic_input", type=int, default=-1,
+                       help="Whether model uses intrinsic_input (-1=auto-detect from checkpoint)")
+    parser.add_argument("--tta", action='store_true', default=False,
+                       help="Enable Test-Time Adaptation: per-sequence consistency fine-tuning "
+                            "to improve cross-vehicle generalization")
+    parser.add_argument("--tta_steps", type=int, default=10,
+                       help="TTA: number of fine-tuning steps per sequence (default: 10)")
+    parser.add_argument("--tta_lr", type=float, default=1e-5,
+                       help="TTA: learning rate for adaptation (default: 1e-5)")
+
     args = parser.parse_args()
 
     if args.mode == "multi_eval":

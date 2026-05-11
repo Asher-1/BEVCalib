@@ -1,0 +1,147 @@
+# 综合泛化评估: V25r (6模型) + V27 (4模型) + V28 (5模型) = 15个实验
+#
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；bev_zbound_step 须手写。
+#
+# 用法:
+#   CUDA_VISIBLE_DEVICES=7 HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_comprehensive_v25_v27_v28.yaml
+#
+# 评估目标: 对比所有已完成训练的实验，找出泛化性能最优的模型和配置
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v25_v27_v28_comprehensive"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # ============================================================
+  # V25r 系列: LSS + Swin, 400 epochs, full data (消融实验)
+  # ============================================================
+
+  # A1: 基线 (MLP head + contrastive + instance_norm + pitch_branch), Z=10 bins
+  - label: "v25r-A1-full-z10"
+    dir_name: "model_small_5deg_v25r_A1_full_z10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "A1: LSS+Swin baseline (contrastive+IN+MLP+pitch, Z=10bins)"
+
+  # A2: 同A1但Z=15 bins
+  - label: "v25r-A2-full-z15"
+    dir_name: "model_small_5deg_v25r_A2_full_z15"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "1.33"
+    mode_desc: "A2: LSS+Swin baseline (Z=15bins, finer depth)"
+
+  # B1: 去掉 contrastive loss
+  - label: "v25r-B1-no-contrastive"
+    dir_name: "model_small_5deg_v25r_B1_no_contrastive"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "B1: ablation - no contrastive loss"
+
+  # B2: 去掉 mount jitter 增强
+  - label: "v25r-B2-no-mount-jitter"
+    dir_name: "model_small_5deg_v25r_B2_no_mount_jitter"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "B2: ablation - no mount jitter augmentation"
+
+  # B3: 去掉 BEV instance norm
+  - label: "v25r-B3-no-instnorm"
+    dir_name: "model_small_5deg_v25r_B3_no_instnorm"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "B3: ablation - no BEV instance norm"
+
+  # C1: 加强 Pitch 权重 (axis_weights=1,8,1, pitch_aux_weight=0.5)
+  - label: "v25r-C1-strong-pitch"
+    dir_name: "model_small_5deg_v25r_C1_strong_pitch"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "C1: strong pitch weight (axis 1:8:1, pitch_aux=0.5)"
+
+  # ============================================================
+  # V27 系列: LSS + Swin, 400 epochs, quick (域适应实验)
+  # ============================================================
+
+  # E1: V24-B 复现 (无增强)
+  - label: "v27-E1-v24b-repro"
+    dir_name: "v27_quick/model_small_5deg_v27_E1_v24b_repro_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E1: V24-B reproduction (LSS+Swin, no aug)"
+
+  # E5: balanced mount + strong regularization
+  - label: "v27-E5-balanced-mount-reg"
+    dir_name: "v27_quick/model_small_5deg_v27_E5_balanced_mount_strong_reg_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E5: balanced mount jitter + strong reg (drop0.2, head0.3)"
+
+  # E9: DANN + balanced mount + reg
+  - label: "v27-E9-dann-mount-reg"
+    dir_name: "v27_quick/model_small_5deg_v27_E9_dann_balanced_mount_reg_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E9: DANN(0.1) + balanced mount + strong reg"
+
+  # E10: DANN + very strong jitter
+  - label: "v27-E10-dann-strong-jitter"
+    dir_name: "v27_quick/model_small_5deg_v27_E10_dann_very_strong_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E10: DANN(0.15) + very strong jitter (prob0.7, sigma3.0)"
+
+  # ============================================================
+  # V28 系列: 架构对比 (Query-BEV/LSS × Swin/DINOv2), 200 epochs, quick
+  # ============================================================
+
+  # F1: Query-BEV + Swin (best_val checkpoint)
+  - label: "v28-F1-query-swin"
+    dir_name: "v28_quick/model_small_5deg_v28_F1_query_bev_swin_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F1: Query-BEV + Swin (best_val)"
+
+  # F1-200: Query-BEV + Swin (epoch 200 checkpoint, 表现更优)
+  - label: "v28-F1-query-swin-200"
+    dir_name: "v28_quick/model_small_5deg_v28_F1_query_bev_swin_quick"
+    ckpt: "ckpt_200.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F1-200: Query-BEV + Swin (epoch 200, better generalization)"
+
+  # F2: LSS + DINOv2
+  - label: "v28-F2-lss-dinov2"
+    dir_name: "v28_quick/model_small_5deg_v28_F2_lss_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F2: LSS + DINOv2 backbone"
+
+  # F3: Query-BEV + DINOv2
+  - label: "v28-F3-query-dinov2"
+    dir_name: "v28_quick/model_small_5deg_v28_F3_query_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F3: Query-BEV + DINOv2 (full architecture upgrade)"
+
+  # F4: Query-BEV + DINOv2 + DANN
+  - label: "v28-F4-query-dinov2-dann"
+    dir_name: "v28_quick/model_small_5deg_v28_F4_query_dinov2_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F4: Query-BEV + DINOv2 + DANN domain adaptation"
+
+  # F5: Query-BEV + DINOv2 frozen backbone
+  - label: "v28-F5-query-dinov2-frozen"
+    dir_name: "v28_quick/model_small_5deg_v28_F5_query_dinov2_frozen_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F5: Query-BEV + DINOv2 frozen (pretrained features only)"

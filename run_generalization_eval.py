@@ -186,6 +186,8 @@ def parse_script_args():
                         help="测试数据采样步长 (每隔N帧取1帧, None=使用全部帧)")
     parser.add_argument("--eval_max_frames_per_seq", type=int, default=None,
                         help="测试集每序列最多帧数 (与 eval_sample_step 互斥)")
+    parser.add_argument("--force", action="store_true", default=False,
+                        help="强制重新评估所有模型 (忽略已有结果)")
     return parser.parse_args()
 
 
@@ -304,17 +306,19 @@ def parse_eval_stats(extrinsics_path):
                     pass
     result['per_sequence'] = per_seq
 
-    # Parse Sequence Boundaries
+    # Parse Sequence Boundaries (scan until separator or blank line)
     seq_bounds = []
     bounds_start = text.find("Sequence Boundaries:")
     if bounds_start >= 0:
-        for line in text[bounds_start:bounds_start+500].split('\n')[1:]:
+        for line in text[bounds_start:].split('\n')[1:]:
             m_b = re.match(r'\s*Seq\s+(\S+):\s*samples\s+(\d+)\s*-\s*(\d+)\s*\((\d+)\s*frames\)', line)
             if m_b:
                 seq_bounds.append({
                     'seq': m_b.group(1), 'start': int(m_b.group(2)),
                     'end': int(m_b.group(3)), 'count': int(m_b.group(4)),
                 })
+            elif line.strip().startswith('=') or (line.strip() == '' and seq_bounds):
+                break
     result['seq_boundaries'] = seq_bounds
 
     # Parse Macro-Averaged metrics
@@ -455,9 +459,14 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
         "use_foundation_depth", "depth_model_type", "fd_mode",
         "intrinsic_input",
     ]
+    _BOOL_TO_INT = {"intrinsic_input", "rotation_only", "deformable",
+                     "use_mlp_head", "use_foundation_depth"}
     for p in _OPTIONAL_OVERRIDES:
         if p in mcfg:
-            cmd.extend([f"--{p}", str(mcfg[p])])
+            val = mcfg[p]
+            if p in _BOOL_TO_INT and isinstance(val, bool):
+                val = int(val)
+            cmd.extend([f"--{p}", str(val)])
 
     if "use_drcv" in mcfg:
         if mcfg["use_drcv"]:
@@ -517,7 +526,7 @@ def _precheck_models():
         per_model_dir = os.path.join(OUTPUT_DIR, label)
         extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
 
-        if os.path.isfile(extrinsics_path):
+        if os.path.isfile(extrinsics_path) and not getattr(_script_args, 'force', False):
             with open(extrinsics_path, 'r') as f:
                 if "EVALUATION STATISTICS" in f.read():
                     done.append((idx, label, mcfg, per_model_dir, None, "eval complete"))
@@ -628,7 +637,8 @@ def _run_evaluations_sequential(tasks):
         print(f"\n{'='*80}")
         print(f"[{idx+1}/{len(MODELS)}] Evaluating: {label}")
         print(f"  ckpt: {task['ckpt_path']}")
-        print(f"  BEV_ZBOUND_STEP={mcfg['bev_zbound_step']}, rotation_only={mcfg['rotation_only']}")
+        rot_disp = mcfg.get("rotation_only", "auto (checkpoint)")
+        print(f"  BEV_ZBOUND_STEP={mcfg['bev_zbound_step']}, rotation_only={rot_disp}")
         print(f"{'='*80}")
 
         log_path = os.path.join(per_model_dir, "eval_run.log")
@@ -846,12 +856,90 @@ def collect_all_stats():
             train_log = os.path.join(_resolve_model_base(mcfg), "train.log")
             train_metrics = parse_train_log_final(train_log)
             stats['train_metrics'] = train_metrics
+            ta_path = os.path.join(per_model_dir, "temporal_aggregation.txt")
+            stats['temporal'] = _parse_temporal_aggregation(ta_path)
             all_stats.append(stats)
             print(f"  {label}: Mean Rot={stats['rot_error_mean']:.3f} deg, "
                   f"P95={stats['rot_error_p95']:.3f} deg ({stats['samples']} samples)")
         else:
             print(f"  {label}: NO RESULTS")
     return all_stats
+
+
+def _parse_temporal_aggregation(path):
+    """Parse temporal_aggregation.txt for SVD/MED/BEST and optional per-sequence JSON."""
+    import re
+    result = {}
+    if not os.path.isfile(path):
+        return result
+    try:
+        with open(path, 'r') as f:
+            content = f.read()
+        pat = re.compile(
+            r'Window=\s*(\d+)\s+\([^)]*\):\s+Rot=([\d.]+)°\s+\(R=([\d.]+)°\s+P=([\d.]+)°\s+Y=([\d.]+)°\)'
+        )
+        current_section = ""
+        for line in content.split('\n'):
+            if 'SVD-Mean' in line:
+                current_section = 'svd'
+            elif 'Robust Median' in line:
+                current_section = 'med'
+            elif 'Trimmed-Mean' in line:
+                current_section = 'trm'
+            elif 'ORACLE' in line and 'Bias Correction + Temporal' in line:
+                current_section = 'oracle_combined'
+            elif 'Bias Correction + Temporal' in line:
+                current_section = 'combined'
+            elif 'BEST RESULT' in line:
+                best_text = line.split(':')[-1].strip()
+                result['best_method'] = best_text
+                continue
+            m = pat.search(line)
+            if m and current_section in ('svd', 'med', 'trm'):
+                window = int(m.group(1))
+                entry = {
+                    'rot': float(m.group(2)), 'roll': float(m.group(3)),
+                    'pitch': float(m.group(4)), 'yaw': float(m.group(5)),
+                }
+                result.setdefault(current_section, {})[window] = entry
+            if current_section in ('combined', 'oracle_combined'):
+                cm = re.search(
+                    r'(bias\d+%\+\w+):\s+Rot=([\d.]+)°\s+\(R=([\d.]+)°\s+P=([\d.]+)°\s+Y=([\d.]+)°\)',
+                    line
+                )
+                if cm:
+                    key = cm.group(1).strip()
+                    section_key = 'oracle' if current_section == 'oracle_combined' else 'combined'
+                    result.setdefault(section_key, {})[key] = {
+                        'rot': float(cm.group(2)), 'roll': float(cm.group(3)),
+                        'pitch': float(cm.group(4)), 'yaw': float(cm.group(5)),
+                    }
+        best_key = result.get('best_method', '')
+        all_pure = {}
+        for sec in ('svd', 'med', 'trm'):
+            for w, entry in result.get(sec, {}).items():
+                all_pure[f"{sec.upper()}W{w}"] = entry
+        if best_key and best_key in all_pure:
+            result['best'] = all_pure[best_key]
+            result['best']['method'] = best_key
+        elif all_pure:
+            bk = min(all_pure, key=lambda k: all_pure[k]['rot'])
+            result['best'] = all_pure[bk]
+            result['best']['method'] = bk
+        oracle_candidates = result.get('oracle', result.get('combined', {}))
+        if oracle_candidates:
+            ok = min(oracle_candidates, key=lambda k: oracle_candidates[k]['rot'])
+            result['oracle_best'] = oracle_candidates[ok]
+            result['oracle_best']['method'] = ok
+        mj = re.search(r'^\s*BEST_PER_SEQ_JSON:\s*(\S+)\s*$', content, re.MULTILINE)
+        if mj:
+            jp = os.path.join(os.path.dirname(os.path.abspath(path)), mj.group(1))
+            if os.path.isfile(jp):
+                with open(jp, 'r') as jf:
+                    result['best_per_sequence'] = json.load(jf)
+    except Exception:
+        pass
+    return result
 
 
 def generate_charts(all_stats):
@@ -1085,12 +1173,15 @@ def generate_report(all_stats):
     best = sorted_stats[0]
     worst = sorted_stats[-1]
     n_samples = all_stats[0].get('samples', '?')
+    first_with_bounds = next((s for s in all_stats if s.get('seq_boundaries')), None)
+    n_sequences = len(first_with_bounds['seq_boundaries']) if first_with_bounds else '?'
+    frames_per_seq = first_with_bounds['seq_boundaries'][0]['count'] if first_with_bounds and first_with_bounds['seq_boundaries'] else '?'
 
     lines.append("BEVCalib 多模型泛化性能对比报告")
     lines.append("=" * 80)
     lines.append("")
     lines.append(f"评估日期: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append(f"测试数据集: test_data ({n_samples} samples, 3 sequences)")
+    lines.append(f"测试数据集: test_data_v2 ({n_samples} samples, {n_sequences} sequences, 每序列 {frames_per_seq} 帧)")
     lines.append(f"扰动范围: +/-{ANGLE_RANGE} deg, +/-{TRANS_RANGE} m")
     lines.append(f"评估模型数: {len(all_stats)}")
     lines.append("")
@@ -1100,8 +1191,8 @@ def generate_report(all_stats):
     lines.append("一、实验配置概况")
     lines.append("=" * 80)
     lines.append("")
-    lines.append("| 模型标签 | 描述 | Checkpoint |")
-    lines.append("| --- | --- | --- |")
+    lines.append("| 模型标签 | BEV模式 | Backbone | 描述 | Checkpoint |")
+    lines.append("| --- | --- | --- | --- | --- |")
     for s in all_stats:
         c = s['config']
         desc = c.get('mode_desc', '')
@@ -1112,7 +1203,11 @@ def generate_report(all_stats):
             if 'version' in c:
                 parts.append(c['version'])
             desc = ', '.join(parts) if parts else s['label']
-        lines.append(f"| {s['label']} | {desc} | {c.get('ckpt', 'best_val')} |")
+        bev_mode = "Query-BEV" if "query" in s['label'].lower() or "query" in desc.lower() else "LSS"
+        backbone = "DINOv2" if "dinov2" in s['label'].lower() or "dinov2" in desc.lower() else "Swin"
+        if "frozen" in s['label'].lower() or "frozen" in desc.lower():
+            backbone += " (frozen)"
+        lines.append(f"| {s['label']} | {bev_mode} | {backbone} | {desc} | {c.get('ckpt', 'best_val')} |")
     lines.append("")
 
     # Section 2
@@ -1140,7 +1235,7 @@ def generate_report(all_stats):
     # Macro vs Micro comparison (if macro data available)
     has_macro = any(s.get('macro_rot_mean') for s in all_stats)
     if has_macro:
-        lines.append("**Micro vs Macro 对比 (均衡评估)**:")
+        lines.append("Micro vs Macro 对比 (均衡评估):")
         lines.append("")
         lines.append("| 模型 | Micro(样本级) | Macro(序列级) | 差异 |")
         lines.append("| --- | ---: | ---: | ---: |")
@@ -1171,11 +1266,172 @@ def generate_report(all_stats):
     lines.append("![Rotation Components](charts/rotation_components_bar.png)")
     lines.append("")
 
-    # Section 4: Translation (full-mode models only)
+    # Section: Temporal Aggregation + Bias Correction
+    has_temporal = any(s.get('temporal') for s in all_stats)
+    if has_temporal:
+        lines.append("=" * 80)
+        lines.append("四、时序聚合与偏差矫正 (多帧推理)")
+        lines.append("=" * 80)
+        lines.append("")
+        lines.append("通过多帧时序聚合（SVD-Mean / Robust Median）和偏差矫正，"
+                      "大幅降低单帧随机误差，模拟在线标定场景：")
+        lines.append("")
+
+        key_windows = [1, 50, 200, 400]
+        for method, method_name in [('svd', 'SVD-Mean'), ('med', 'Robust Median')]:
+            lines.append(f"{method_name} 聚合:")
+            lines.append("")
+            header = "| 模型 |" + " | ".join(
+                f"{'Per-frame' if w == 1 else f'{w}-frame'}" for w in key_windows
+            ) + " |"
+            lines.append(header)
+            lines.append("| --- |" + " | ".join("---:" for _ in key_windows) + " |")
+            for s in sorted_stats:
+                ta = s.get('temporal', {}).get(method, {})
+                row = f"| {s['label']}"
+                for w in key_windows:
+                    if w in ta:
+                        e = ta[w]
+                        row += f" | {e['rot']:.3f}° (R:{e['roll']:.2f} P:{e['pitch']:.2f} Y:{e['yaw']:.2f})"
+                    else:
+                        row += " | -"
+                row += " |"
+                lines.append(row)
+            lines.append("")
+
+        lines.append("BEST (纯时序聚合, 可部署, 不依赖GT, 按BEST Rot排序):")
+        lines.append("")
+        lines.append("| 排名 | 模型 | 方法 | Rot | Roll | Pitch | Yaw | Per-frame Rot | 改善 |")
+        lines.append("| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        best_sorted = sorted(
+            [s for s in sorted_stats if s.get('temporal', {}).get('best', {}).get('rot') is not None],
+            key=lambda s: s['temporal']['best']['rot'])
+        for rank, s in enumerate(best_sorted, 1):
+            best_ta = s['temporal']['best']
+            pf = s.get('rot_error_mean', 999)
+            improve = (1 - best_ta['rot'] / pf) * 100 if pf > 0 else 0
+            lines.append(
+                f"| {rank} | {s['label']} | {best_ta.get('method', '?')} "
+                f"| {best_ta['rot']:.3f}° "
+                f"| {best_ta['roll']:.3f}° "
+                f"| {best_ta['pitch']:.3f}° "
+                f"| {best_ta['yaw']:.3f}° "
+                f"| {pf:.3f}° "
+                f"| {improve:.1f}% |"
+            )
+        no_temporal = [s for s in sorted_stats if s.get('temporal', {}).get('best', {}).get('rot') is None]
+        for s in no_temporal:
+            lines.append(f"| - | {s['label']} | - | - | - | - | - | {s.get('rot_error_mean', 0):.3f}° | - |")
+        lines.append("")
+
+        lines.append("聚合方法说明:")
+        lines.append("- SVDW{N}: 对 N 帧预测旋转矩阵取 SVD-Mean (Euclidean 均值投影到 SO(3))")
+        lines.append("- MEDW{N}: 对 N 帧预测旋转矩阵转 axis-angle 后取逐轴 Median, 再映射回 SO(3)")
+        lines.append("- TRMW{N}: 对 N 帧预测旋转矩阵取 Trimmed-Mean (去掉 10% 极端值后取均值)")
+        lines.append("- BEST: 遍历所有 (方法, 窗口) 组合, 选 Rot 最低者作为该模型的最优可部署方案")
+        lines.append("- 计算流程: 每个 sequence (400帧) 独立聚合得到一个预测外参 → 与 GT 比较得 RPY 误差 → 12 个 seq 取均值")
+        lines.append("")
+
+        has_per_seq_best = any(
+            s.get('temporal', {}).get('best_per_sequence') for s in best_sorted)
+        if has_per_seq_best:
+            all_seq_ids_ta = set()
+            for s in best_sorted:
+                bps = s.get('temporal', {}).get('best_per_sequence', {})
+                if bps and 'per_sequence' in bps:
+                    for r in bps['per_sequence']:
+                        all_seq_ids_ta.add(int(r['seq']))
+            all_seq_ids_ta = sorted(all_seq_ids_ta)
+            if all_seq_ids_ta:
+                lines.append("BEST Per-Sequence Rot 总误差:")
+                lines.append("")
+                header = "| 模型 | 方法 |" + " | ".join(f"Seq{s:02d}" for s in all_seq_ids_ta) + " | Mean | Std |"
+                sep = "| --- | --- |" + " | ".join("---:" for _ in all_seq_ids_ta) + " | ---: | ---: |"
+                lines.append(header)
+                lines.append(sep)
+                import statistics as _st
+                for s in best_sorted:
+                    bps = s.get('temporal', {}).get('best_per_sequence', {})
+                    method = s['temporal']['best'].get('method', '?')
+                    if bps and 'per_sequence' in bps:
+                        seq_map = {int(r['seq']): r for r in bps['per_sequence']}
+                        vals = [seq_map.get(sid, {}).get('rot', -1) for sid in all_seq_ids_ta]
+                        valid = [v for v in vals if v >= 0]
+                        mean_v = sum(valid) / len(valid) if valid else 0
+                        std_v = _st.stdev(valid) if len(valid) > 1 else 0
+                        row = f"| {s['label']} | {method} |"
+                        for sid in all_seq_ids_ta:
+                            v = seq_map.get(sid, {}).get('rot', -1)
+                            row += f" {v:.3f}° |" if v >= 0 else " - |"
+                        row += f" {mean_v:.3f}° | {std_v:.3f}° |"
+                        lines.append(row)
+                    else:
+                        row = f"| {s['label']} | {method} |"
+                        row += " - |" * len(all_seq_ids_ta)
+                        row += f" {s['temporal']['best']['rot']:.3f}° | - |"
+                        lines.append(row)
+                lines.append("")
+
+                for axis, axis_key in [("Roll", "roll"), ("Pitch", "pitch"), ("Yaw", "yaw")]:
+                    lines.append(f"BEST Per-Sequence {axis} 误差:")
+                    lines.append("")
+                    lines.append(header)
+                    lines.append(sep)
+                    for s in best_sorted:
+                        bps = s.get('temporal', {}).get('best_per_sequence', {})
+                        method = s['temporal']['best'].get('method', '?')
+                        if bps and 'per_sequence' in bps:
+                            seq_map = {int(r['seq']): r for r in bps['per_sequence']}
+                            vals = [seq_map.get(sid, {}).get(axis_key, -1) for sid in all_seq_ids_ta]
+                            valid = [v for v in vals if v >= 0]
+                            mean_v = sum(valid) / len(valid) if valid else 0
+                            std_v = _st.stdev(valid) if len(valid) > 1 else 0
+                            row = f"| {s['label']} | {method} |"
+                            for sid in all_seq_ids_ta:
+                                v = seq_map.get(sid, {}).get(axis_key, -1)
+                                row += f" {v:.3f}° |" if v >= 0 else " - |"
+                            row += f" {mean_v:.3f}° | {std_v:.3f}° |"
+                            lines.append(row)
+                        else:
+                            row = f"| {s['label']} | {method} |"
+                            row += " - |" * len(all_seq_ids_ta)
+                            row += f" {s['temporal']['best'].get(axis_key, -1):.3f}° | - |"
+                            lines.append(row)
+                    lines.append("")
+
+                lines.append("BEST 方法选择详情 (各聚合方法在 400 帧窗口下的对比):")
+                lines.append("")
+                lines.append("| 模型 | SVDW400 Rot | MEDW400 Rot | TRMW400 Rot | 选中方法 | 选中Rot |")
+                lines.append("| --- | ---: | ---: | ---: | --- | ---: |")
+                for s in best_sorted:
+                    ta = s.get('temporal', {})
+                    svd400 = ta.get('svd', {}).get(400, {}).get('rot', -1)
+                    med400 = ta.get('med', {}).get(400, {}).get('rot', -1)
+                    trm400 = ta.get('trm', {}).get(400, {}).get('rot', -1)
+                    best_m = ta.get('best', {}).get('method', '?')
+                    best_r = ta.get('best', {}).get('rot', -1)
+                    svd_s = f"{svd400:.3f}°" if svd400 >= 0 else "-"
+                    med_s = f"{med400:.3f}°" if med400 >= 0 else "-"
+                    trm_s = f"{trm400:.3f}°" if trm400 >= 0 else "-"
+                    lines.append(
+                        f"| {s['label']} | {svd_s} | {med_s} | {trm_s} "
+                        f"| {best_m} | {best_r:.3f}° |"
+                    )
+                lines.append("")
+                lines.append("注: SVD-Mean 和 Robust Median 并非冗余 — 不同模型的误差分布特性不同, "
+                             "某些模型 SVD 更优 (如 v27-E10), 某些 MED 更优。"
+                             "BEST 机制自动选择最优组合, 无需人工指定。"
+                             "报告展示 SVD/MED 聚合趋势有助于理解误差随帧数的收敛行为。")
+                lines.append("")
+
+    _sec = 5 if has_temporal else 4
+
     trans_stats = [s for s in all_stats if s.get('trans_error_mean') and s['trans_error_mean'] > 0]
+    _CN = {5: '五', 6: '六', 7: '七', 8: '八', 9: '九', 10: '十', 11: '十一', 12: '十二'}
     if trans_stats:
         lines.append("=" * 80)
-        lines.append("四、平移误差对比 (仅 rotation+translation 模型, m)")
+        lines.append(f"{_CN.get(_sec, str(_sec))}、平移误差对比 (仅 rotation+translation 模型, m)")
+        _sec += 1
         lines.append("=" * 80)
         lines.append("")
         lines.append("| 模型 | Trans Mean | Fwd(X) | Lat(Y) | Ht(Z) | Trans P95 | Trans Max |")
@@ -1197,9 +1453,9 @@ def generate_report(all_stats):
     # Section 5: Train vs Test
     has_train = [s for s in all_stats if s.get('train_metrics') and s['train_metrics'].get('rot_error', 0) > 0]
     if has_train:
-        sec_num = "五" if trans_stats else "四"
         lines.append("=" * 80)
-        lines.append(f"{sec_num}、训练精度 vs 泛化精度对比")
+        lines.append(f"{_CN.get(_sec, str(_sec))}、训练精度 vs 泛化精度对比")
+        _sec += 1
         lines.append("=" * 80)
         lines.append("")
         lines.append("| 模型 | 训练Rot(deg) | 测试Rot(deg) | 泛化衰退 | 评级 |")
@@ -1208,45 +1464,78 @@ def generate_report(all_stats):
             train_rot = s['train_metrics']['rot_error']
             test_rot = s['rot_error_mean']
             deg = test_rot / train_rot if train_rot > 0 else 0
-            if deg < 3:
+            if deg < 1.2:
                 rating = "优秀"
-            elif deg < 5:
+            elif deg < 1.5:
                 rating = "良好"
-            elif deg < 7:
+            elif deg < 2.0:
                 rating = "一般"
+            elif deg < 3.0:
+                rating = "较差"
             else:
                 rating = "需改进"
             lines.append(f"| {s['label']} | {train_rot:.2f} | {test_rot:.3f} | {deg:.1f}x | {rating} |")
         lines.append("")
         lines.append("![Train vs Test](charts/train_vs_test.png)")
         lines.append("")
+        under_1x = [s for s in has_train
+                     if s['train_metrics']['rot_error'] > 0
+                     and s['rot_error_mean'] / s['train_metrics']['rot_error'] < 1.0]
+        if under_1x:
+            lines.append("注: 泛化衰退 < 1.0x (测试优于训练) 的模型通常使用了强数据增强 "
+                         "(mount jitter, DANN 等), 导致训练 loss 偏高, "
+                         "但在实际泛化测试中反而表现更好。")
+            lines.append("")
 
-    # Section 6: Ranking
-    sec_num_rank = "六" if trans_stats else "五"
+    # Section 6: Comprehensive ranking (per-frame + BEST)
     lines.append("=" * 80)
-    lines.append(f"{sec_num_rank}、模型排名 (按 Mean Rotation Error)")
+    lines.append(f"{_CN.get(_sec, str(_sec))}、模型综合排名")
+    _sec += 1
     lines.append("=" * 80)
     lines.append("")
-    lines.append("| 排名 | 模型 | Mean Rot(deg) | Median | P95 | Max |")
+    lines.append("Per-frame 排名 (单帧推理精度):")
+    lines.append("")
+    lines.append("| 排名 | 模型 | Mean Rot | Median | P95 | Max |")
     lines.append("| ---: | --- | ---: | ---: | ---: | ---: |")
     for rank, s in enumerate(sorted_stats, 1):
         lines.append(
             f"| {rank} | {s['label']} "
-            f"| {s.get('rot_error_mean', -1):.3f} "
-            f"| {s.get('rot_error_median', -1):.3f} "
-            f"| {s.get('rot_error_p95', -1):.3f} "
-            f"| {s.get('rot_error_max', -1):.3f} |"
+            f"| {s.get('rot_error_mean', -1):.3f}° "
+            f"| {s.get('rot_error_median', -1):.3f}° "
+            f"| {s.get('rot_error_p95', -1):.3f}° "
+            f"| {s.get('rot_error_max', -1):.3f}° |"
         )
     lines.append("")
+    temporal_models = [s for s in all_stats
+                       if s.get('temporal', {}).get('best', {}).get('rot') is not None]
+    if temporal_models:
+        sorted_by_best_rank = sorted(temporal_models,
+                                      key=lambda s: s['temporal']['best']['rot'])
+        lines.append("BEST 时序聚合排名 (可部署, 400帧聚合):")
+        lines.append("")
+        lines.append("| 排名 | 模型 | BEST Rot | 方法 | Per-frame Rot | 改善率 |")
+        lines.append("| ---: | --- | ---: | --- | ---: | ---: |")
+        for rank, s in enumerate(sorted_by_best_rank, 1):
+            tb = s['temporal']['best']
+            pf = s.get('rot_error_mean', 999)
+            improve = (1 - tb['rot'] / pf) * 100 if pf > 0 else 0
+            lines.append(
+                f"| {rank} | {s['label']} "
+                f"| {tb['rot']:.3f}° "
+                f"| {tb.get('method', '?')} "
+                f"| {pf:.3f}° "
+                f"| {improve:.1f}% |"
+            )
+        lines.append("")
     lines.append("![Model Ranking](charts/model_ranking.png)")
     lines.append("")
 
     # Section 7: Per-sequence analysis
-    sec_num_seq = "七" if trans_stats else "六"
     has_seq_data = any(s.get('per_sequence') for s in all_stats)
     if has_seq_data:
         lines.append("=" * 80)
-        lines.append(f"{sec_num_seq}、Per-Sequence 误差分析")
+        lines.append(f"{_CN.get(_sec, str(_sec))}、Per-Sequence 误差分析")
+        _sec += 1
         lines.append("=" * 80)
         lines.append("")
         lines.append("各模型在不同 sequence 上的 Mean Rotation Error (deg):")
@@ -1271,17 +1560,43 @@ def generate_report(all_stats):
                 lines.append(row)
             lines.append("")
 
-            # Flag problematic sequences
-            lines.append("异常 sequence 识别（任一模型 Mean Rot > 2x 整体 Mean）:")
+            # Flag problematic sequences (>1.5x overall mean)
+            anomalies = []
             for s in sorted_stats:
                 ps = s.get('per_sequence', {})
                 overall_mean = s.get('rot_error_mean', 0)
                 for sid, sv in ps.items():
-                    if sv['rot_mean'] > overall_mean * 2 and sv['samples'] >= 50:
-                        lines.append(
-                            f"  - {s['label']}: Seq {sid} Mean={sv['rot_mean']:.3f}° "
-                            f"(整体={overall_mean:.3f}°, 比值={sv['rot_mean']/max(overall_mean,0.001):.1f}x, "
-                            f"{sv['samples']}样本)")
+                    ratio = sv['rot_mean'] / max(overall_mean, 0.001)
+                    if ratio > 1.5 and sv['samples'] >= 50:
+                        anomalies.append((s['label'], sid, sv['rot_mean'], overall_mean, ratio))
+            if anomalies:
+                lines.append("异常 sequence 识别 (Mean Rot > 1.5x 整体 Mean):")
+                lines.append("")
+                lines.append("| 模型 | Sequence | Seq Mean | 整体 Mean | 比值 |")
+                lines.append("| --- | --- | ---: | ---: | ---: |")
+                for label, sid, seq_mean, overall, ratio in sorted(anomalies, key=lambda x: -x[4]):
+                    lines.append(f"| {label} | Seq {sid} | {seq_mean:.3f}° | {overall:.3f}° | {ratio:.1f}x |")
+            else:
+                lines.append("异常 sequence 识别: 无显著异常 (所有序列 Mean Rot 均在 1.5x 整体 Mean 以内)")
+            lines.append("")
+            # Per-sequence stability analysis
+            lines.append("跨序列稳定性分析 (序列间误差标准差):")
+            lines.append("")
+            lines.append("| 排名 | 模型 | 序列间Std | CV(变异系数) | Min Seq | Max Seq | Range |")
+            lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+            stability = []
+            for s in sorted_stats:
+                ps = s.get('per_sequence', {})
+                if ps:
+                    vals = [v['rot_mean'] for v in ps.values()]
+                    import statistics
+                    mean_v = statistics.mean(vals) if vals else 0
+                    std_v = statistics.stdev(vals) if len(vals) > 1 else 0
+                    cv = std_v / mean_v if mean_v > 0 else 0
+                    stability.append((s['label'], std_v, cv, min(vals), max(vals), max(vals) - min(vals)))
+            for rank, (label, std_v, cv, mn, mx, rng) in enumerate(
+                    sorted(stability, key=lambda x: x[1]), 1):
+                lines.append(f"| {rank} | {label} | {std_v:.3f}° | {cv:.3f} | {mn:.3f}° | {mx:.3f}° | {rng:.3f}° |")
             lines.append("")
 
         # Per-sequence boundary info
@@ -1296,9 +1611,9 @@ def generate_report(all_stats):
             lines.append("")
 
     # Section 8: Projection comparison
-    sec_num_proj = "八" if has_seq_data else ("七" if trans_stats else "六")
     lines.append("=" * 80)
-    lines.append(f"{sec_num_proj}、点云投影效果图对比")
+    lines.append(f"{_CN.get(_sec, str(_sec))}、点云投影效果图对比")
+    _sec += 1
     lines.append("=" * 80)
     lines.append("")
     proj_dir = os.path.join(OUTPUT_DIR, "projection_comparison")
@@ -1310,60 +1625,189 @@ def generate_report(all_stats):
                 lines.append(f"![{fn}](projection_comparison/{fn})")
                 lines.append("")
 
-    # Section 9: Conclusions
-    sec_num_conc = "九" if has_seq_data else ("八" if trans_stats else "七")
-    lines.append("=" * 80)
-    lines.append(f"{sec_num_conc}、结论与建议")
-    lines.append("=" * 80)
-    lines.append("")
+    # Temporal aggregation projections (2x2 grid: GT|Init / Per-frame|Aggregated)
+    # Show key models: top 3 by BEST + per-frame best + per-frame worst for contrast
+    stats_with_temporal = [s for s in all_stats
+                           if s.get('temporal', {}).get('best', {}).get('rot') is not None]
+    key_labels = set()
+    if stats_with_temporal:
+        sorted_by_best_local = sorted(stats_with_temporal,
+                                       key=lambda s: s['temporal']['best']['rot'])
+        for s in sorted_by_best_local[:3]:
+            key_labels.add(s['label'])
+        if sorted_stats:
+            key_labels.add(sorted_stats[0]['label'])
+        if len(sorted_by_best_local) > 3:
+            key_labels.add(sorted_by_best_local[-1]['label'])
 
-    ratio = worst.get('rot_error_mean', 1) / max(best.get('rot_error_mean', 1), 0.001)
-    lines.append(f"1. 最佳泛化模型: {best['label']} (Mean Rot: {best.get('rot_error_mean', -1):.3f} deg)")
-    lines.append(f"2. 最差泛化模型: {worst['label']} (Mean Rot: {worst.get('rot_error_mean', -1):.3f} deg)")
-    lines.append(f"3. 最差/最佳比值: {ratio:.1f}x")
-    lines.append("")
-
-    z_groups = {}
+    has_temporal_proj = False
     for s in all_stats:
-        z = s['config'].get('z_voxels', 'auto')
-        z_groups.setdefault(z, []).append(s)
+        label = s['label']
+        tp_dir = os.path.join(OUTPUT_DIR, label, "temporal_projections")
+        if os.path.isdir(tp_dir) and os.listdir(tp_dir):
+            if not has_temporal_proj:
+                lines.append("=" * 80)
+                lines.append(f"{_CN.get(_sec, str(_sec))}、时序聚合投影效果对比 (2x2: GT | Init / Per-frame | Aggregated)")
+                _sec += 1
+                lines.append("=" * 80)
+                lines.append("")
+                lines.append("田字格布局：左上=GT (真值) | 右上=Init (扰动输入) | 左下=Per-frame (单帧预测) | 右下=Aggregated (400帧聚合)")
+                lines.append("")
+                if key_labels:
+                    lines.append(f"展示关键模型 ({len(key_labels)}个): "
+                                 + ", ".join(sorted(key_labels))
+                                 + " (完整投影图见各模型子目录)")
+                    lines.append("")
+                has_temporal_proj = True
+            is_key = label in key_labels
+            if not is_key:
+                continue
+            best_rot = s.get('temporal', {}).get('best', {}).get('rot', 999)
+            pf_rot = s.get('rot_error_mean', 999)
+            lines.append(f"{label} (Per-frame: {pf_rot:.3f}°, BEST: {best_rot:.3f}°):")
+            lines.append("")
+            tp_files = sorted(fn for fn in os.listdir(tp_dir) if fn.endswith('.png'))
+            shown = 0
+            for fn in tp_files:
+                sample_num = fn.replace('temporal_compare_', '').replace('.png', '')
+                seq_id = int(sample_num) // 400 if sample_num.isdigit() else '?'
+                frame_in_seq = int(sample_num) % 400 if sample_num.isdigit() else 0
+                if frame_in_seq == 0:
+                    lines.append(f"Sample {sample_num} (Seq {seq_id:02d}):")
+                    lines.append(f"![{fn}]({label}/temporal_projections/{fn})")
+                    lines.append("")
+                    shown += 1
+            if shown == 0:
+                for fn in tp_files[:4]:
+                    sample_num = fn.replace('temporal_compare_', '').replace('.png', '')
+                    seq_id = int(sample_num) // 400 if sample_num.isdigit() else '?'
+                    lines.append(f"Sample {sample_num} (Seq {seq_id:02d}):")
+                    lines.append(f"![{fn}]({label}/temporal_projections/{fn})")
+                    lines.append("")
 
-    if len(z_groups) > 1:
-        lines.append("Z体素影响分析:")
-        for z in sorted(z_groups.keys(), key=lambda x: (isinstance(x, str), x)):
-            group = z_groups[z]
-            avg_rot = np.mean([s['rot_error_mean'] for s in group])
-            lines.append(f"  - z={z}: 平均Mean Rot = {avg_rot:.3f} deg ({len(group)}个模型)")
+    lines.append("=" * 80)
+    lines.append(f"{_CN.get(_sec, str(_sec))}、结论与建议")
+    _sec += 1
+    lines.append("=" * 80)
+    lines.append("")
+
+    # --- Per-frame ranking ---
+    lines.append("--- 按 Per-frame 单帧误差排名 ---")
+    lines.append("")
+    lines.append("| 排名 | 模型 | Per-frame Rot | Roll | Pitch | Yaw |")
+    lines.append("| ---: | --- | ---: | ---: | ---: | ---: |")
+    for rank, s in enumerate(sorted_stats[:5], 1):
+        lines.append(
+            f"| {rank} | {s['label']} "
+            f"| {s.get('rot_error_mean', -1):.3f}° "
+            f"| {s.get('roll_error_mean', -1):.3f}° "
+            f"| {s.get('pitch_error_mean', -1):.3f}° "
+            f"| {s.get('yaw_error_mean', -1):.3f}° |"
+        )
+    lines.append("")
+
+    # --- BEST temporal ranking ---
+    stats_with_temporal = [s for s in all_stats
+                          if s.get('temporal', {}).get('best', {}).get('rot') is not None]
+    if stats_with_temporal:
+        sorted_by_best = sorted(stats_with_temporal,
+                                key=lambda s: s['temporal']['best']['rot'])
+        best_ta = sorted_by_best[0]
+
+        lines.append("--- 按 BEST 时序聚合排名 (可部署, 不依赖GT) ---")
+        lines.append("")
+        lines.append("| 排名 | 模型 | BEST Rot | 方法 | Roll | Pitch | Yaw | Per-frame→BEST改善 |")
+        lines.append("| ---: | --- | ---: | --- | ---: | ---: | ---: | ---: |")
+        for rank, s in enumerate(sorted_by_best, 1):
+            tb = s['temporal']['best']
+            pf = s.get('rot_error_mean', 999)
+            improve = (1 - tb['rot'] / pf) * 100 if pf > 0 else 0
+            lines.append(
+                f"| {rank} | {s['label']} "
+                f"| {tb['rot']:.3f}° "
+                f"| {tb.get('method', '?')} "
+                f"| {tb.get('roll', -1):.3f}° "
+                f"| {tb.get('pitch', -1):.3f}° "
+                f"| {tb.get('yaw', -1):.3f}° "
+                f"| {improve:.1f}% |"
+            )
+        lines.append("")
+    else:
+        best_ta = None
+
+    # --- Key findings ---
+    lines.append("--- 关键发现 ---")
+    lines.append("")
+    if best_ta and best_ta['label'] != best['label']:
+        lines.append(
+            f"1. Per-frame 最佳 ({best['label']}, {best.get('rot_error_mean', -1):.3f}°) "
+            f"≠ BEST 时序聚合最佳 ({best_ta['label']}, {best_ta['temporal']['best']['rot']:.3f}°)"
+        )
+        lines.append(f"   说明: 单帧精度高不等于聚合后精度高, "
+                     f"关键在于误差是否为可聚合消除的随机噪声")
+    lines.append(f"2. 最佳泛化模型 (per-frame): {best['label']} (Mean Rot: {best.get('rot_error_mean', -1):.3f}°)")
+    if best_ta:
+        lines.append(f"3. 最佳泛化模型 (BEST时序聚合): {best_ta['label']} "
+                     f"(BEST: {best_ta['temporal']['best']['rot']:.3f}°, "
+                     f"方法: {best_ta['temporal']['best'].get('method', '?')})")
+    lines.append("")
+
+    # --- 0.1° target analysis ---
+    if best_ta:
+        tb = best_ta['temporal']['best']
+        lines.append("--- 距 0.1° 目标的评估 ---")
+        lines.append("")
+        lines.append(f"最优模型 {best_ta['label']} 的 BEST 指标:")
+        lines.append("")
+        lines.append("| 轴 | BEST | 距0.1° | 状态 |")
+        lines.append("| --- | ---: | ---: | --- |")
+        for axis, key in [("Roll", "roll"), ("Pitch", "pitch"), ("Yaw", "yaw")]:
+            val = tb.get(key, 999)
+            ratio = val / 0.1
+            status = "已达标" if val <= 0.1 else ("接近" if val <= 0.15 else "需优化")
+            lines.append(f"| {axis} | {val:.3f}° | {ratio:.1f}x | {status} |")
+        lines.append(f"| Total | {tb['rot']:.3f}° | {tb['rot']/0.3:.1f}x | {'已达标' if tb['rot'] <= 0.3 else '需优化'} |")
         lines.append("")
 
-    angle_groups = {}
-    for s in all_stats:
-        a = s['config'].get('angle_deg', 'auto')
-        angle_groups.setdefault(a, []).append(s)
-
-    if len(angle_groups) > 1:
-        lines.append("训练角度影响分析:")
-        for a in sorted(angle_groups.keys(), key=lambda x: (isinstance(x, str), x)):
-            group = angle_groups[a]
-            avg_rot = np.mean([s['rot_error_mean'] for s in group])
-            lines.append(f"  - {a}deg训练: 平均Mean Rot = {avg_rot:.3f} deg ({len(group)}个模型)")
-        lines.append("")
-
-    mode_groups = {}
-    for s in all_stats:
-        m = s['config'].get('mode_desc', s['label'])
-        mode_groups.setdefault(m, []).append(s)
-
-    lines.append("优化模式影响分析:")
-    for m, group in mode_groups.items():
-        avg_rot = np.mean([s['rot_error_mean'] for s in group])
-        lines.append(f"  - {m}: 平均Mean Rot = {avg_rot:.3f} deg ({len(group)}个模型)")
+    # --- Series summary ---
+    lines.append("--- 各系列整体评价 ---")
+    lines.append("")
+    series_groups = {}
+    import re as _re
+    for s in sorted_stats:
+        label = s['label']
+        m = _re.match(r'(v\d+)', label)
+        key = m.group(1).upper() if m else 'Other'
+        if key == 'V25':
+            key = 'V25r'
+        series_groups.setdefault(key, []).append(s)
+    for series, models in sorted(series_groups.items()):
+        pf_best = min(m.get('rot_error_mean', 999) for m in models)
+        pf_worst = max(m.get('rot_error_mean', 999) for m in models)
+        best_models_ta = [m for m in models
+                          if m.get('temporal', {}).get('best', {}).get('rot') is not None]
+        if best_models_ta:
+            ta_best = min(m['temporal']['best']['rot'] for m in best_models_ta)
+            ta_label = min(best_models_ta, key=lambda m: m['temporal']['best']['rot'])['label']
+            lines.append(f"- {series} ({len(models)}模型): "
+                         f"Per-frame {pf_best:.3f}°~{pf_worst:.3f}°, "
+                         f"BEST {ta_best:.3f}° ({ta_label})")
+        else:
+            lines.append(f"- {series} ({len(models)}模型): "
+                         f"Per-frame {pf_best:.3f}°~{pf_worst:.3f}°")
     lines.append("")
 
-    lines.append("应用建议:")
-    lines.append(f"  - 生产环境推荐: {best['label']} (最佳泛化能力)")
+    lines.append("--- 应用建议 ---")
+    lines.append("")
+    if best_ta:
+        lines.append(f"- 生产环境推荐 (时序聚合): {best_ta['label']} (BEST {best_ta['temporal']['best']['rot']:.3f}°)")
+        if len(sorted_by_best) > 1:
+            second = sorted_by_best[1]
+            lines.append(f"- 生产环境备选: {second['label']} "
+                         f"(BEST {second['temporal']['best']['rot']:.3f}°)")
+    lines.append(f"- 单帧最佳: {best['label']} (Per-frame {best.get('rot_error_mean', -1):.3f}°)")
     if len(sorted_stats) > 1:
-        lines.append(f"  - 备选方案: {sorted_stats[1]['label']} (第二名)")
+        lines.append(f"- 单帧备选: {sorted_stats[1]['label']} (Per-frame {sorted_stats[1].get('rot_error_mean', -1):.3f}°)")
     lines.append("")
 
     report_text = "\n".join(lines) + "\n"

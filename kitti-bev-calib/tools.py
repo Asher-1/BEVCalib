@@ -159,6 +159,50 @@ def augment_gt_pitch_flip(T, prob=0.5, max_deg=6.0, sign_flip_prob=0.0):
     return T_aug
 
 
+def augment_mount_jitter(T, prob=0.3, rotation_sigma_deg=0.5, translation_sigma_m=0.01):
+    """Simulate camera mount installation diversity by jittering GT extrinsics.
+
+    Unlike perturbation augmentation (which creates the init→GT correction target),
+    mount jitter modifies the GT itself to represent a DIFFERENT camera installation.
+    This forces the model to handle diverse mount configurations rather than
+    memorizing the specific extrinsics of training vehicles.
+
+    The key domain gap insight: test vehicles have different camera-LiDAR mounting
+    (e.g. test Seq02 has ~164° roll difference from train Seq02). Small mount
+    jitter during training builds robustness to such installation variations.
+
+    Applied BEFORE perturbation generation, so both GT and init stay consistent.
+
+    Parameters:
+        T: (B, 4, 4) GT extrinsic matrices
+        prob: per-sample probability of applying mount jitter
+        rotation_sigma_deg: std of rotation jitter per axis (degrees)
+        translation_sigma_m: std of translation jitter per axis (meters)
+    Returns:
+        T_aug: (B, 4, 4) jittered GT extrinsics
+    """
+    if prob <= 0:
+        return T
+    B = T.shape[0]
+    T_aug = T.copy()
+    jitter_mask = np.random.rand(B) < prob
+    n_jitter = jitter_mask.sum()
+    if n_jitter == 0:
+        return T_aug
+
+    rot_jitter_rad = np.deg2rad(
+        np.random.normal(0, rotation_sigma_deg, (n_jitter, 3))
+    )
+    delta_rots = R.from_rotvec(rot_jitter_rad)
+    trans_jitter = np.random.normal(0, translation_sigma_m, (n_jitter, 3)).astype(np.float32)
+
+    for idx, i in enumerate(np.where(jitter_mask)[0]):
+        T_aug[i, :3, :3] = T_aug[i, :3, :3] @ delta_rots[idx].as_matrix().astype(np.float32)
+        T_aug[i, :3, 3] += trans_jitter[idx]
+
+    return T_aug
+
+
 def generate_intrinsic_matrix(fx, fy, cx, cy):
     intrinsic_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
     return intrinsic_matrix

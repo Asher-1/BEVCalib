@@ -1,0 +1,69 @@
+# V22 诊断实验评估 (16-node full training)
+#
+# 来源: batch8_train_all_v22_diagnosis.yaml
+#
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；须保留 bev_zbound_step。
+# 所有模型统一用 eval_params angle_range=5.0 / trans_range=0.15 评测。
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_diagnosis.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_diagnosis.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v22_diagnosis"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v22_diagnosis"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # Phase A: Backbone LR 消融 (rotation_only)
+  - label: "v22-A1-bb1e5-rotonly"
+    dir_name: "model_small_5deg_v22_A1_lr010_rotonly"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "A1: backbone=1e-5, rotation_only"
+
+  - label: "v22-A2-bb5e5-rotonly"
+    dir_name: "model_small_5deg_v22_A2_lr050_rotonly"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "A2: backbone=5e-5 (=official), rotation_only"
+
+  - label: "v22-A3-bb1e4-rotonly"
+    dir_name: "model_small_5deg_v22_A3_lr100_rotonly"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "A3: unified LR 1e-4, rotation_only"
+
+  # Phase B / C
+  - label: "v22-B1-5e5-rotonly"
+    dir_name: "model_small_5deg_v22_B1_lr5e5_rotonly"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "B1: all LR 5e-5, rotation_only"
+
+  - label: "v22-B2-5e5-joint-5deg"
+    dir_name: "model_small_5deg_v22_B2_lr5e5_joint_5deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "B2: joint, 5°/0.15m train"
+
+  - label: "v22-B3-official-replica"
+    dir_name: "model_small_20deg_v22_B3_official_replica"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "B3: joint, 20°/1.5m train (eval at 5°/0.15m here)"
+
+  - label: "v22-C1-1e4-joint-5deg"
+    dir_name: "model_small_5deg_v22_C1_lr1e4_joint_5deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "C1: joint, 5°/0.15m train"

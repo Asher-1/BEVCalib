@@ -671,15 +671,17 @@ bash train_universal.sh scratch --dataset_root /path/to/data --angle_range_deg 2
 ## 停止训练
 
 ```bash
-# 使用停止脚本
+# 彻底停止所有训练（含批量实验队列、重试、TensorBoard）
+bash stop_training.sh --force
+
+# 交互确认后停止
 bash stop_training.sh
 
-# 或手动停止
-pkill -f train_kitti
-
-# 停止特定训练
-pkill -f "train_kitti.py --log_dir ./logs/B26A"
+# 仅查看当前训练进程状态
+bash stop_training.sh --status
 ```
+
+脚本会按正确顺序停止进程：先停 `batch_train.sh` 调度器（阻止新实验和重试），再停 `start_training.sh` → `torchrun` → `train_kitti.py` 子进程链。3 秒优雅退出后，残留进程会被 SIGKILL 强制终止。
 
 ## 常见问题
 
@@ -844,10 +846,8 @@ tail -f logs/B26A/model_small_10deg_v1/train.log
 # TensorBoard
 tensorboard --logdir logs/B26A/ --port 6006
 
-# ============ 停止训练 ============
-bash stop_training.sh
-# 或
-pkill -f train_kitti
+# ============ 停止训练（含批量队列和重试） ============
+bash stop_training.sh --force
 
 # ============ 检查点管理 ============
 # 查找最新检查点

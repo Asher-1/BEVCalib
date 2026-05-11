@@ -347,10 +347,12 @@ tensorboard --logdir logs/ --port 6006
 
 ### Stop Training
 
+Stops **all** training processes including batch queues, retries, torchrun, and TensorBoard:
+
 ```bash
-bash stop_training.sh
-# or
-pkill -f train_kitti
+bash stop_training.sh           # interactive confirmation
+bash stop_training.sh --force   # stop immediately, no confirmation
+bash stop_training.sh --status  # view running processes only
 ```
 
 ## Evaluation
@@ -544,7 +546,7 @@ BEVCalib/
 ├── start_training.sh                 # 🚀 Quick start training
 ├── train_universal.sh                # 🔧 Universal training script
 ├── batch_train.sh                    # 📊 Config-driven batch training
-├── stop_training.sh
+├── stop_training.sh                  # 🛑 Stop all training (batch queues + retries)
 │
 ├── evaluate_checkpoint.py            # Checkpoint evaluation tool
 │
@@ -607,8 +609,8 @@ bash utils/scripts/quick_analyze.sh 10deg --only-train
 # Complete analysis
 python utils/scripts/analyze_experiments.py --config utils/configs/experiment_config.yaml
 
-# ========== Stop Training ==========
-bash stop_training.sh
+# ========== Stop Training (all queues + retries) ==========
+bash stop_training.sh --force
 ```
 
 ## Acknowledgement

@@ -1,5 +1,7 @@
 # Phase 1+2 Quick 实验泛化评估配置
 #
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；bev_zbound_step 须手写。
+#
 # 可用实验 (Quick 版本, 8 GPU, max_frames=500):
 #   1. baseline_quick:   concat fuser, no cam dropout (400 epochs, 完整训练)
 #   2. diff_only_quick:  BEVDiffFuser, no cam dropout (61 epochs, 训练中断)
@@ -37,13 +39,6 @@ models:
     dir_name: "model_small_5deg_phase12_baseline_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
-    rotation_only: 1
-    use_drcv: 0
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
-    fuser_type: "concat"
     angle_deg: 5
     z_voxels: 5
     version: "phase12"
@@ -56,13 +51,6 @@ models:
     dir_name: "model_small_5deg_phase12_diff_only_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
-    rotation_only: 1
-    use_drcv: 0
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
-    fuser_type: "diff"
     angle_deg: 5
     z_voxels: 5
     version: "phase12"
@@ -75,12 +63,6 @@ models:
     dir_name: "v21/model_small_5deg_v21_quick_no_aug"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
-    rotation_only: 1
-    use_drcv: 0
-    use_mlp_head: 0
-    voxel_mode: "hard"
-    scatter_reduce: "sum"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 5
     version: "v21"

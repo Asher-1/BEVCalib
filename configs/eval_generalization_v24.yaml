@@ -1,0 +1,137 @@
+# V24: BEV Diff Fuser + Camera Dropout 泛化评估配置
+#
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；bev_zbound_step 须手写。
+#
+# 6 个消融实验模型 (基于 V23 优化配置: joint, pose_aware, 场景增强):
+#   A. baseline:         concat fuser, no cam dropout
+#   B. diff_only:        diff fuser v1, no cam dropout
+#   C. drop_only:        concat fuser, cam_drop=0.3 zero
+#   D. diff_drop_v1:     diff fuser v1, cam_drop=0.3 zero
+#   E. diff_drop_v2:     diff fuser v2 (dual-path), cam_drop=0.3 zero
+#   F. diff_drop_noise:  diff fuser v1, cam_drop=0.3 noise
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v24.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v24.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v24"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v24"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # =========================================================================
+  # A: Baseline (concat fuser, no cam dropout)
+  # =========================================================================
+  - label: "v24-A-baseline"
+    dir_name: "model_small_5deg_v24_A_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "A: baseline (concat, no drop)"
+
+  # =========================================================================
+  # B: BEVDiffFuser v1 only
+  # =========================================================================
+  - label: "v24-B-diff-only"
+    dir_name: "model_small_5deg_v24_B_diff_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "B: diff v1 only (pc + |cam-pc| + cam*pc)"
+
+  # =========================================================================
+  # C: Camera Dropout only (concat fuser)
+  # =========================================================================
+  - label: "v24-C-drop-only"
+    dir_name: "model_small_5deg_v24_C_drop_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "C: concat + cam_drop=0.3 zero"
+
+  # =========================================================================
+  # D: DiffFuser v1 + CamDrop zero
+  # =========================================================================
+  - label: "v24-D-diff-drop-v1"
+    dir_name: "model_small_5deg_v24_D_diff_drop_v1"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "D: diff v1 + cam_drop=0.3 zero (degenerate)"
+
+  # =========================================================================
+  # E: DiffFuser v2 (dual-path) + CamDrop zero
+  # =========================================================================
+  - label: "v24-E-diff-drop-v2"
+    dir_name: "model_small_5deg_v24_E_diff_drop_v2"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "E: diff v2 (dual-path) + cam_drop=0.3 zero"
+
+  # =========================================================================
+  # F: DiffFuser v1 + CamDrop noise
+  # =========================================================================
+  - label: "v24-F-diff-drop-noise"
+    dir_name: "model_small_5deg_v24_F_diff_drop_noise"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "F: diff v1 + cam_drop=0.3 noise (0.1*std Gaussian)"
+
+  # =========================================================================
+  # G: Joint baseline (rotation_only=false)
+  # =========================================================================
+  - label: "v24-G-joint-baseline"
+    dir_name: "model_small_5deg_v24_G_joint_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "G: joint baseline (concat, no drop)"
+
+  # =========================================================================
+  # H: Joint + DiffFuser v2 + CamDrop zero
+  # =========================================================================
+  - label: "v24-H-joint-diff-drop-v2"
+    dir_name: "model_small_5deg_v24_H_joint_diff_drop_v2"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24"
+    mode_desc: "H: joint + diff v2 + cam_drop=0.3 zero"
+
+# ============================================================================
+# 关键对比链
+# ============================================================================
+#
+#   DiffFuser 效果:           A vs B
+#   CamDrop 效果:             A vs C
+#   组合效果:                 A vs D
+#   双路径优化 vs 退化输入:   D vs E
+#   噪声替代 vs 硬零:         D vs F
+#   最优组合:                 E vs F

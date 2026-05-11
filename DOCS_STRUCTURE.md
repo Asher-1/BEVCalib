@@ -34,7 +34,7 @@ BEVCalib/
 ├── start_training.sh                 # 🚀 快速训练脚本
 ├── train_universal.sh                # 🔧 通用训练脚本
 ├── batch_train.sh                    # 📊 批量训练脚本
-├── stop_training.sh
+├── stop_training.sh                  # 🛑 停止所有训练（批量队列+重试+TensorBoard）
 │
 ├── kitti-bev-calib/                  # 核心训练代码
 │   ├── train_kitti.py

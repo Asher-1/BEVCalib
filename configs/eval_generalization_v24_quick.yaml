@@ -1,0 +1,94 @@
+# V24 Quick: BEV Diff Fuser + Camera Dropout 泛化评估 (1N Quick 模型)
+#
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；bev_zbound_step 须手写。
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v24_quick.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v24_quick.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v24_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v24_quick"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v24-A-baseline-quick"
+    dir_name: "model_small_5deg_v24_A_baseline_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "A: baseline (concat, no drop)"
+
+  - label: "v24-B-diff-only-quick"
+    dir_name: "model_small_5deg_v24_B_diff_only_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "B: diff v1 only"
+
+  - label: "v24-C-drop-only-quick"
+    dir_name: "model_small_5deg_v24_C_drop_only_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "C: concat + cam_drop=0.3 zero"
+
+  - label: "v24-D-diff-drop-v1-quick"
+    dir_name: "model_small_5deg_v24_D_diff_drop_v1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "D: diff v1 + cam_drop=0.3 zero"
+
+  - label: "v24-E-diff-drop-v2-quick"
+    dir_name: "model_small_5deg_v24_E_diff_drop_v2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "E: diff v2 (dual-path) + cam_drop=0.3 zero"
+
+  - label: "v24-F-diff-drop-noise-quick"
+    dir_name: "model_small_5deg_v24_F_diff_drop_noise_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "F: diff v1 + cam_drop=0.3 noise"
+
+  - label: "v24-G-joint-baseline-quick"
+    dir_name: "model_small_5deg_v24_G_joint_baseline_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "G: joint baseline (concat, no drop)"
+
+  - label: "v24-H-joint-diff-drop-v2-quick"
+    dir_name: "model_small_5deg_v24_H_joint_diff_drop_v2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    angle_deg: 5
+    z_voxels: 5
+    version: "v24_quick"
+    mode_desc: "H: joint + diff v2 + cam_drop=0.3 zero"

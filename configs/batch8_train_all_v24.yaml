@@ -1,0 +1,228 @@
+# V24: BEV Diff Fuser + Camera Dropout 完整消融实验矩阵 (Full 32N)
+#
+# 基于 V23 优化配置 (joint, pose_aware_sampling, 场景增强, bb_lr=0.5)
+# 8 个实验:
+#   A. baseline:         concat fuser, no cam dropout (对照组)
+#   B. diff_only:        diff fuser v1, no cam dropout
+#   C. drop_only:        concat fuser, cam_drop=0.3 zero mode
+#   D. diff_drop_v1:     diff fuser v1, cam_drop=0.3 zero mode (退化: [pc,|pc|,0])
+#   E. diff_drop_v2:     diff fuser v2 (dual-path), cam_drop=0.3 zero mode
+#   F. diff_drop_noise:  diff fuser v1, cam_drop=0.3 noise mode
+#   G. joint_baseline:   concat fuser, no drop, rotation_only=false (joint 对照)
+#   H. joint_best:       diff_v2 + cam_drop=0.3 zero, rotation_only=false (joint+最优)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v24.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v24.yaml
+#
+# 关键对比链:
+#   DiffFuser 效果:           A vs B    (fuser_type: concat → diff)
+#   CamDrop 效果:             A vs C    (cam_drop: 0 → 0.3)
+#   组合效果:                 A vs D    (diff + cam_drop)
+#   双路径优化 vs 退化输入:   D vs E    (diff v2 pc_only_conv vs diff v1 [pc,|pc|,0])
+#   噪声替代 vs 硬零:         D vs F    (cam_drop_mode: zero → noise)
+#   最优组合:                 E vs F    (双路径 vs 噪声, 哪个更好)
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 3
+  retry_delay: 30
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.5
+    step_size: 80
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+    max_frames_per_seq: 10000
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "concat"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # A: Baseline (concat fuser, no cam dropout)
+  # =========================================================================
+  - name: "v24_A_baseline"
+    description: "A: baseline (concat, no drop)"
+    dataset: "all"
+    version: "v24_A_baseline"
+
+  # =========================================================================
+  # B: BEVDiffFuser v1 only (no cam dropout)
+  # =========================================================================
+  - name: "v24_B_diff_only"
+    description: "B: BEVDiffFuser v1 only (pc + |cam-pc| + cam*pc)"
+    dataset: "all"
+    version: "v24_B_diff_only"
+    params:
+      fuser_type: "diff"
+
+  # =========================================================================
+  # C: Camera Dropout only (concat fuser)
+  # =========================================================================
+  - name: "v24_C_drop_only"
+    description: "C: concat fuser + cam_drop=0.3 zero"
+    dataset: "all"
+    version: "v24_C_drop_only"
+    params:
+      cam_drop_prob: 0.3
+
+  # =========================================================================
+  # D: DiffFuser v1 + CamDrop zero (退化: [pc, |pc|, 0])
+  # =========================================================================
+  - name: "v24_D_diff_drop_v1"
+    description: "D: diff v1 + cam_drop=0.3 zero (degenerate [pc,|pc|,0])"
+    dataset: "all"
+    version: "v24_D_diff_drop_v1"
+    params:
+      fuser_type: "diff"
+      cam_drop_prob: 0.3
+
+  # =========================================================================
+  # E: DiffFuser v2 (dual-path) + CamDrop zero
+  # cam_dropped=True → pc_only_conv(pc), avoiding degenerate input
+  # =========================================================================
+  - name: "v24_E_diff_drop_v2"
+    description: "E: diff v2 (dual-path) + cam_drop=0.3 zero"
+    dataset: "all"
+    version: "v24_E_diff_drop_v2"
+    params:
+      fuser_type: "diff_v2"
+      cam_drop_prob: 0.3
+
+  # =========================================================================
+  # F: DiffFuser v1 + CamDrop noise (Gaussian noise at 0.1*std)
+  # cam_dropped=False → normal diff path with noise cam features
+  # =========================================================================
+  - name: "v24_F_diff_drop_noise"
+    description: "F: diff v1 + cam_drop=0.3 noise mode"
+    dataset: "all"
+    version: "v24_F_diff_drop_noise"
+    params:
+      fuser_type: "diff"
+      cam_drop_prob: 0.3
+      cam_drop_mode: "noise"
+
+  # =========================================================================
+  # G: Joint baseline (rotation_only=false, concat, no drop)
+  # 对照: V23 joint 策略 + V24 基线配置
+  # =========================================================================
+  - name: "v24_G_joint_baseline"
+    description: "G: joint baseline (concat, no drop, rot_only=false)"
+    dataset: "all"
+    version: "v24_G_joint_baseline"
+    params:
+      rotation_only: false
+
+  # =========================================================================
+  # H: Joint + DiffFuser v2 + CamDrop zero (理论最优组合)
+  # 在 joint 训练上验证 diff_v2 + cam_drop 是否仍有效
+  # =========================================================================
+  - name: "v24_H_joint_diff_drop_v2"
+    description: "H: joint + diff v2 (dual-path) + cam_drop=0.3 zero"
+    dataset: "all"
+    version: "v24_H_joint_diff_drop_v2"
+    params:
+      rotation_only: false
+      fuser_type: "diff_v2"
+      cam_drop_prob: 0.3
+
+# ============================================================================
+# 实验矩阵总结
+# ============================================================================
+#
+#   | ID | rot_only | Fuser    | cam_drop | cam_drop_mode | 验证目标                    |
+#   |----|----------|----------|----------|---------------|-----------------------------|
+#   | A  | true     | concat   | 0.0      | -             | 对照基线                     |
+#   | B  | true     | diff     | 0.0      | -             | DiffFuser v1 单独效果        |
+#   | C  | true     | concat   | 0.3      | zero          | CamDrop 单独效果             |
+#   | D  | true     | diff     | 0.3      | zero          | diff v1 + drop (退化问题)    |
+#   | E  | true     | diff_v2  | 0.3      | zero          | 双路径优化 (pc_only_conv)    |
+#   | F  | true     | diff     | 0.3      | noise         | 噪声替代 (0.1*std Gaussian)  |
+#   | G  | false    | concat   | 0.0      | -             | Joint baseline 对照          |
+#   | H  | false    | diff_v2  | 0.3      | zero          | Joint + 最优 fuser/drop      |
+#
+# 新增对比链 (joint):
+#   Joint 基线效果:               A vs G    (rotation_only: true → false)
+#   Joint + 最优组合:             G vs H    (joint 上 diff_v2+drop 是否有效)
+#   最终最优:                     best(E,F) vs H (rot_only 最优 vs joint 最优)
+#
+# 成功标准:
+#   B > A (diff 有效):            Gen Rot 改善 > 3%
+#   C > A (cam_drop 有效):        Gen Rot 改善 > 2%
+#   E > D (双路径优于退化):        Gen Rot 改善 > 1%
+#   best(B,C,D,E,F) < 0.60°:     突破 0.65° 地板
+#
+# 评估:
+#   对每个模型运行 test_data_v2 泛化评估 + Camera bypass 实验

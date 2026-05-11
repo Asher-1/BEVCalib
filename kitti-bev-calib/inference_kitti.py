@@ -116,6 +116,123 @@ def rotation_matrix_to_euler_xyz(R):
 
     return roll * 180.0 / torch.pi, pitch * 180.0 / torch.pi, yaw * 180.0 / torch.pi
 
+
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    """Reconstruct rotation matrix from Euler angles (radians). ZYX convention."""
+    cos_r, sin_r = torch.cos(roll), torch.sin(roll)
+    cos_p, sin_p = torch.cos(pitch), torch.sin(pitch)
+    cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
+
+    B = roll.shape[0]
+    R = torch.zeros(B, 3, 3, device=roll.device, dtype=roll.dtype)
+
+    R[:, 0, 0] = cos_y * cos_p
+    R[:, 0, 1] = cos_y * sin_p * sin_r - sin_y * cos_r
+    R[:, 0, 2] = cos_y * sin_p * cos_r + sin_y * sin_r
+    R[:, 1, 0] = sin_y * cos_p
+    R[:, 1, 1] = sin_y * sin_p * sin_r + cos_y * cos_r
+    R[:, 1, 2] = sin_y * sin_p * cos_r - cos_y * sin_r
+    R[:, 2, 0] = -sin_p
+    R[:, 2, 1] = cos_p * sin_r
+    R[:, 2, 2] = cos_p * cos_r
+    return R
+
+
+class OnlineBiasCorrector:
+    """Per-sequence online bias estimation and correction.
+
+    Maintains an exponential moving average of predicted extrinsic residuals.
+    After a warmup period, subtracts the estimated systematic bias from
+    predictions to compensate for unseen camera installation offsets.
+    """
+
+    def __init__(self, warmup_frames=50, ema_alpha=0.99):
+        self.warmup_frames = warmup_frames
+        self.ema_alpha = ema_alpha
+        self.frame_count = 0
+        self.rpy_sum = None
+        self.rpy_bias = None
+
+    def update_and_correct(self, T_pred, gt_T_init):
+        """Estimate bias from init→pred residual and correct.
+
+        Args:
+            T_pred: (B, 4, 4) predicted extrinsic
+            gt_T_init: (B, 4, 4) initial (perturbed) extrinsic
+        Returns:
+            T_corrected: (B, 4, 4) bias-corrected prediction
+        """
+        R_residual = T_pred[:, :3, :3] @ gt_T_init[:, :3, :3].transpose(-2, -1)
+        roll, pitch, yaw = rotation_matrix_to_euler_xyz(R_residual)
+        rpy = torch.stack([roll, pitch, yaw], dim=-1)
+
+        if self.rpy_sum is None:
+            self.rpy_sum = rpy.mean(dim=0)
+        else:
+            batch_mean = rpy.mean(dim=0)
+            self.rpy_sum = self.ema_alpha * self.rpy_sum + (1 - self.ema_alpha) * batch_mean
+
+        self.frame_count += rpy.shape[0]
+
+        if self.frame_count < self.warmup_frames:
+            return T_pred
+
+        if self.rpy_bias is None:
+            self.rpy_bias = self.rpy_sum.clone()
+        else:
+            self.rpy_bias = self.ema_alpha * self.rpy_bias + (1 - self.ema_alpha) * self.rpy_sum
+
+        R_pred = T_pred[:, :3, :3].float()
+        sy = torch.sqrt(R_pred[:, 0, 0]**2 + R_pred[:, 1, 0]**2)
+        singular = sy < 1e-6
+        roll_p = torch.where(~singular,
+                             torch.atan2(R_pred[:, 2, 1], R_pred[:, 2, 2]),
+                             torch.atan2(-R_pred[:, 1, 2], R_pred[:, 1, 1]))
+        pitch_p = torch.atan2(-R_pred[:, 2, 0], sy)
+        yaw_p = torch.where(~singular,
+                            torch.atan2(R_pred[:, 1, 0], R_pred[:, 0, 0]),
+                            torch.zeros_like(roll_p))
+
+        bias_rad = self.rpy_bias * (3.14159265 / 180.0)
+        roll_c = roll_p - bias_rad[0] * 0.3
+        pitch_c = pitch_p - bias_rad[1] * 0.3
+        yaw_c = yaw_p - bias_rad[2] * 0.3
+
+        R_corrected = euler_to_rotation_matrix(roll_c, pitch_c, yaw_c)
+        T_corrected = T_pred.clone()
+        T_corrected[:, :3, :3] = R_corrected
+        return T_corrected
+
+
+def apply_pitch_correction(T_pred, pitch_branch_pred, blend_alpha=0.5):
+    """Blend main-path Pitch with pitch-branch prediction.
+
+    Args:
+        T_pred: (B, 4, 4) predicted pose from main pathway
+        pitch_branch_pred: (B, 1) Pitch angle in radians from pitch branch
+        blend_alpha: weight for pitch branch (0=main only, 1=branch only)
+    Returns:
+        T_corrected: (B, 4, 4) with corrected rotation
+    """
+    R_pred = T_pred[:, :3, :3].float()
+    sy = torch.sqrt(R_pred[:, 0, 0]**2 + R_pred[:, 1, 0]**2)
+    singular = sy < 1e-6
+
+    roll = torch.where(~singular,
+                        torch.atan2(R_pred[:, 2, 1], R_pred[:, 2, 2]),
+                        torch.atan2(-R_pred[:, 1, 2], R_pred[:, 1, 1]))
+    pitch_main = torch.atan2(-R_pred[:, 2, 0], sy)
+    yaw = torch.where(~singular,
+                       torch.atan2(R_pred[:, 1, 0], R_pred[:, 0, 0]),
+                       torch.zeros_like(roll))
+
+    pitch_corrected = (1 - blend_alpha) * pitch_main + blend_alpha * pitch_branch_pred.squeeze(-1)
+
+    R_corrected = euler_to_rotation_matrix(roll, pitch_corrected, yaw)
+    T_corrected = T_pred.clone()
+    T_corrected[:, :3, :3] = R_corrected
+    return T_corrected
+
 def main():
     args = parse_args()
     xyz_only_choise = args.xyz_only > 0
@@ -177,6 +294,7 @@ def main():
     else:
         rotation_only = args.rotation_only > 0
 
+    use_pitch_branch = ckpt_args.get('use_pitch_branch', 0) > 0
     model = BEVCalib(
         deformable=False,      
         bev_encoder=True,
@@ -186,9 +304,19 @@ def main():
         to_bev_mode=ckpt_args.get('to_bev_mode', 'concat'),
         scatter_reduce=ckpt_args.get('scatter_reduce', 'sum'),
         intrinsic_input=ckpt_args.get('intrinsic_input', False),
+        use_pitch_branch=use_pitch_branch,
+        use_mlp_head=ckpt_args.get('use_mlp_head', 1) > 0,
+        fuser_type=ckpt_args.get('fuser_type', 'concat'),
+        cam_drop_prob=0.0,
+        bev_instance_norm=ckpt_args.get('bev_instance_norm', 0) > 0,
+        use_contrastive_extrinsic=ckpt_args.get('use_contrastive_extrinsic', 0) > 0,
     ).to(device)
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    if missing:
+        print(f"  Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
     model.eval()
+    if use_pitch_branch:
+        print(f"  Pitch branch loaded - will apply inference-time Pitch correction")
 
     total_losses = []
     translation_losses = []

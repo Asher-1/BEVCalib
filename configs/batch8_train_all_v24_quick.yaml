@@ -1,0 +1,174 @@
+# V24 Quick: BEV Diff Fuser + Camera Dropout 消融实验矩阵 (1N 快速验证)
+#
+# 基于 V23 优化配置，与 batch8_train_all_v24.yaml 相同的 8 组实验，但:
+#   - nnodes: 1 (单节点)
+#   - max_frames_per_seq: 500 (数据量缩减)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v24_quick.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v24_quick.yaml
+#
+# 关键对比链:
+#   DiffFuser 效果:           A vs B
+#   CamDrop 效果:             A vs C
+#   组合效果:                 A vs D
+#   双路径优化 vs 退化输入:   D vs E
+#   噪声替代 vs 硬零:         D vs F
+#   最优组合:                 E vs F
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.5
+    step_size: 80
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+    max_frames_per_seq: 1000
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "concat"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # A: Baseline
+  - name: "v24_A_baseline_quick"
+    description: "A: baseline (concat, no drop)"
+    dataset: "all"
+    version: "v24_A_baseline_quick"
+
+  # B: BEVDiffFuser v1 only
+  - name: "v24_B_diff_only_quick"
+    description: "B: BEVDiffFuser v1 only"
+    dataset: "all"
+    version: "v24_B_diff_only_quick"
+    params:
+      fuser_type: "diff"
+
+  # C: Camera Dropout only
+  - name: "v24_C_drop_only_quick"
+    description: "C: concat + cam_drop=0.3 zero"
+    dataset: "all"
+    version: "v24_C_drop_only_quick"
+    params:
+      cam_drop_prob: 0.3
+
+  # D: DiffFuser v1 + CamDrop zero
+  - name: "v24_D_diff_drop_v1_quick"
+    description: "D: diff v1 + cam_drop=0.3 zero (degenerate)"
+    dataset: "all"
+    version: "v24_D_diff_drop_v1_quick"
+    params:
+      fuser_type: "diff"
+      cam_drop_prob: 0.3
+
+  # E: DiffFuser v2 (dual-path) + CamDrop zero
+  - name: "v24_E_diff_drop_v2_quick"
+    description: "E: diff v2 (dual-path) + cam_drop=0.3 zero"
+    dataset: "all"
+    version: "v24_E_diff_drop_v2_quick"
+    params:
+      fuser_type: "diff_v2"
+      cam_drop_prob: 0.3
+
+  # F: DiffFuser v1 + CamDrop noise
+  - name: "v24_F_diff_drop_noise_quick"
+    description: "F: diff v1 + cam_drop=0.3 noise"
+    dataset: "all"
+    version: "v24_F_diff_drop_noise_quick"
+    params:
+      fuser_type: "diff"
+      cam_drop_prob: 0.3
+      cam_drop_mode: "noise"
+
+  # G: Joint baseline (rotation_only=false)
+  - name: "v24_G_joint_baseline_quick"
+    description: "G: joint baseline (concat, no drop, rot_only=false)"
+    dataset: "all"
+    version: "v24_G_joint_baseline_quick"
+    params:
+      rotation_only: false
+
+  # H: Joint + DiffFuser v2 + CamDrop zero
+  - name: "v24_H_joint_diff_drop_v2_quick"
+    description: "H: joint + diff v2 + cam_drop=0.3 zero"
+    dataset: "all"
+    version: "v24_H_joint_diff_drop_v2_quick"
+    params:
+      rotation_only: false
+      fuser_type: "diff_v2"
+      cam_drop_prob: 0.3
+
+# ============================================================================
+# Quick 版本差异 (vs Full):
+#   - nnodes: 1 (单节点 8GPU, 非 32N)
+#   - max_frames_per_seq: 500 (快速验证)
+#   - 用于快速筛选, Full 版本跑 top 3 实验
+# ============================================================================

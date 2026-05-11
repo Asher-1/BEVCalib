@@ -44,7 +44,7 @@ class CustomDataset(Dataset):
     KITTI_SEQUENCES = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', 
                        '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']
     
-    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None, max_frames_per_seq=None, sample_step=None):
+    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None, max_frames_per_seq=None, sample_step=None, pose_aware_sampling=False, poses_dir=None, return_seq_id=False):
         # 使用 bev_settings 的体素化范围配置
         self.x_min, self.x_max = xbound[0], xbound[1]
         self.y_min, self.y_max = ybound[0], ybound[1]
@@ -70,6 +70,8 @@ class CustomDataset(Dataset):
             auto_detect: 是否自动检测可用序列（默认 True）
                 - True: 自动扫描 sequences/ 目录，找到所有有效序列
                 - False: 使用标准 KITTI 序列列表
+            pose_aware_sampling: 启用基于 Pose 的智能采样
+            poses_dir: Pose 文件目录 (KITTI 格式, 每行 12 个浮点数)
         """
         self.all_files = []
         self.dataset_root = data_folder
@@ -80,6 +82,9 @@ class CustomDataset(Dataset):
         self.target_size = target_size  # (width, height) for pre-resized lookup
         self.max_frames_per_seq = max_frames_per_seq
         self.sample_step = sample_step
+        self.pose_aware_sampling = pose_aware_sampling
+        self.poses_dir = poses_dir or os.path.join(data_folder, 'poses')
+        self.return_seq_id = return_seq_id
         if max_frames_per_seq and sample_step:
             raise ValueError(
                 "max_frames_per_seq 和 sample_step 互斥，不可同时设置。"
@@ -138,7 +143,18 @@ class CustomDataset(Dataset):
                     seq_files.append(os.path.join(seq, base_name))
                 
                 full_count = len(seq_files)
-                if self.max_frames_per_seq and full_count > self.max_frames_per_seq:
+                sampling_desc = ""
+                if self.pose_aware_sampling:
+                    keep_indices = self._pose_aware_filter(seq, full_count)
+                    if keep_indices is not None:
+                        seq_files = [seq_files[i] for i in keep_indices if i < full_count]
+                    after_pose = len(seq_files)
+                    sampling_desc = f"pose-aware {after_pose}/{full_count}"
+                    if self.max_frames_per_seq and after_pose > self.max_frames_per_seq:
+                        stride = after_pose / self.max_frames_per_seq
+                        seq_files = [seq_files[int(i * stride)] for i in range(self.max_frames_per_seq)]
+                        sampling_desc += f" → cap {self.max_frames_per_seq}"
+                elif self.max_frames_per_seq and full_count > self.max_frames_per_seq:
                     stride = full_count / self.max_frames_per_seq
                     seq_files = [seq_files[int(i * stride)] for i in range(self.max_frames_per_seq)]
                 elif self.sample_step and self.sample_step > 1:
@@ -149,7 +165,9 @@ class CustomDataset(Dataset):
                 
                 if frame_count > 0:
                     loaded_sequences.append(seq)
-                    if self.max_frames_per_seq and full_count > self.max_frames_per_seq:
+                    if self.pose_aware_sampling:
+                        print(f"  ✓ 序列 {seq}: {frame_count} 帧 ({sampling_desc}, 保留{100*frame_count/full_count:.0f}%)")
+                    elif self.max_frames_per_seq and full_count > self.max_frames_per_seq:
                         print(f"  ✓ 序列 {seq}: {frame_count} 帧 (均匀采样自 {full_count} 帧)")
                     elif self.sample_step and self.sample_step > 1:
                         print(f"  ✓ 序列 {seq}: {frame_count} 帧 (步长{self.sample_step}采样自 {full_count} 帧)")
@@ -164,6 +182,11 @@ class CustomDataset(Dataset):
         
         print(f"[CustomDataset] 总计: {len(self.all_files)} 帧来自 {len(loaded_sequences)} 个序列")
         
+        self.seq_to_domain_id = {seq: i for i, seq in enumerate(sorted(loaded_sequences))}
+        self.num_domains = len(loaded_sequences)
+        if self.return_seq_id:
+            print(f"[CustomDataset] 域标签已启用: {self.num_domains} 个域")
+
         self._use_resized = False
         if self._resized_dir_name is not None:
             sample_seq = loaded_sequences[0]
@@ -215,6 +238,110 @@ class CustomDataset(Dataset):
         
         sequences.sort()
         return sequences
+    
+    def _pose_aware_filter(self, seq_id, n_frames):
+        """根据 Pose 数据过滤冗余帧，保留有信息量的帧。
+        
+        策略:
+        - 停车帧 (d<0.05m, ΔR<0.1°): 每个连续停车段保留首+尾+1随机帧
+        - 蠕行/慢行: 按弧长间隔采样
+        - 正常行驶: 全部保留
+        - 转弯帧 (ΔR≥1°): 全部保留
+        
+        Returns:
+            sorted list of frame indices to keep, or None if pose file not found
+        """
+        pose_file = os.path.join(self.poses_dir, f'{seq_id}.txt')
+        if not os.path.exists(pose_file):
+            return None
+        
+        poses = []
+        with open(pose_file) as f:
+            for line in f:
+                vals = [float(v) for v in line.strip().split()]
+                if len(vals) == 12:
+                    T = np.eye(4)
+                    T[:3, :] = np.array(vals).reshape(3, 4)
+                    poses.append(T)
+        
+        if len(poses) < 2 or len(poses) < n_frames:
+            return None
+        
+        positions = np.array([T[:3, 3] for T in poses[:n_frames]])
+        dists = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+        
+        rot_changes = np.zeros(len(dists))
+        for i in range(len(dists)):
+            R_rel = poses[i][:3, :3].T @ poses[i + 1][:3, :3]
+            cos_a = np.clip((np.trace(R_rel) - 1) / 2, -1, 1)
+            rot_changes[i] = np.degrees(np.arccos(cos_a))
+        
+        keep = set()
+        stopped_run_start = None
+        stopped_run_indices = []
+        
+        for i in range(len(dists)):
+            d, r = dists[i], rot_changes[i]
+            
+            if r >= 1.0:
+                keep.add(i)
+                keep.add(i + 1)
+                if stopped_run_start is not None:
+                    self._finalize_stopped_run(stopped_run_indices, keep)
+                    stopped_run_start = None
+                    stopped_run_indices = []
+                continue
+            
+            if d >= 1.0:
+                keep.add(i)
+                keep.add(i + 1)
+                if stopped_run_start is not None:
+                    self._finalize_stopped_run(stopped_run_indices, keep)
+                    stopped_run_start = None
+                    stopped_run_indices = []
+                continue
+            
+            if d < 0.05 and r < 0.1:
+                if stopped_run_start is None:
+                    stopped_run_start = i
+                    stopped_run_indices = [i]
+                else:
+                    stopped_run_indices.append(i)
+            else:
+                if stopped_run_start is not None:
+                    keep.add(i)  # transition frame
+                    self._finalize_stopped_run(stopped_run_indices, keep)
+                    stopped_run_start = None
+                    stopped_run_indices = []
+        
+        if stopped_run_start is not None:
+            self._finalize_stopped_run(stopped_run_indices, keep)
+        
+        cumulative_dist = np.cumsum(dists)
+        last_sampled_dist = 0.0
+        for i in range(len(dists)):
+            if i in keep:
+                last_sampled_dist = cumulative_dist[i]
+                continue
+            d = dists[i]
+            step = 0.3 if d < 0.3 else 0.8
+            if cumulative_dist[i] - last_sampled_dist >= step:
+                keep.add(i)
+                last_sampled_dist = cumulative_dist[i]
+        
+        keep.add(n_frames - 1)
+        return sorted(k for k in keep if k < n_frames)
+    
+    @staticmethod
+    def _finalize_stopped_run(indices, keep):
+        """For a contiguous stopped run, keep first, last, and one random frame."""
+        if not indices:
+            return
+        keep.add(indices[0])
+        keep.add(indices[-1])
+        if len(indices) > 2:
+            mid = indices[len(indices) // 2]
+            keep.add(mid)
     
     def _parse_extended_calib(self, calib_path):
         """从calib.txt解析扩展字段（pykitti不支持的自定义字段）
@@ -323,6 +450,8 @@ class CustomDataset(Dataset):
             intrinsic = self._resized_K[seq]
         else:
             intrinsic = self.K[seq]
+        if self.return_seq_id:
+            return img, pcd, gt_transform, intrinsic, self.seq_to_domain_id[seq]
         return img, pcd, gt_transform, intrinsic
     
     def validate_data_utilization(self, sample_ratio=0.1, min_utilization=0.3, min_valid_ratio=0.9, verbose=True):

@@ -1,0 +1,242 @@
+# V28: Architecture-level domain gap mitigation — Query BEV + DINOv2 experiments
+#
+# Context:
+#   V27 addresses domain gap via training strategy (DANN, mount jitter, regularization).
+#   V28 attacks the same problem at the architecture level:
+#   - Query-based BEV (BEVFormer-style): removes LSS depth estimation entirely,
+#     which is a major domain gap amplifier across different camera installations.
+#   - DINOv2 backbone: self-supervised pre-training produces domain-agnostic features,
+#     reducing sensitivity to vehicle-specific visual patterns.
+#
+# Experiment matrix:
+#   F1: Query-BEV + Swin backbone (isolate depth-free lifting effect)
+#   F2: LSS + DINOv2 backbone (isolate backbone effect)
+#   F3: Query-BEV + DINOv2 backbone (full architectural upgrade)
+#   F4: F3 + strong mount jitter + DANN (architecture + best V27 training strategy)
+#   F5: F3 + frozen DINOv2 backbone (test if self-supervised features alone suffice)
+#
+# Usage:
+#   bash batch_train.sh configs/batch8_train_all_v28.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v28.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 3
+  retry_delay: 30
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    # V24-B proven loss config
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+    use_balanced_axis_loss: 1
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    # Moderate regularization
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.3
+    backbone_warmup_epochs: 10
+    layer_wise_lr_decay: 0.65
+    step_size: 80
+
+    # V25r overfitting components — OFF
+    use_pitch_branch: 0
+    pitch_aux_weight: 0.0
+    bev_instance_norm: 0
+    use_contrastive_extrinsic: 0
+    contrastive_weight: 0.0
+
+    # Light mount jitter (default); F4 overrides to strong
+    augment_mount_jitter_prob: 0.15
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+    max_frames_per_seq: 10000
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "diff"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+    # === V28 defaults ===
+    cam2bev_mode: "lss"
+    backbone_type: "swin"
+    backbone_variant: "dinov2-small"
+    freeze_backbone: 0
+    domain_adversarial: 0
+    domain_adversarial_weight: 0.1
+    num_domains: 0
+
+experiments:
+  # =========================================================================
+  # F1: Query-BEV + Swin backbone
+  # Isolate the depth-free lifting benefit. If LSS depth is a domain gap
+  # amplifier, removing it should improve generalization even with the same backbone.
+  # =========================================================================
+  - name: "v28_F1_query_bev_swin"
+    description: "F1: Query-based BEV (no depth estimation) + Swin-Tiny"
+    dataset: "all"
+    version: "v28_F1_query_bev_swin"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "swin"
+
+  # =========================================================================
+  # F2: LSS + DINOv2 backbone
+  # Keep LSS depth estimation but swap backbone. Tests if self-supervised
+  # features alone reduce domain sensitivity of depth prediction.
+  # =========================================================================
+  - name: "v28_F2_lss_dinov2"
+    description: "F2: LSS depth lifting + DINOv2-Small backbone"
+    dataset: "all"
+    version: "v28_F2_lss_dinov2"
+    params:
+      cam2bev_mode: "lss"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      backbone_lr_scale: 0.3
+
+  # =========================================================================
+  # F3: Query-BEV + DINOv2 backbone (full architectural upgrade)
+  # Combines both improvements: depth-free lifting + domain-agnostic features.
+  # Expected to be the strongest domain generalization architecture.
+  # =========================================================================
+  - name: "v28_F3_query_dinov2"
+    description: "F3: Query-BEV + DINOv2-Small (full architectural upgrade)"
+    dataset: "all"
+    version: "v28_F3_query_dinov2"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      backbone_lr_scale: 0.3
+
+  # =========================================================================
+  # F5: F3 + frozen DINOv2 backbone (simpler, run before F4)
+  # Tests if DINOv2's self-supervised features are good enough out-of-the-box.
+  # Freezing prevents fine-tuning from overfitting to training vehicle features.
+  # =========================================================================
+  - name: "v28_F5_query_dinov2_frozen"
+    description: "F5: Query-BEV + frozen DINOv2 (backbone not fine-tuned)"
+    dataset: "all"
+    version: "v28_F5_query_dinov2_frozen"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_lr_scale: 0.0
+      drop_path_rate: 0.0
+
+  # =========================================================================
+  # F4: F3 + strong mount jitter + DANN (most complex, run last)
+  # Architecture upgrade + best V27 training strategy combined.
+  # This is the "kitchen sink" experiment — maximum domain adaptation.
+  # =========================================================================
+  - name: "v28_F4_query_dinov2_dann"
+    description: "F4: Query-BEV + DINOv2 + strong jitter + DANN"
+    dataset: "all"
+    version: "v28_F4_query_dinov2_dann"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      backbone_lr_scale: 0.3
+      drop_path_rate: 0.2
+      head_dropout: 0.3
+      augment_mount_jitter_prob: 0.5
+      augment_mount_jitter_rot_sigma: 2.0
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.1
+
+# ============================================================================
+# V28 Experiment Matrix Summary (batch_size=8, nnodes=1)
+# DINOv2 weights: ckpt/checkpoints/dinov2_vits14_pretrain.pth (auto-loaded)
+# Query-BEV: auto bev_pool_factor=4, find_unused_parameters=True
+# ============================================================================
+#
+#   | Order | ID  | BEV Mode | Backbone   | Mount Jitter | DANN | Freeze | Key Question              |
+#   |-------|-----|----------|------------|-------------|------|--------|---------------------------|
+#   | 1     | F1  | Query    | Swin-Tiny  | Light 0.15  | No   | No     | Does removing depth help? |
+#   | 2     | F2  | LSS      | DINOv2-S   | Light 0.15  | No   | No     | Does DINOv2 alone help?   |
+#   | 3     | F3  | Query    | DINOv2-S   | Light 0.15  | No   | No     | Combined architecture?    |
+#   | 4     | F5  | Query    | DINOv2-S   | Light 0.15  | No   | Yes    | Frozen self-sup features? |
+#   | 5     | F4  | Query    | DINOv2-S   | Strong 0.5  | Yes  | No     | Architecture + training?  |
+#
+# Key comparisons:
+#   Depth-free effect:  F1 vs V27-E1 (same backbone, Query vs LSS)
+#   DINOv2 effect:      F2 vs V27-E1 (same BEV mode, DINOv2 vs Swin)
+#   Combined:           F3 vs V27-E1 (both upgrades)
+#   Frozen backbone:    F5 vs F3 (overfitting prevention)
+#   + Training strategy: F4 vs F3 (add V27 best strategy on top)
+#
+# Expected outcomes:
+#   If domain gap is primarily from depth estimation → F1 >> V27-E1
+#   If domain gap is primarily from backbone features → F2 >> V27-E1
+#   F3 should be >= max(F1, F2) if effects are complementary
+#   F5 tests if we can avoid fine-tuning entirely
+#   F4 should be best overall (architecture + training)

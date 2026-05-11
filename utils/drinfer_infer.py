@@ -631,12 +631,184 @@ def _load_backends(cfg, device, mode):
     return wrapper, epoch
 
 
+def evaluate_with_temporal_aggregation(backend, val_loader, cfg, device="cuda",
+                                       agg_method='axis_angle_median',
+                                       min_frames=50, max_frames=400):
+    """
+    Evaluate with per-sequence temporal aggregation (MEDW-style).
+    Returns per-frame errors, aggregated errors, and the aggregated calibrations.
+    """
+    from tools import generate_single_perturbation_from_T
+    from visualization import compute_pose_errors as _cpe
+    from bevcalib_inference import TemporalCalibrationAggregator
+
+    angle_deg = cfg.get("angle_range_deg", 10.0)
+    trans_range = cfg.get("trans_range", 0.3)
+    rotation_only = cfg.get("rotation_only", True)
+
+    per_frame_errors = []
+    aggregated_results = []
+    aggregator = TemporalCalibrationAggregator(
+        min_frames=min_frames, max_frames=max_frames, method=agg_method)
+
+    current_seq_gt = None
+    seq_count = 0
+
+    print(f"\nEvaluating with temporal aggregation "
+          f"(method={agg_method}, max_frames={max_frames}) ...\n")
+
+    for batch_idx, batch_data in enumerate(val_loader):
+        if batch_data is None:
+            continue
+        imgs_list, pcs_list, masks_list, gt_T_list, intrinsics_list = batch_data
+        imgs_np = np.array(imgs_list)
+        imgs = torch.from_numpy(imgs_np).permute(0, 3, 1, 2).float().to(device)
+        pcs = torch.from_numpy(np.array(pcs_list)[:, :, :3]).float().to(device)
+        gt_T_np = np.array(gt_T_list).astype(np.float32)
+        gt_T = torch.from_numpy(gt_T_np).float().to(device)
+        K_np = np.array(intrinsics_list).astype(np.float32)
+        intrinsics = torch.from_numpy(K_np).float().to(device)
+        masks_np = np.array(masks_list)
+        B = imgs.shape[0]
+        perturbed_batch, _, _ = generate_single_perturbation_from_T(
+            gt_T_np, angle_range_deg=angle_deg,
+            trans_range=trans_range if not rotation_only else 0.0)
+        init_T = torch.from_numpy(perturbed_batch).float().to(device)
+        init_T_np = perturbed_batch
+
+        np_kwargs = {}
+        if getattr(backend, "accepts_numpy", False):
+            np_kwargs = dict(imgs_np=imgs_np,
+                             pcs_np=np.array(pcs_list),
+                             init_T_np=init_T_np, K_np=K_np)
+        pred_T = backend.predict(imgs, pcs, masks_np, init_T, gt_T, intrinsics,
+                                 **np_kwargs)
+        pred_np = pred_T.detach().cpu().numpy()
+
+        for b in range(B):
+            gt_b = gt_T_np[b]
+            if current_seq_gt is None:
+                current_seq_gt = gt_b.copy()
+            elif not np.allclose(gt_b[:3, :3], current_seq_gt[:3, :3], atol=1e-3):
+                if aggregator.count > 0:
+                    agg_T = aggregator.aggregate()
+                    agg_err = _cpe(agg_T, current_seq_gt)
+                    conf = aggregator.get_confidence()
+                    aggregated_results.append({
+                        'seq': seq_count, 'agg_T': agg_T,
+                        'errors': agg_err, 'confidence': conf,
+                        'n_frames': aggregator.count,
+                    })
+                    print(f"  Seq {seq_count}: {aggregator.count} frames → "
+                          f"Rot={agg_err['rot_error']:.4f}° "
+                          f"(R={agg_err['roll_error']:.3f} "
+                          f"P={agg_err['pitch_error']:.3f} "
+                          f"Y={agg_err['yaw_error']:.3f})")
+                    seq_count += 1
+                    aggregator.reset()
+                current_seq_gt = gt_b.copy()
+
+            aggregator.add(pred_np[b])
+            try:
+                per_frame_errors.append(_cpe(pred_np[b], gt_b))
+            except Exception:
+                pass
+
+    if aggregator.count > 0 and current_seq_gt is not None:
+        agg_T = aggregator.aggregate()
+        agg_err = _cpe(agg_T, current_seq_gt)
+        conf = aggregator.get_confidence()
+        aggregated_results.append({
+            'seq': seq_count, 'agg_T': agg_T,
+            'errors': agg_err, 'confidence': conf,
+            'n_frames': aggregator.count,
+        })
+        print(f"  Seq {seq_count}: {aggregator.count} frames → "
+              f"Rot={agg_err['rot_error']:.4f}° "
+              f"(R={agg_err['roll_error']:.3f} "
+              f"P={agg_err['pitch_error']:.3f} "
+              f"Y={agg_err['yaw_error']:.3f})")
+
+    if aggregated_results:
+        rots = [r['errors']['rot_error'] for r in aggregated_results]
+        print(f"\n  Temporal aggregation summary ({len(aggregated_results)} sequences):")
+        print(f"    Mean Rot: {np.mean(rots):.4f}°  Std: {np.std(rots):.4f}°")
+        rolls = [r['errors']['roll_error'] for r in aggregated_results]
+        pitchs = [r['errors']['pitch_error'] for r in aggregated_results]
+        yaws = [r['errors']['yaw_error'] for r in aggregated_results]
+        print(f"    Roll: {np.mean(rolls):.4f}°  Pitch: {np.mean(pitchs):.4f}°  "
+              f"Yaw: {np.mean(yaws):.4f}°")
+
+    return per_frame_errors, aggregated_results
+
+
+def _run_temporal_eval(cfg, device, args):
+    """Run evaluation with temporal aggregation for production-quality calibration."""
+    backend_name = args.backend or cfg.get("inference_backend", "pytorch")
+    agg_method = getattr(args, 'agg_method', 'axis_angle_median')
+
+    print("=" * 60)
+    print("BEVCalib Temporal Aggregation Evaluation")
+    print(f"  backend    : {backend_name}")
+    print(f"  method     : {agg_method}")
+    print(f"  checkpoint : {cfg['ckpt_path']}")
+    print(f"  dataset    : {cfg['dataset_root']}")
+    print("=" * 60)
+
+    wrapper, epoch = _load_backends(cfg, device, "eval")
+
+    if backend_name == "pytorch":
+        backend = PyTorchBackend(wrapper.model, device=device)
+    elif backend_name == "drinfer":
+        drinfer_dir = cfg.get("export_dir",
+                              os.path.join(os.path.dirname(cfg["ckpt_path"]), "drinfer"))
+        backend = DrInferBackend(wrapper, drinfer_dir, cfg, device=device)
+    else:
+        raise ValueError(f"Unknown backend: {backend_name}")
+
+    val_loader = build_val_loader(cfg)
+    per_frame_errors, agg_results = evaluate_with_temporal_aggregation(
+        backend, val_loader, cfg, device=device, agg_method=agg_method)
+
+    output_path = args.output or cfg.get("report_output", None)
+    if output_path:
+        report = {
+            'mode': 'temporal',
+            'method': agg_method,
+            'n_sequences': len(agg_results),
+            'per_frame': {
+                'n_samples': len(per_frame_errors),
+                'rot_mean': float(np.mean([e['rot_error'] for e in per_frame_errors])),
+            },
+            'aggregated': [{
+                'seq': r['seq'], 'n_frames': r['n_frames'],
+                'rot': r['errors']['rot_error'],
+                'roll': r['errors']['roll_error'],
+                'pitch': r['errors']['pitch_error'],
+                'yaw': r['errors']['yaw_error'],
+                'confidence': r['confidence'],
+            } for r in agg_results],
+        }
+        if agg_results:
+            rots = [r['errors']['rot_error'] for r in agg_results]
+            report['aggregated_mean'] = {
+                'rot': float(np.mean(rots)),
+                'roll': float(np.mean([r['errors']['roll_error'] for r in agg_results])),
+                'pitch': float(np.mean([r['errors']['pitch_error'] for r in agg_results])),
+                'yaw': float(np.mean([r['errors']['yaw_error'] for r in agg_results])),
+            }
+        with open(output_path, 'w') as f:
+            json.dump(report, f, indent=2)
+        print(f"\nReport saved to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="BEVCalib inference & evaluation")
     parser.add_argument("--config", type=str, default="utils/drinfer_config.yaml")
     parser.add_argument("--mode", type=str, default="eval",
-                        choices=["eval", "compare"],
-                        help="eval: single backend; compare: PyTorch vs DrInfer side-by-side")
+                        choices=["eval", "compare", "temporal"],
+                        help="eval: single backend; compare: PyTorch vs DrInfer; "
+                             "temporal: eval with temporal aggregation")
     parser.add_argument("--backend", type=str, default=None,
                         choices=["pytorch", "drinfer"],
                         help="Override inference backend (for eval mode)")
@@ -644,6 +816,10 @@ def main():
                         help="Output JSON report path")
     parser.add_argument("--vis-dir", type=str, default=None,
                         help="Directory to save projection visualization images")
+    parser.add_argument("--agg-method", type=str, default="axis_angle_median",
+                        choices=["axis_angle_median", "svd_mean"],
+                        dest="agg_method",
+                        help="Temporal aggregation method (for --mode temporal)")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -654,6 +830,8 @@ def main():
 
     if args.mode == "compare":
         _run_compare(cfg, device, args)
+    elif args.mode == "temporal":
+        _run_temporal_eval(cfg, device, args)
     else:
         _run_eval(cfg, device, args)
 

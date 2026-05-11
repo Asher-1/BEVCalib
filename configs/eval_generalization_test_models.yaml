@@ -1,5 +1,8 @@
 # test_models 子目录实验 — 泛化评估（与 eval_generalization_all_v16_quick 同结构）
 #
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；保留 use_drcv: 1；
+# bev_zbound_step 须手写。
+#
 # 重要: models_dir 必须是 `logs/all_training_data`（不要写成 `.../test_models`），
 # 否则 os.path.basename(MODELS_DIR) 会变成 `test_models`，checkpoint 会错误指向
 # `.../test_models_scratch/checkpoint/`（不存在）。正确 scratch 目录名为
@@ -27,58 +30,38 @@ models:
     dir_name: "test_models/model_small_5deg_v16_lr_1e4_step"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v16-lr-ablation"
-    mode_desc: "LR=1e-4 step schedule, L20×8, max_frames_per_seq=500"
+    mode_desc: "LR=1e-4 step schedule, L20x8, max_frames_per_seq=500"
 
   - label: "test-lr-2e4"
     dir_name: "test_models/model_small_5deg_v16_lr_2e4_step"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v16-lr-ablation"
-    mode_desc: "LR=2e-4 step schedule, L20×8, max_frames_per_seq=500"
+    mode_desc: "LR=2e-4 step schedule, L20x8, max_frames_per_seq=500"
 
   - label: "test-lr-3e4"
     dir_name: "test_models/model_small_5deg_v16_lr_3e4_step"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v16-lr-ablation"
-    mode_desc: "LR=3e-4 step schedule, L20×8, max_frames_per_seq=500"
+    mode_desc: "LR=3e-4 step schedule, L20x8, max_frames_per_seq=500"
 
   # === A30 大规模 (sample_step=3)，架构同上 ===
   - label: "test-a30-ultimate"
     dir_name: "test_models/model_small_5deg_v16_a30_ultimate"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v16-a30"
@@ -88,12 +71,7 @@ models:
     dir_name: "test_models/model_small_5deg_v16_a30_pitch3_signflip"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v16-a30-pitch3"

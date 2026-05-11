@@ -1,5 +1,9 @@
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Function
 from img_branch.img_branch import Cam2BEV
 from pc_branch.pc_branch import Lidar2BEV
 from losses.losses import realworld_loss
@@ -7,6 +11,39 @@ from losses.quat_tools import quaternion_from_matrix
 from deformable_attention import DeformableAttention
 from BEVEncoder.BEVEncoder import BEVEncoder
 import bev_settings
+
+
+class _GradientReversal(Function):
+    """Gradient Reversal Layer for Domain Adversarial Training."""
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.alpha * grad_output, None
+
+
+class DomainClassifier(nn.Module):
+    """Classifies domain (sequence ID) from pooled BEV features.
+    Used with gradient reversal to encourage domain-invariant representations."""
+
+    def __init__(self, in_dim, num_domains, hidden_dim=128):
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim // 2, num_domains),
+        )
+
+    def forward(self, x, alpha=1.0):
+        x_rev = _GradientReversal.apply(x, alpha)
+        return self.classifier(x_rev)
 
 
 class DropPath(nn.Module):
@@ -35,7 +72,7 @@ class ConvFuser(nn.Sequential):
             nn.ReLU(True)
         )
 
-    def forward(self, img_bev_feat, pc_bev_feat):
+    def forward(self, img_bev_feat, pc_bev_feat, cam_dropped=False):
         return super().forward(torch.cat([img_bev_feat, pc_bev_feat], dim=1))
 
 
@@ -46,25 +83,168 @@ class BEVDiffFuser(nn.Module):
       - pc_bev_feat:           LiDAR geometric features (anchor)
       - |cam - pc|:            absolute difference (calibration error signal)
       - cam * pc:              element-wise interaction (alignment reinforcement)
+
+    When cam_drop_aware=True (fuser_type="diff_v2"), provides a dedicated
+    pc_only_conv path for when camera features are completely absent (cam_dropped=True).
+    This avoids the degenerate [pc, |pc|, 0] input that occurs with v1 + zero dropout.
     """
-    def __init__(self, img_in_channel, pc_in_channel, out_channel):
+    def __init__(self, img_in_channel, pc_in_channel, out_channel,
+                 cam_drop_aware=False):
         super().__init__()
         assert img_in_channel == pc_in_channel, (
             f"BEVDiffFuser requires equal channel dims for diff/interact ops, "
             f"got img={img_in_channel} vs pc={pc_in_channel}")
         in_ch = pc_in_channel * 3
+        self.cam_drop_aware = cam_drop_aware
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_channel, 1),
             nn.BatchNorm2d(out_channel),
             nn.ReLU(True)
         )
+        if cam_drop_aware:
+            self.pc_only_conv = nn.Sequential(
+                nn.Conv2d(pc_in_channel, out_channel, 1),
+                nn.BatchNorm2d(out_channel),
+                nn.ReLU(True)
+            )
 
     @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
-    def forward(self, img_bev_feat, pc_bev_feat):
+    def forward(self, img_bev_feat, pc_bev_feat, cam_dropped=False):
+        if self.cam_drop_aware and cam_dropped:
+            return self.pc_only_conv(pc_bev_feat)
         diff = (img_bev_feat - pc_bev_feat).abs()
         interact = img_bev_feat * pc_bev_feat
         return self.conv(torch.cat([pc_bev_feat, diff, interact], dim=1))
     
+class FrontViewPitchBranch(nn.Module):
+    """Dual-flow Pitch prediction branch combining Z-aware BEV and 2D image features.
+
+    Flow 1 (Z-aware): Globally-pooled pre-projection BEV features (B, C*nZ) that
+    retain vertical distribution information compressed away by ProjectionHead.
+
+    Flow 2 (2D front-view): Aggregated 2D image features from FPN backbone,
+    capturing vertical edge cues and horizon-line signals that directly correlate
+    with Pitch rotation in the camera frame.
+
+    Both flows are fused via gated attention before final Pitch regression.
+    """
+
+    def __init__(self, z_feat_dim, img_feat_dim=128, hidden_dim=128):
+        super().__init__()
+        self.z_encoder = nn.Sequential(
+            nn.Linear(z_feat_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
+        self.img_encoder = nn.Sequential(
+            nn.Linear(img_feat_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(self, z_summary, img_summary=None):
+        z_feat = self.z_encoder(z_summary)
+        if img_summary is not None:
+            img_feat = self.img_encoder(img_summary)
+            gate_input = torch.cat([z_feat, img_feat], dim=-1)
+            g = self.gate(gate_input)
+            fused = g * z_feat + (1 - g) * img_feat
+        else:
+            fused = z_feat
+        return self.head(fused)
+
+    @staticmethod
+    def compute_loss(pitch_pred, gt_T_to_camera):
+        R_gt = gt_T_to_camera[:, :3, :3].float()
+        sy = torch.sqrt(R_gt[:, 0, 0] ** 2 + R_gt[:, 1, 0] ** 2)
+        pitch_gt = torch.atan2(-R_gt[:, 2, 0], sy)
+        return F.smooth_l1_loss(pitch_pred.squeeze(-1), pitch_gt)
+
+
+class ContrastiveExtrinsicHead(nn.Module):
+    """Auxiliary head that forces the BEV difference map to encode geometric offset.
+
+    Takes the absolute difference between camera and LiDAR BEV features, encodes
+    it into a compact extrinsic embedding, then applies two auxiliary losses:
+
+    1. Perturbation regression: predict the actual RPY offset from the embedding.
+       This forces the diff map to encode the geometric residual, not scene content.
+
+    2. In-batch contrastive: embeddings with similar perturbation directions should
+       be closer than embeddings with dissimilar perturbations (InfoNCE-style).
+       This builds a smooth, transferable embedding space.
+    """
+
+    def __init__(self, in_channels, embed_dim=64, temperature=0.1):
+        super().__init__()
+        self.temperature = temperature
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2, 3, padding=1),
+            nn.BatchNorm2d(in_channels // 2),
+            nn.ReLU(True),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.projector = nn.Sequential(
+            nn.Linear(in_channels // 2, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+        )
+        self.rpy_regressor = nn.Linear(embed_dim, 3)
+
+    def forward(self, cam_bev, pc_bev):
+        diff = (cam_bev - pc_bev).abs()
+        feat = self.encoder(diff).flatten(1)       # (B, C//2)
+        embedding = self.projector(feat)            # (B, embed_dim)
+        rpy_pred = self.rpy_regressor(embedding)    # (B, 3) — predicted RPY offset
+        return embedding, rpy_pred
+
+    @staticmethod
+    def compute_loss(embedding, rpy_pred, gt_T, init_T, temperature=0.1,
+                     regression_weight=1.0, contrastive_weight=0.5):
+        R_gt = gt_T[:, :3, :3].float()
+        R_init = init_T[:, :3, :3].float()
+        R_delta = R_init @ R_gt.transpose(-2, -1)  # perturbation rotation
+
+        sy = torch.sqrt(R_delta[:, 0, 0]**2 + R_delta[:, 1, 0]**2)
+        roll = torch.atan2(R_delta[:, 2, 1], R_delta[:, 2, 2])
+        pitch = torch.atan2(-R_delta[:, 2, 0], sy)
+        yaw = torch.atan2(R_delta[:, 1, 0], R_delta[:, 0, 0])
+        rpy_gt = torch.stack([roll, pitch, yaw], dim=-1)  # (B, 3) radians
+
+        reg_loss = F.smooth_l1_loss(rpy_pred, rpy_gt)
+
+        B = embedding.shape[0]
+        if B < 4:
+            return regression_weight * reg_loss
+
+        emb_norm = F.normalize(embedding, dim=-1)
+        sim_matrix = emb_norm @ emb_norm.t() / temperature  # (B, B)
+
+        rpy_dist = torch.cdist(rpy_gt, rpy_gt, p=2)  # (B, B)
+        median_dist = rpy_dist.median()
+        labels = (rpy_dist < median_dist).float()
+        labels.fill_diagonal_(0)
+
+        pos_count = labels.sum(dim=1).clamp(min=1)
+        log_sum_exp = torch.logsumexp(sim_matrix - 1e9 * torch.eye(B, device=sim_matrix.device), dim=1)
+        pos_sim = (sim_matrix * labels).sum(dim=1) / pos_count
+        contrastive_loss = (log_sum_exp - pos_sim).mean()
+
+        return regression_weight * reg_loss + contrastive_weight * contrastive_loss
+
+
 class deformable_transformer_layer(nn.Module):
     def __init__(self, 
                  dim = 512, 
@@ -133,23 +313,67 @@ class BEVCalib(nn.Module):
                  scatter_reduce = "sum",
                  fuser_type = "concat",
                  cam_drop_prob = 0.0,
+                 cam_drop_mode = "zero",
                  intrinsic_input = False,
+                 use_pitch_branch = False,
+                 pitch_aux_weight = 0.3,
+                 bev_instance_norm = False,
+                 use_contrastive_extrinsic = False,
+                 contrastive_weight = 0.1,
+                 use_balanced_axis_loss = False,
+                 domain_adversarial = False,
+                 domain_adversarial_weight = 0.1,
+                 num_domains = 21,
+                 cam2bev_mode = "lss",
+                 backbone_type = "swin",
+                 backbone_variant = "dinov2-small",
+                 freeze_backbone = False,
+                 freeze_layers = None,
+                 backbone_weights = None,
                 ):
         super(BEVCalib, self).__init__()
         self.use_mlp_head = use_mlp_head
+        self.use_pitch_branch = use_pitch_branch
+        self.pitch_aux_weight = pitch_aux_weight
+        self.bev_instance_norm = bev_instance_norm
+        self.use_contrastive_extrinsic = use_contrastive_extrinsic
+        self.contrastive_weight = contrastive_weight
         self.rotation_only = rotation_only
+        self.domain_adversarial = domain_adversarial
+        self.domain_adversarial_weight = domain_adversarial_weight
+        if bev_pool_factor == 0 and cam2bev_mode == "query":
+            bev_pool_factor = 4
         self.bev_pool_factor = bev_pool_factor
         self.intrinsic_input = intrinsic_input
+        self.cam_drop_mode = cam_drop_mode
         self._profile_modules = False
         self._profile_events = []
         self._profile_accum = {}
         self._profile_count = 0
-        self.img_branch = Cam2BEV(
-            img_shape=img_shape,
-            use_foundation_depth=use_foundation_depth,
-            depth_model_type=depth_model_type,
-            fd_mode=fd_mode,
-        )
+        self.cam2bev_mode = cam2bev_mode
+
+        if cam2bev_mode == "query":
+            from img_branch.cam2bev_query import Cam2BEVQuery
+            self.img_branch = Cam2BEVQuery(
+                img_shape=img_shape,
+                backbone_type=backbone_type,
+                backbone_variant=backbone_variant,
+                freeze_backbone=freeze_backbone,
+                freeze_layers=freeze_layers,
+                backbone_weights=backbone_weights,
+            )
+        else:
+            self.img_branch = Cam2BEV(
+                img_shape=img_shape,
+                use_foundation_depth=use_foundation_depth,
+                depth_model_type=depth_model_type,
+                fd_mode=fd_mode,
+                backbone_type=backbone_type,
+                backbone_variant=backbone_variant,
+                freeze_backbone=freeze_backbone,
+                freeze_layers=freeze_layers,
+                backbone_weights=backbone_weights,
+            )
         self.pc_branch = Lidar2BEV(
             to_bev_mode=to_bev_mode,
             voxel_mode=voxel_mode,
@@ -158,15 +382,26 @@ class BEVCalib(nn.Module):
         self.bev_encoder_use = bev_encoder
         if self.bev_encoder_use:
             self.bev_encoder = BEVEncoder()
-        self.bev_shape = (self.img_branch.nx[0].item(), self.img_branch.nx[1].item())
+        if hasattr(self.img_branch, 'nx'):
+            self.bev_shape = (self.img_branch.nx[0].item(), self.img_branch.nx[1].item())
+        else:
+            self.bev_shape = (self.img_branch.nx_x, self.img_branch.nx_y)
         self.embed_dim = self.img_branch.out_channels + self.pc_branch.out_channels
         self.num_heads = num_heads
         self.cam_drop_prob = cam_drop_prob
-        if fuser_type == "diff":
+        if fuser_type == "diff_v2":
             self.conv_fuser = BEVDiffFuser(
                 self.img_branch.out_channels,
                 self.pc_branch.out_channels,
-                self.embed_dim
+                self.embed_dim,
+                cam_drop_aware=True,
+            )
+        elif fuser_type == "diff":
+            self.conv_fuser = BEVDiffFuser(
+                self.img_branch.out_channels,
+                self.pc_branch.out_channels,
+                self.embed_dim,
+                cam_drop_aware=False,
             )
         else:
             self.conv_fuser = ConvFuser(
@@ -224,8 +459,34 @@ class BEVCalib(nn.Module):
             weight_axis_rotation=weight_axis_rotation,
             axis_weights=axis_weights,
             use_geodesic_loss=use_geodesic_loss,
+            use_balanced_axis_loss=use_balanced_axis_loss,
         )
-    
+        if self.bev_instance_norm:
+            self.cam_bev_norm = nn.InstanceNorm2d(self.img_branch.out_channels, affine=True)
+            print(f"[BEVCalib] BEV Instance Normalization enabled (C={self.img_branch.out_channels})")
+        if self.use_pitch_branch:
+            nz = self.img_branch.nx[2].item()
+            z_feat_dim = self.img_branch.lss.out_channels * nz
+            img_feat_dim = self.img_branch.CamEncode.out_channels
+            self.pitch_branch = FrontViewPitchBranch(
+                z_feat_dim=z_feat_dim, img_feat_dim=img_feat_dim)
+            print(f"[BEVCalib] Dual-flow Pitch branch enabled: "
+                  f"z_feat_dim={z_feat_dim}, img_feat_dim={img_feat_dim}, "
+                  f"aux_weight={pitch_aux_weight}")
+        if self.use_contrastive_extrinsic:
+            self.contrastive_head = ContrastiveExtrinsicHead(
+                in_channels=self.img_branch.out_channels,
+                embed_dim=64,
+            )
+            print(f"[BEVCalib] Contrastive Extrinsic Head enabled: "
+                  f"in_channels={self.img_branch.out_channels}, weight={contrastive_weight}")
+        if self.domain_adversarial:
+            self.domain_classifier = DomainClassifier(
+                in_dim=self.embed_dim, num_domains=num_domains)
+            self._dann_epoch_ratio = 0.0
+            print(f"[BEVCalib] Domain Adversarial Training enabled: "
+                  f"num_domains={num_domains}, weight={domain_adversarial_weight}")
+
     @staticmethod
     def _build_regression_head(in_dim, out_dim, dropout=0.1):
         """Multi-layer MLP regression head with residual-style bottleneck."""
@@ -316,7 +577,7 @@ class BEVCalib(nn.Module):
         T[:, 3, 3] = 1
         return T
     
-    def forward(self, img, pc, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, cam_intrinsic, masks = None, out_init_loss = False):
+    def forward(self, img, pc, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, cam_intrinsic, masks = None, out_init_loss = False, domain_ids = None):
         """
         We use Lidar as ego here.
         Args:
@@ -340,7 +601,18 @@ class BEVCalib(nn.Module):
         post_cam2ego_T = post_cam2ego_T.unsqueeze(1)
         cam_intrinsic = cam_intrinsic.unsqueeze(1)
         cam2ego_T = torch.linalg.inv(init_T_to_camera.float())
-        cam_bev_feats, cam_bev_mask = self.img_branch(cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic, post_cam2ego_T=post_cam2ego_T, imgs=img) # B, C, H, W
+
+        z_summary = None
+        img_feat_2d = None
+        if self.use_pitch_branch:
+            cam_bev_feats, cam_bev_mask, z_summary, img_feat_2d = self.img_branch(
+                cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic,
+                post_cam2ego_T=post_cam2ego_T, imgs=img,
+                return_z_features=True)
+        else:
+            cam_bev_feats, cam_bev_mask = self.img_branch(
+                cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic,
+                post_cam2ego_T=post_cam2ego_T, imgs=img)
 
         if profiling:
             _ev[1].record()
@@ -351,14 +623,22 @@ class BEVCalib(nn.Module):
         if profiling:
             _ev[2].record()
 
+        cam_dropped = False
         if self.training and self.cam_drop_prob > 0:
             drop_flag = torch.rand(1, device=cam_bev_feats.device)
             if torch.distributed.is_initialized():
                 torch.distributed.broadcast(drop_flag, src=0)
             if drop_flag.item() < self.cam_drop_prob:
-                cam_bev_feats = cam_bev_feats * 0
+                if self.cam_drop_mode == "noise":
+                    noise_scale = cam_bev_feats.std().detach().clamp(min=1e-6) * 0.1
+                    cam_bev_feats = cam_bev_feats * 0 + torch.randn_like(cam_bev_feats) * noise_scale
+                else:
+                    cam_bev_feats = cam_bev_feats * 0
+                    cam_dropped = True
 
-        x = self.conv_fuser(cam_bev_feats, pc_bev_feats) # B, C, H, W
+        if self.bev_instance_norm and not cam_dropped:
+            cam_bev_feats = self.cam_bev_norm(cam_bev_feats)
+        x = self.conv_fuser(cam_bev_feats, pc_bev_feats, cam_dropped=cam_dropped)
         if self.bev_encoder_use:
             x = self.bev_encoder(x) # B, C, H, W
         x = x + self.pose_embed
@@ -404,6 +684,7 @@ class BEVCalib(nn.Module):
         if profiling:
             _ev[4].record()
 
+        x_bev_pooled = x
         x = self.head_drop(x)
         if self.intrinsic_input:
             K = cam_intrinsic.squeeze(1)  # (B, 3, 3)
@@ -428,6 +709,35 @@ class BEVCalib(nn.Module):
     
         loss, T_gt_expected = self.loss_fn(pred_translation = translation, pred_rotation = rotation,
                             pcs = pc, gt_T_to_camera = gt_T_to_camera, init_T_to_camera = init_T_to_camera, mask = masks)
+
+        if self.use_pitch_branch and z_summary is not None:
+            img_summary = None
+            if img_feat_2d is not None:
+                img_summary = img_feat_2d.mean(dim=1)  # avg over cameras: (B, C, fH, fW)
+                img_summary = F.adaptive_avg_pool2d(img_summary, 1).flatten(1)  # (B, C)
+            pitch_pred = self.pitch_branch(z_summary, img_summary)
+            pitch_aux_loss = FrontViewPitchBranch.compute_loss(
+                pitch_pred, gt_T_to_camera)
+            loss["total_loss"] = loss["total_loss"] + self.pitch_aux_weight * pitch_aux_loss
+            loss["pitch_aux_loss"] = pitch_aux_loss / torch.pi * 180.0
+
+        if self.training and self.use_contrastive_extrinsic and not cam_dropped:
+            ctr_emb, rpy_pred = self.contrastive_head(cam_bev_feats, pc_bev_feats)
+            contrast_loss = ContrastiveExtrinsicHead.compute_loss(
+                ctr_emb, rpy_pred, gt_T_to_camera, init_T_to_camera,
+                temperature=self.contrastive_head.temperature,
+            )
+            loss["total_loss"] = loss["total_loss"] + self.contrastive_weight * contrast_loss
+            loss["contrastive_loss"] = contrast_loss.detach()
+
+        if self.training and self.domain_adversarial and domain_ids is not None:
+            alpha = 2.0 / (1.0 + math.exp(-10.0 * self._dann_epoch_ratio)) - 1.0
+            domain_logits = self.domain_classifier(x_bev_pooled, alpha=alpha)
+            domain_labels = domain_ids.to(domain_logits.device)
+            dann_loss = F.cross_entropy(domain_logits, domain_labels)
+            loss["total_loss"] = loss["total_loss"] + self.domain_adversarial_weight * dann_loss
+            loss["dann_loss"] = dann_loss.detach()
+            loss["dann_alpha"] = torch.tensor(alpha)
 
         if profiling:
             _ev[6].record()

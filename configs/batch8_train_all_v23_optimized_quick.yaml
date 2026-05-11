@@ -63,8 +63,8 @@ defaults:
     augment_intrinsic: 0.0
     augment_intrinsic_cxcy: 0.0
 
-    intrinsic_input: true
-
+    # [P0] Pose-aware 去冗余 + 硬上限组合
+    pose_aware_sampling: true
     max_frames_per_seq: 1000
     num_epochs: 400
     eval_epoches: 50
@@ -86,14 +86,14 @@ experiments:
   # =========================================================================
 
   - name: "v23_A1_rotonly_quick"
-    description: "V23-A1q: A2 LR + intrinsic_input + rotation_only"
+    description: "V23-A1q: rotation_only 对照"
     dataset: "all"
     version: "v23_A1_rotonly_quick"
     params:
       rotation_only: true
 
   - name: "v23_A2_joint_quick"
-    description: "V23-A2q: A2 LR + intrinsic_input + joint"
+    description: "V23-A2q: joint 基线"
     dataset: "all"
     version: "v23_A2_joint_quick"
 
@@ -116,13 +116,15 @@ experiments:
       drop_path_rate: 0.2
       head_dropout: 0.2
 
-  - name: "v23_B3_intr_aug_quick"
-    description: "V23-B3q: joint + intrinsic_aug ±5%"
+  - name: "v23_B3_pc_aug_quick"
+    description: "V23-B3q: joint + 强点云增强 (jitter=0.05, dropout=0.10, flip=0.30)"
     dataset: "all"
-    version: "v23_B3_intr_aug_quick"
+    version: "v23_B3_pc_aug_quick"
     params:
-      augment_intrinsic: 0.05
-      augment_intrinsic_cxcy: 0.05
+      augment_pc_jitter: 0.05
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
 
   - name: "v23_B4_strong_aug_quick"
     description: "V23-B4q: joint + 强增强"
@@ -140,17 +142,15 @@ experiments:
   # =========================================================================
 
   - name: "v23_C1_full_quick"
-    description: "V23-C1q: joint + 全正则化组合"
+    description: "V23-C1q: joint + 全正则化组合 (cam_drop + 强dropout + 强增强)"
     dataset: "all"
     version: "v23_C1_full_quick"
     params:
       cam_drop_prob: 0.15
       drop_path_rate: 0.2
       head_dropout: 0.2
-      augment_intrinsic: 0.05
-      augment_intrinsic_cxcy: 0.05
       augment_color_jitter: 0.30
-      augment_pc_jitter: 0.04
+      augment_pc_jitter: 0.05
       augment_pc_dropout: 0.10
       augment_pitch_flip_prob: 0.30
       augment_pitch_flip_max_deg: 5.0
@@ -163,10 +163,8 @@ experiments:
       cam_drop_prob: 0.15
       drop_path_rate: 0.2
       head_dropout: 0.2
-      augment_intrinsic: 0.05
-      augment_intrinsic_cxcy: 0.05
       augment_color_jitter: 0.30
-      augment_pc_jitter: 0.04
+      augment_pc_jitter: 0.05
       augment_pc_dropout: 0.10
       augment_pitch_flip_prob: 0.30
       augment_pitch_flip_max_deg: 5.0

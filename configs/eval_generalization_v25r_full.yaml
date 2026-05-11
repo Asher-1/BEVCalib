@@ -1,0 +1,86 @@
+# V25r 泛化评估: A1(Z=10) + A2(Z=15) + V24-B 基线对比
+#
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；bev_zbound_step 须手写。
+#
+# 评估 v25r 全量优化方案的泛化性能
+# 含多帧时序聚合分析 (方向1)
+#
+# 目标: RPY 泛化误差 < 0.1°
+#
+# 用法:
+#   cd /mnt/drtraining/user/dahailu/code/BEVCalib
+#   PYTHONUNBUFFERED=1 /opt/conda/envs/bevcalib310/bin/python \
+#     run_generalization_eval.py --config configs/eval_v25r_full.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v25"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v25r_full"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+
+  # A1: 基线 (MLP head + contrastive + instance_norm + pitch_branch), Z=10 bins
+  - label: "v25r-A1-full-z10"
+    dir_name: "model_small_5deg_v25r_A1_full_z10"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "A1: LSS+Swin baseline (contrastive+IN+MLP+pitch, Z=10bins)"
+
+  # A2: 同A1但Z=15 bins
+  - label: "v25r-A2-full-z15"
+    dir_name: "model_small_5deg_v25r_A2_full_z15"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "1.33"
+    mode_desc: "A2: LSS+Swin baseline (Z=15bins, finer depth)"
+
+  # B1: 去掉 contrastive loss
+  - label: "v25r-B1-no-contrastive"
+    dir_name: "model_small_5deg_v25r_B1_no_contrastive"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "B1: ablation - no contrastive loss"
+
+  # B2: 去掉 mount jitter 增强
+  - label: "v25r-B2-no-mount-jitter"
+    dir_name: "model_small_5deg_v25r_B2_no_mount_jitter"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "B2: ablation - no mount jitter augmentation"
+
+  # B3: 去掉 BEV instance norm
+  - label: "v25r-B3-no-instnorm"
+    dir_name: "model_small_5deg_v25r_B3_no_instnorm"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "B3: ablation - no BEV instance norm"
+
+  # C1: 加强 Pitch 权重 (axis_weights=1,8,1, pitch_aux_weight=0.5)
+  - label: "v25r-C1-strong-pitch"
+    dir_name: "model_small_5deg_v25r_C1_strong_pitch"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "C1: strong pitch weight (axis 1:8:1, pitch_aux=0.5)"
+
+
+  # C2: Fine ±1° with all optimizations
+  - label: "v25r_C2_fine_1deg"
+    dir_name: "model_small_1deg_v25r_C2_fine_1deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "C2: Fine ±1° with all optimizations"
+
+  # C3: Fine ±2° with all optimizations
+  - label: "v25r_C3_fine_2deg"
+    dir_name: "model_small_2deg_v25r_C3_fine_2deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "C3: Fine ±2° with all optimizations"

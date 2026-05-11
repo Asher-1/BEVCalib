@@ -522,6 +522,7 @@ OPTIM_PARAMS = [
     ('num_epochs', '--num_epochs'),
     ('save_ckpt_per_epoches', '--save_ckpt_per_epoches'),
     ('use_geodesic_loss', '--use_geodesic_loss'),
+    ('use_balanced_axis_loss', '--use_balanced_axis_loss'),
     ('use_mlp_head', '--use_mlp_head'),
     ('use_deformable', '--use_deformable'),
     ('bev_pool_factor', '--bev_pool_factor'),
@@ -534,6 +535,7 @@ OPTIM_PARAMS = [
     ('scatter_reduce', '--scatter_reduce'),
     ('fuser_type', '--fuser_type'),
     ('cam_drop_prob', '--cam_drop_prob'),
+    ('cam_drop_mode', '--cam_drop_mode'),
     ('max_frames_per_seq', '--max_frames_per_seq'),
     ('sample_step', '--sample_step'),
     ('eval_epoches', '--eval_epoches'),
@@ -555,11 +557,35 @@ OPTIM_PARAMS = [
     ('wd', '--wd'),
     ('target_width', '--target_width'),
     ('target_height', '--target_height'),
+    ('poses_dir', '--poses_dir'),
+    ('backbone_warmup_epochs', '--backbone_warmup_epochs'),
+    ('layer_wise_lr_decay', '--layer_wise_lr_decay'),
+    ('use_pitch_branch', '--use_pitch_branch'),
+    ('pitch_aux_weight', '--pitch_aux_weight'),
+    ('bev_instance_norm', '--bev_instance_norm'),
+    ('augment_mount_jitter_prob', '--augment_mount_jitter_prob'),
+    ('augment_mount_jitter_rot_sigma', '--augment_mount_jitter_rot_sigma'),
+    ('augment_mount_jitter_trans_sigma', '--augment_mount_jitter_trans_sigma'),
+    ('use_contrastive_extrinsic', '--use_contrastive_extrinsic'),
+    ('contrastive_weight', '--contrastive_weight'),
+    ('domain_adversarial', '--domain_adversarial'),
+    ('domain_adversarial_weight', '--domain_adversarial_weight'),
+    ('num_domains', '--num_domains'),
+    ('cam2bev_mode', '--cam2bev_mode'),
+    ('backbone_type', '--backbone_type'),
+    ('backbone_variant', '--backbone_variant'),
+    ('freeze_backbone', '--freeze_backbone'),
+    ('backbone_freeze_layers', '--backbone_freeze_layers'),
+    ('backbone_weights', '--backbone_weights'),
 ]
 for yaml_key, cli_flag in OPTIM_PARAMS:
     val = params.get(yaml_key)
     if val is not None and str(val).strip() != '':
         args.append(f"{cli_flag} {val}")
+
+# pose_aware_sampling (boolean flag)
+if params.get('pose_aware_sampling') in (True, 1, '1', 'true', 'True'):
+    args.append("--pose_aware_sampling")
 
 # 批量模式必须前台执行，否则 start_training.sh 会 nohup 后台启动并立即返回，
 # 导致多个实验同时抢占 GPU。忽略 YAML 中的 foreground 设置。

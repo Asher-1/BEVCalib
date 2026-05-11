@@ -1,0 +1,228 @@
+# V25 Refactored: 全量优化实验矩阵 (Full 32N, A30集群)
+#
+# 集成所有已诊断和实现的优化:
+#   BUG修复: use_mlp_head=1, backbone_lr_scale=1.0
+#   训练优化: backbone_warmup=10, layer_wise_lr_decay=0.65
+#   架构增强: Dual-flow Pitch Branch, BEV InstanceNorm
+#   域适应: Mount Jitter, Contrastive Extrinsic Embedding
+#   Loss改进: axis_weights=1.0,5.0,1.0 (Pitch 5x)
+#
+# 用法:
+#   bash batch_train.sh configs/batch8_train_all_v25_a30.yaml
+#   bash batch_train.sh --dry-run configs/batch8_train_all_v25_a30.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 3
+  retry_delay: 30
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,5.0,1.0"
+
+    use_mlp_head: 1
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 1.0
+    backbone_warmup_epochs: 10
+    layer_wise_lr_decay: 0.65
+    step_size: 80
+
+    use_pitch_branch: 1
+    pitch_aux_weight: 0.3
+    bev_instance_norm: 1
+
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 0.5
+    augment_mount_jitter_trans_sigma: 0.01
+
+    use_contrastive_extrinsic: 1
+    contrastive_weight: 0.1
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+    max_frames_per_seq: 10000
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+
+    early_stopping_patience: 30
+    seed: 42
+
+    eval_epoches: 50
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "diff"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+    no_tensorboard: true
+    tensorboard_port: null
+
+experiments:
+  # =========================================================================
+  # A1: 全优化 baseline (Z=10)
+  # =========================================================================
+  - name: "v25r_A1_full_z10"
+    description: "A1: All optimizations + Z=10 (primary)"
+    dataset: "all"
+    version: "v25r_A1_full_z10"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+
+  # =========================================================================
+  # A2: Z=15 全优化
+  # =========================================================================
+  - name: "v25r_A2_full_z15"
+    description: "A2: All optimizations + Z=15"
+    dataset: "all"
+    version: "v25r_A2_full_z15"
+    env:
+      BEV_ZBOUND_STEP: 1.33
+
+  # =========================================================================
+  # B1: 消融 — 无对比学习
+  # =========================================================================
+  - name: "v25r_B1_no_contrastive"
+    description: "B1: Ablation — no contrastive head"
+    dataset: "all"
+    version: "v25r_B1_no_contrastive"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      use_contrastive_extrinsic: 0
+
+  # =========================================================================
+  # B2: 消融 — 无mount jitter
+  # =========================================================================
+  - name: "v25r_B2_no_mount_jitter"
+    description: "B2: Ablation — no mount jitter"
+    dataset: "all"
+    version: "v25r_B2_no_mount_jitter"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      augment_mount_jitter_prob: 0.0
+
+  # =========================================================================
+  # B3: 消融 — 无BEV InstanceNorm
+  # =========================================================================
+  - name: "v25r_B3_no_instnorm"
+    description: "B3: Ablation — no BEV InstanceNorm"
+    dataset: "all"
+    version: "v25r_B3_no_instnorm"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      bev_instance_norm: 0
+
+  # =========================================================================
+  # C1: 强化Pitch
+  # =========================================================================
+  - name: "v25r_C1_strong_pitch"
+    description: "C1: Aggressive Pitch (8x weight, 0.5 aux)"
+    dataset: "all"
+    version: "v25r_C1_strong_pitch"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      axis_weights: "1.0,8.0,1.0"
+      pitch_aux_weight: 0.5
+
+  # =========================================================================
+  # C2: Fine ±1°
+  # =========================================================================
+  - name: "v25r_C2_fine_1deg"
+    description: "C2: Fine ±1° with all optimizations"
+    dataset: "all"
+    version: "v25r_C2_fine_1deg"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      angle_range_deg: 1
+      trans_range: 0.03
+      step_size: 60
+      augment_pitch_flip_max_deg: 0.8
+      augment_pitch_flip_prob: 0.10
+      augment_pitch_sign_flip_prob: 0.10
+
+  # =========================================================================
+  # C3: Fine ±2°
+  # =========================================================================
+  - name: "v25r_C3_fine_2deg"
+    description: "C3: Fine ±2° with all optimizations"
+    dataset: "all"
+    version: "v25r_C3_fine_2deg"
+    env:
+      BEV_ZBOUND_STEP: 2.0
+    params:
+      angle_range_deg: 2
+      trans_range: 0.06
+      step_size: 60
+      augment_pitch_flip_max_deg: 1.5
+
+# ============================================================================
+# 实验矩阵总结
+# ============================================================================
+#
+#   | ID  | 优化       | Z  | 扰动  | 验证目标                          |
+#   |-----|------------|-----|------|----------------------------------|
+#   | A1  | 全量优化    | 10  | ±5°  | 主实验: 所有优化组合效果           |
+#   | A2  | 全量优化    | 15  | ±5°  | Z精细化对Pitch的额外增益          |
+#   | B1  | -对比学习   | 10  | ±5°  | 消融: 对比学习单独贡献            |
+#   | B2  | -mount抖动  | 10  | ±5°  | 消融: mount jitter单独贡献        |
+#   | B3  | -BEV归一化  | 10  | ±5°  | 消融: InstanceNorm单独贡献        |
+#   | C1  | 全量+强Pitch| 10  | ±5°  | Pitch 8x权重 极限push            |
+#   | C2  | 全量优化    | 10  | ±1°  | 精细模型 (链式Fine)               |
+#   | C3  | 全量优化    | 10  | ±2°  | 中等精细模型                      |

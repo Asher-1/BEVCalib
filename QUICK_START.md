@@ -226,9 +226,14 @@ tensorboard --logdir logs/B26A/ --port 6006
 ## 🛑 停止训练
 
 ```bash
+# 彻底停止所有训练（含批量实验队列、重试、TensorBoard）
+bash stop_training.sh --force
+
+# 交互确认后停止
 bash stop_training.sh
-# 或
-pkill -f train_kitti
+
+# 仅查看当前训练进程状态，不停止
+bash stop_training.sh --status
 ```
 
 ## 💡 实用技巧

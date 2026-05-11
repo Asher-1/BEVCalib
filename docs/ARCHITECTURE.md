@@ -129,7 +129,7 @@ BEVCalib/
 ├── start_training.sh             # Quick-start training launcher
 ├── train_universal.sh            # Universal training script (scratch/finetune/resume)
 ├── batch_train.sh                # Config-driven batch training orchestrator
-├── stop_training.sh              # Kill running training processes
+├── stop_training.sh              # Stop all training (queues + retries + workers)
 │
 ├── Dockerfile/Dockerfile         # Docker environment setup
 ├── requirements.txt              # Python dependencies
@@ -340,7 +340,7 @@ Saves to `logs/<dataset>/<model_dir>/checkpoint/`:
 | `start_training.sh` | Quick-start: `bash start_training.sh B26A v1 [--ddp] [--lr 1e-4]` |
 | `batch_train.sh` | Config-driven: `bash batch_train.sh configs/my_experiments.yaml` |
 | `train_universal.sh` | Advanced: scratch/finetune/resume modes with full parameter control |
-| `stop_training.sh` | Kill all running training processes |
+| `stop_training.sh` | Stop all training (batch queues, retries, torchrun, workers, TensorBoard) |
 
 ---
 

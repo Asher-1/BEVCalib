@@ -1,0 +1,123 @@
+# 综合泛化评估: V27 (4) + V28 (6) + V29 (4) = 20个实验
+#
+# 所有模型架构参数 (cam2bev_mode, backbone_type, rotation_only, use_mlp_head,
+# voxel_mode, scatter_reduce, fuser_type, domain_adversarial 等) 由
+# evaluate_checkpoint.py 从 checkpoint 自动检测, 无需在配置中指定。
+# 仅传入 checkpoint 无法提取的参数: bev_zbound_step (训练时环境变量)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_comprehensive_v27_v28_v29.yaml --parallel -1
+#
+# 评估目标: 全面对比 V27/V28/V29 所有实验, 确认 V29-G3 达到 0.1° 目标
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v27_v28_v29_comprehensive"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+
+  # ============================================================
+  # V27 系列: LSS + Swin, 400 epochs, quick (域适应实验)
+  # ============================================================
+
+  - label: "v27-E1-v24b-repro"
+    dir_name: "v27_quick/model_small_5deg_v27_E1_v24b_repro_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E1: V24-B reproduction (LSS+Swin, no aug)"
+
+  - label: "v27-E5-balanced-mount-reg"
+    dir_name: "v27_quick/model_small_5deg_v27_E5_balanced_mount_strong_reg_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E5: balanced mount jitter + strong reg (drop0.2, head0.3)"
+
+  - label: "v27-E9-dann-mount-reg"
+    dir_name: "v27_quick/model_small_5deg_v27_E9_dann_balanced_mount_reg_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E9: DANN(0.1) + balanced mount + strong reg"
+
+  - label: "v27-E10-dann-strong-jitter"
+    dir_name: "v27_quick/model_small_5deg_v27_E10_dann_very_strong_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E10: DANN(0.15) + very strong jitter (prob0.7, sigma3.0)"
+
+  # ============================================================
+  # V28 系列: 架构对比 (Query-BEV/LSS × Swin/DINOv2), 200ep, quick
+  # ============================================================
+
+  - label: "v28-F1-query-swin"
+    dir_name: "v28_quick/model_small_5deg_v28_F1_query_bev_swin_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F1: Query-BEV + Swin (best_val)"
+
+  - label: "v28-F1-query-swin-200"
+    dir_name: "v28_quick/model_small_5deg_v28_F1_query_bev_swin_quick"
+    ckpt: "ckpt_200.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F1-200: Query-BEV + Swin (epoch 200)"
+
+  - label: "v28-F2-lss-dinov2"
+    dir_name: "v28_quick/model_small_5deg_v28_F2_lss_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F2: LSS + DINOv2 backbone"
+
+  - label: "v28-F3-query-dinov2"
+    dir_name: "v28_quick/model_small_5deg_v28_F3_query_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F3: Query-BEV + DINOv2 (full upgrade)"
+
+  - label: "v28-F4-query-dinov2-dann"
+    dir_name: "v28_quick/model_small_5deg_v28_F4_query_dinov2_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F4: Query-BEV + DINOv2 + DANN"
+
+  - label: "v28-F5-query-dinov2-frozen"
+    dir_name: "v28_quick/model_small_5deg_v28_F5_query_dinov2_frozen_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F5: Query-BEV + frozen DINOv2 (BEST=0.296°)"
+
+  # ============================================================
+  # V29 系列: F5×E10 组合消融, 400ep, quick (目标: <0.1°)
+  # ============================================================
+
+  - label: "v29-G1-frozen-strong-jitter"
+    dir_name: "v29_quick/model_small_5deg_v29_G1_frozen_dinov2_strong_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G1: frozen DINOv2 + strong jitter (prob=0.7, sigma=3.0)"
+
+  - label: "v29-G2-frozen-jitter-dann"
+    dir_name: "v29_quick/model_small_5deg_v29_G2_frozen_dinov2_jitter_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G2: frozen DINOv2 + strong jitter + DANN"
+
+  - label: "v29-G3-partial-unfreeze"
+    dir_name: "v29_quick/model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3: partial unfreeze DINOv2 (last2) + strong jitter (BEST=0.085°)"
+
+  - label: "v29-G4-e10-query-bev"
+    dir_name: "v29_quick/model_small_5deg_v29_G4_e10_query_bev_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G4: E10 + Query-BEV (Swin + DANN + strong jitter)"

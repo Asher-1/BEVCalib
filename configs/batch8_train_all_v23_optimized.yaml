@@ -16,12 +16,15 @@
 # V23 核心策略 (泛化优先):
 #   = joint 优化 (B1 冠军策略)
 #   + A2 LR 配置 (lr=1e-4, bb=0.5)
-#   + intrinsic_input (V22 验证有效)
 #   + 强正则化 (cam_drop / dropout / 强增强) 对抗大 batch 过拟合
+#   + SWAD (后续集成, 权重平均寻找平坦极小值)
+#
+# 注: 内参分析表明 train/test 内参几乎完全相同,
+#   泛化差距源于场景域偏移, intrinsic_input 实验已移除
 #
 # 实验矩阵:
 #   A: 核心对照 — rot_only vs joint
-#   B: 正则化消融 — cam_drop / dropout / intrinsic_aug
+#   B: 正则化消融 — cam_drop / dropout / 点云增强 / 色彩增强
 #   C: 全组合 — 最强泛化配置
 #
 # 预期: gen_rot < 0.60°, val_rot < 0.10°
@@ -88,9 +91,8 @@ defaults:
     augment_intrinsic: 0.0
     augment_intrinsic_cxcy: 0.0
 
-    # V23: intrinsic_input 默认开启
-    intrinsic_input: true
-
+    # [P0] Pose-aware 去冗余 + 硬上限组合
+    pose_aware_sampling: true
     max_frames_per_seq: 10000
     early_stopping_patience: 30
     seed: 42
@@ -112,17 +114,17 @@ experiments:
   # Phase A: 核心对照
   # =========================================================================
 
-  # A1: rot_only 对照 (确认 intrinsic_input + A2 LR 在 rotation_only 下的表现)
+  # A1: rot_only 对照
   - name: "v23_A1_rotonly"
-    description: "V23-A1: A2 LR + intrinsic_input + rotation_only (对照)"
+    description: "V23-A1: A2 LR + rotation_only (对照)"
     dataset: "all"
     version: "v23_A1_rotonly"
     params:
       rotation_only: true
 
-  # A2: joint 基线 (将 B1 冠军配置 + intrinsic_input + A2 LR 结合)
+  # A2: joint 基线 (B1 冠军配置 + A2 LR)
   - name: "v23_A2_joint"
-    description: "V23-A2: A2 LR + intrinsic_input + joint (核心实验)"
+    description: "V23-A2: A2 LR + joint (核心实验)"
     dataset: "all"
     version: "v23_A2_joint"
 
@@ -147,14 +149,16 @@ experiments:
       drop_path_rate: 0.2
       head_dropout: 0.2
 
-  # B3: intrinsic_aug ±5% (增强内参多样性)
-  - name: "v23_B3_intr_aug"
-    description: "V23-B3: joint + intrinsic_aug ±5%"
+  # B3: 更强 scene augmentation (点云 + Pitch)
+  - name: "v23_B3_pc_aug"
+    description: "V23-B3: joint + 强点云增强 (jitter=0.05, dropout=0.10, flip=0.30)"
     dataset: "all"
-    version: "v23_B3_intr_aug"
+    version: "v23_B3_pc_aug"
     params:
-      augment_intrinsic: 0.05
-      augment_intrinsic_cxcy: 0.05
+      augment_pc_jitter: 0.05
+      augment_pc_dropout: 0.10
+      augment_pitch_flip_prob: 0.30
+      augment_pitch_flip_max_deg: 5.0
 
   # B4: 更强 scene 增强 (所有增强强度翻倍)
   - name: "v23_B4_strong_aug"
@@ -172,19 +176,17 @@ experiments:
   # Phase C: 全组合 — 最强泛化配置
   # =========================================================================
 
-  # C1: cam_drop + 强 dropout + intrinsic_aug + 强增强
+  # C1: cam_drop + 强 dropout + 强增强 (最强正则化组合)
   - name: "v23_C1_full"
-    description: "V23-C1: joint + cam_drop + 强dropout + intr_aug + 强增强"
+    description: "V23-C1: joint + cam_drop + 强dropout + 强增强"
     dataset: "all"
     version: "v23_C1_full"
     params:
       cam_drop_prob: 0.15
       drop_path_rate: 0.2
       head_dropout: 0.2
-      augment_intrinsic: 0.05
-      augment_intrinsic_cxcy: 0.05
       augment_color_jitter: 0.30
-      augment_pc_jitter: 0.04
+      augment_pc_jitter: 0.05
       augment_pc_dropout: 0.10
       augment_pitch_flip_prob: 0.30
       augment_pitch_flip_max_deg: 5.0
@@ -198,10 +200,8 @@ experiments:
       cam_drop_prob: 0.15
       drop_path_rate: 0.2
       head_dropout: 0.2
-      augment_intrinsic: 0.05
-      augment_intrinsic_cxcy: 0.05
       augment_color_jitter: 0.30
-      augment_pc_jitter: 0.04
+      augment_pc_jitter: 0.05
       augment_pc_dropout: 0.10
       augment_pitch_flip_prob: 0.30
       augment_pitch_flip_max_deg: 5.0
@@ -210,25 +210,28 @@ experiments:
       cosine_Tmult: 2
 
 # ============================================================================
-# V23 实验矩阵 (泛化优先)
+# V23 实验矩阵 (泛化优先, 聚焦场景正则化)
 # ============================================================================
 #
-#   | 实验 | Joint | cam_drop | dp/hd    | intr_aug | scene_aug | LR sched | 对比目标    |
-#   |------|-------|----------|----------|----------|-----------|----------|-------------|
-#   | A1   | No    | 0        | 0.1/0.1  | 0%       | standard  | Step     | rot_only 对照|
-#   | A2   | Yes   | 0        | 0.1/0.1  | 0%       | standard  | Step     | joint 基线   |
-#   | B1   | Yes   | 0.15     | 0.1/0.1  | 0%       | standard  | Step     | +cam_drop    |
-#   | B2   | Yes   | 0        | 0.2/0.2  | 0%       | standard  | Step     | +强 dropout  |
-#   | B3   | Yes   | 0        | 0.1/0.1  | ±5%      | standard  | Step     | +intr_aug    |
-#   | B4   | Yes   | 0        | 0.1/0.1  | 0%       | strong    | Step     | +强增强      |
-#   | C1   | Yes   | 0.15     | 0.2/0.2  | ±5%      | strong    | Step     | 全组合       |
-#   | C2   | Yes   | 0.15     | 0.2/0.2  | ±5%      | strong    | CosineWR | 全组合+Cosine|
+# 内参分析结论: 训练集/测试集内参几乎完全相同 (fx 变化 <1%),
+# 泛化差距源于场景域偏移, 而非相机差异. 因此移除所有 intrinsic 相关实验.
+#
+#   | 实验 | Joint | cam_drop | dp/hd    | scene_aug     | LR sched | 对比目标      |
+#   |------|-------|----------|----------|---------------|----------|---------------|
+#   | A1   | No    | 0        | 0.1/0.1  | standard      | Step     | rot_only 对照 |
+#   | A2   | Yes   | 0        | 0.1/0.1  | standard      | Step     | joint 基线    |
+#   | B1   | Yes   | 0.15     | 0.1/0.1  | standard      | Step     | +cam_drop     |
+#   | B2   | Yes   | 0        | 0.2/0.2  | standard      | Step     | +强 dropout   |
+#   | B3   | Yes   | 0        | 0.1/0.1  | strong_pc     | Step     | +强点云增强   |
+#   | B4   | Yes   | 0        | 0.1/0.1  | strong_color  | Step     | +强色彩增强   |
+#   | C1   | Yes   | 0.15     | 0.2/0.2  | strong_all    | Step     | 全组合        |
+#   | C2   | Yes   | 0.15     | 0.2/0.2  | strong_all    | CosineWR | 全组合+Cosine |
 #
 # 关键对比链:
 #   1. rot_only vs joint:    A1 vs A2 (核心: joint 是否泛化更好)
 #   2. cam_drop 效果:         A2 vs B1
 #   3. dropout 强度:          A2 vs B2
-#   4. intrinsic_aug 效果:    A2 vs B3
-#   5. scene_aug 强度:        A2 vs B4
+#   4. 点云增强效果:          A2 vs B3
+#   5. 色彩增强效果:          A2 vs B4
 #   6. 全组合 vs 基线:        A2 vs C1
 #   7. LR schedule 效果:      C1 vs C2

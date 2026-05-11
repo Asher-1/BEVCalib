@@ -1,0 +1,44 @@
+# V22 intrinsic_input 消融评估
+#
+# 来源: batch8_train_all_v22_intrinsic_input.yaml
+#   v22_intr_input, v22_intr_input_aug, v22_baseline
+#
+# 模型架构参数 (含 intrinsic_input) 由 evaluate_checkpoint.py 从 checkpoint 自动检测；
+# YAML 仅需路径类字段与 bev_zbound_step。若要强制覆盖 checkpoint，再在条目中写明对应字段。
+#
+# 用法:
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_intrinsic_input.yaml
+#   HF_HUB_OFFLINE=1 python run_generalization_eval.py --config configs/eval_v22_intrinsic_input.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v22_intrinsic_input"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v22_intrinsic_input"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v22_intr_input"
+    dir_name: "model_small_5deg_v22_intr_input"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "intrinsic_input head + scene aug, no intrinsic aug"
+
+  - label: "v22_intr_input_aug"
+    dir_name: "model_small_5deg_v22_intr_input_aug"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "intrinsic_input + intrinsic aug (±3%)"
+
+  - label: "v22_baseline"
+    dir_name: "model_small_5deg_v22_baseline"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "no intrinsic_input, scene aug only"

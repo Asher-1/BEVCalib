@@ -17,7 +17,7 @@ from collections import defaultdict
 import numpy as np
 import random
 from pathlib import Path
-from tools import generate_single_perturbation_from_T, augment_gt_pitch_flip
+from tools import generate_single_perturbation_from_T, augment_gt_pitch_flip, augment_mount_jitter
 import shutil
 import cv2
 import os
@@ -371,6 +371,8 @@ def parse_args():
     parser.add_argument("--min_valid_ratio", type=float, default=0.9, help="最低有效帧比例阈值 (0.0-1.0)")
     parser.add_argument("--max_frames_per_seq", type=int, default=None, help="每个序列最大帧数 (均匀采样), None=使用全部帧")
     parser.add_argument("--sample_step", type=int, default=None, help="采样步长 (每隔N帧取1帧), 与max_frames_per_seq互斥")
+    parser.add_argument("--pose_aware_sampling", action="store_true", help="启用基于Pose的智能去冗余采样")
+    parser.add_argument("--poses_dir", type=str, default="", help="Pose文件目录 (KITTI格式)")
     # 可视化参数
     parser.add_argument("--vis_freq", type=int, default=40, help="训练可视化频率 (每多少个batch可视化一次)")
     parser.add_argument("--vis_samples", type=int, default=3, help="每次可视化的样本数")
@@ -391,8 +393,14 @@ def parse_args():
                         help="Roll,Pitch,Yaw weights for axis loss (default: 3.0,1.5,1.0)")
     parser.add_argument("--use_geodesic_loss", type=int, default=0,
                         help="Use SO(3) geodesic loss instead of quaternion distance (1=enable)")
+    parser.add_argument("--use_balanced_axis_loss", type=int, default=0,
+                        help="Use balanced Huber axis loss instead of weighted axis loss (1=enable)")
     parser.add_argument("--use_mlp_head", type=int, default=1,
                         help="Use 3-layer MLP regression head (1=MLP, 0=single Linear)")
+    parser.add_argument("--use_pitch_branch", type=int, default=0,
+                        help="Enable front-view Pitch branch for Z-aware Pitch prediction (1=enable)")
+    parser.add_argument("--pitch_aux_weight", type=float, default=0.3,
+                        help="Auxiliary pitch loss weight (only when use_pitch_branch=1)")
     parser.add_argument("--drop_path_rate", type=float, default=0.1,
                         help="Stochastic depth rate for transformer layers")
     parser.add_argument("--head_dropout", type=float, default=0.1,
@@ -419,10 +427,13 @@ def parse_args():
                         choices=["sum", "mean"],
                         help="Scatter voxelization reduce: sum(match hard) or mean(dr_voxelization style)")
     parser.add_argument("--fuser_type", type=str, default="concat",
-                        choices=["concat", "diff"],
-                        help="BEV fuser: concat(ConvFuser) or diff(BEVDiffFuser with difference map)")
+                        choices=["concat", "diff", "diff_v2"],
+                        help="BEV fuser: concat(ConvFuser) / diff(BEVDiffFuser) / diff_v2(BEVDiffFuser with cam-drop-aware dual path)")
     parser.add_argument("--cam_drop_prob", type=float, default=0.0,
                         help="Camera branch dropout probability during training (0=disabled)")
+    parser.add_argument("--cam_drop_mode", type=str, default="zero",
+                        choices=["zero", "noise"],
+                        help="Camera dropout mode: zero(hard zeros) / noise(Gaussian noise at 0.1*std)")
     parser.add_argument("--intrinsic_input", action="store_true", default=False,
                         help="Feed normalized intrinsics (fx,fy,cx,cy) to prediction head")
     parser.add_argument("--lr_schedule", type=str, default="step",
@@ -432,6 +443,51 @@ def parse_args():
                         help="Linear warmup epochs")
     parser.add_argument("--backbone_lr_scale", type=float, default=0.1,
                         help="LR multiplier for pretrained backbone (SwinT)")
+    parser.add_argument("--backbone_warmup_epochs", type=int, default=0,
+                        help="Gradually increase backbone LR from 1%% to 100%% over N epochs (0=disabled)")
+    parser.add_argument("--augment_mount_jitter_prob", type=float, default=0.0,
+                        help="Probability of applying mount jitter to GT extrinsics (0=disabled). "
+                             "Simulates diverse camera installations for domain generalization.")
+    parser.add_argument("--augment_mount_jitter_rot_sigma", type=float, default=0.5,
+                        help="Std of mount jitter rotation per axis in degrees (default: 0.5)")
+    parser.add_argument("--augment_mount_jitter_trans_sigma", type=float, default=0.01,
+                        help="Std of mount jitter translation per axis in meters (default: 0.01)")
+    parser.add_argument("--use_contrastive_extrinsic", type=int, default=0,
+                        help="Enable contrastive extrinsic embedding head. "
+                             "Forces BEV diff map to encode geometric offset, not scene content.")
+    parser.add_argument("--contrastive_weight", type=float, default=0.1,
+                        help="Weight of contrastive extrinsic loss (default: 0.1)")
+    parser.add_argument("--bev_instance_norm", type=int, default=0,
+                        help="Apply InstanceNorm2d to camera BEV features before fusion "
+                             "(removes fixed FOV activation pattern, improves domain generalization)")
+    parser.add_argument("--domain_adversarial", type=int, default=0,
+                        help="Enable Domain Adversarial Training (DANN) to learn "
+                             "domain-invariant BEV features (1=enable)")
+    parser.add_argument("--domain_adversarial_weight", type=float, default=0.1,
+                        help="Weight of DANN domain classification loss (default: 0.1)")
+    parser.add_argument("--num_domains", type=int, default=0,
+                        help="Number of domain classes for DANN (0=auto-detect from dataset)")
+    parser.add_argument("--cam2bev_mode", type=str, default="lss", choices=["lss", "query"],
+                        help="Camera-to-BEV mode: 'lss' (LSS depth lifting, default) or "
+                             "'query' (BEVFormer-style deformable cross-attention, no depth)")
+    parser.add_argument("--backbone_type", type=str, default="swin", choices=["swin", "dinov2"],
+                        help="Image backbone: 'swin' (Swin-Tiny, default) or 'dinov2' (DINOv2)")
+    parser.add_argument("--backbone_variant", type=str, default="dinov2-small",
+                        choices=["dinov2-small", "dinov2-base"],
+                        help="DINOv2 variant (only used when --backbone_type=dinov2)")
+    parser.add_argument("--freeze_backbone", type=int, default=0,
+                        help="Freeze backbone weights, only train BEV layers (0/1)")
+    parser.add_argument("--backbone_freeze_layers", type=str, default=None,
+                        help="Partial freeze: e.g. '0:-2' freezes all blocks except last 2. "
+                             "Only effective when --freeze_backbone=1 and --backbone_type=dinov2")
+    parser.add_argument("--backbone_weights", type=str, default=None,
+                        help="Explicit path to backbone pretrained weights (.pth). "
+                             "If not set, auto-searches ckpt/checkpoints/ and torch.hub cache")
+    parser.add_argument("--layer_wise_lr_decay", type=float, default=1.0,
+                        help="Layer-wise LR decay factor for SwinT backbone (1.0=no decay, "
+                             "0.75=each deeper layer gets 0.75x more LR). Applied multiplicatively "
+                             "on top of backbone_lr_scale. E.g. 0.75 with 3 stages: "
+                             "stage0=0.56x, stage1=0.75x, stage2=1.0x backbone_lr")
     parser.add_argument("--cosine_T0", type=int, default=50,
                         help="CosineAnnealingWarmRestarts T_0 period")
     parser.add_argument("--cosine_Tmult", type=int, default=2,
@@ -573,11 +629,12 @@ class PreprocessedDataset(Dataset):
         result = self.dataset[idx]
         if result is None:
             return None
-        img, pcd, gt_transform, intrinsic = result
+        img, pcd, gt_transform, intrinsic = result[0], result[1], result[2], result[3]
+        extra = result[4:] if len(result) > 4 else ()
         if isinstance(img, np.ndarray) and img.shape[:2] == (self.target_size[1], self.target_size[0]):
-            return img, pcd, gt_transform, intrinsic
+            return (img, pcd, gt_transform, intrinsic) + extra
         resized_img, new_intrinsic = crop_and_resize(img, self.target_size, intrinsic, self.crop)
-        return resized_img, pcd, gt_transform, new_intrinsic
+        return (resized_img, pcd, gt_transform, new_intrinsic) + extra
 
 
 def collate_fn(batch):
@@ -599,6 +656,10 @@ def collate_fn(batch):
             pc = np.concatenate([pc, np.full((max_num_points - pc.shape[0], pc.shape[1]), 999999)], axis=0)
         pcs.append(pc)
 
+    has_domain_ids = len(batch[0]) > 4
+    if has_domain_ids:
+        domain_ids = [item[4] for item in batch]
+        return imgs, pcs, masks, gt_T_to_camera, intrinsics, domain_ids
     return imgs, pcs, masks, gt_T_to_camera, intrinsics
 
 def _build_ckpt_metadata(model, args):
@@ -689,7 +750,10 @@ def main():
         if args.use_custom_dataset:
             dataset = CustomDataset(dataset_root, target_size=target_size,
                                     max_frames_per_seq=args.max_frames_per_seq,
-                                    sample_step=args.sample_step)
+                                    sample_step=args.sample_step,
+                                    pose_aware_sampling=args.pose_aware_sampling,
+                                    poses_dir=args.poses_dir or None,
+                                    return_seq_id=args.domain_adversarial > 0)
         else:
             if is_main:
                 print("使用 KittiDataset")
@@ -951,8 +1015,22 @@ def main():
     
     enable_axis_loss = args.enable_axis_loss > 0
     use_geodesic_loss = args.use_geodesic_loss > 0
+    if args.use_balanced_axis_loss > 0 and not enable_axis_loss:
+        if is_main:
+            tprint("WARNING: --use_balanced_axis_loss requires --enable_axis_loss; "
+                   "forcing enable_axis_loss=True")
+        enable_axis_loss = True
     use_mlp_head = args.use_mlp_head > 0
     axis_weights_tuple = tuple(float(x) for x in args.axis_weights.split(','))
+    _num_domains = args.num_domains
+    if args.domain_adversarial > 0 and _num_domains == 0:
+        raw_ds = dataset
+        if hasattr(raw_ds, 'num_domains'):
+            _num_domains = raw_ds.num_domains
+        else:
+            _num_domains = 21
+        if is_main:
+            tprint(f"DANN: auto-detected {_num_domains} domains from dataset")
     use_foundation_depth = args.use_foundation_depth > 0
     fd_mode = args.fd_mode if use_foundation_depth else "replace"
     if is_main and use_foundation_depth:
@@ -979,7 +1057,23 @@ def main():
             scatter_reduce=args.scatter_reduce,
             fuser_type=args.fuser_type,
             cam_drop_prob=args.cam_drop_prob,
+            cam_drop_mode=args.cam_drop_mode,
             intrinsic_input=args.intrinsic_input,
+            use_pitch_branch=args.use_pitch_branch > 0,
+            pitch_aux_weight=args.pitch_aux_weight,
+            bev_instance_norm=args.bev_instance_norm > 0,
+            use_contrastive_extrinsic=args.use_contrastive_extrinsic > 0,
+            contrastive_weight=args.contrastive_weight,
+            use_balanced_axis_loss=args.use_balanced_axis_loss > 0,
+            domain_adversarial=args.domain_adversarial > 0,
+            domain_adversarial_weight=args.domain_adversarial_weight,
+            num_domains=_num_domains,
+            cam2bev_mode=args.cam2bev_mode,
+            backbone_type=args.backbone_type,
+            backbone_variant=args.backbone_variant,
+            freeze_backbone=args.freeze_backbone > 0,
+            freeze_layers=args.backbone_freeze_layers,
+            backbone_weights=args.backbone_weights,
         ).to(device)
 
     if args.pretrain_ckpt is not None:
@@ -1002,10 +1096,16 @@ def main():
                 tprint(f"torch.compile failed, falling back to eager mode: {e}")
     
     if use_ddp:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+        need_find_unused = (getattr(args, 'cam_drop_prob', 0) > 0
+                            or getattr(args, 'use_pitch_branch', 0) > 0
+                            or getattr(args, 'use_contrastive_extrinsic', 0) > 0
+                            or getattr(args, 'domain_adversarial', 0) > 0
+                            or getattr(args, 'cam2bev_mode', 'lss') == 'query'
+                            or getattr(args, 'backbone_type', 'swin') == 'dinov2')
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=need_find_unused)
         if is_main:
             tprint(f"Model wrapped with DistributedDataParallel on {world_size} GPUs "
-                   f"(find_unused_parameters=False)")
+                   f"(find_unused_parameters={need_find_unused})")
     
     raw_model = model.module if use_ddp else model
 
@@ -1017,12 +1117,21 @@ def main():
     head_params = []
     _backbone_param_set = set()
     _module_param_map = {}
+    _layer_wise_groups = {}
     for name, param in raw_model.named_parameters():
         if not param.requires_grad:
             continue
         if 'img_branch' in name or 'pc_branch' in name:
             backbone_params.append(param)
             _backbone_param_set.add(id(param))
+            if args.layer_wise_lr_decay < 1.0:
+                import re
+                m_layer = re.search(r'CamEncode\.model\.encoder\.layers\.(\d+)', name)
+                if m_layer:
+                    layer_idx = int(m_layer.group(1))
+                    _layer_wise_groups.setdefault(layer_idx, []).append(param)
+                else:
+                    _layer_wise_groups.setdefault(-1, []).append(param)
         else:
             head_params.append(param)
         mod = name.split('.')[0]
@@ -1047,14 +1156,36 @@ def main():
         return bb_sq ** 0.5, hd_sq ** 0.5, {m: v ** 0.5 for m, v in mod_sq.items()}
 
     backbone_lr = args.lr * args.backbone_lr_scale
-    optimizer = torch.optim.AdamW([
-        {'params': backbone_params, 'lr': backbone_lr},
-        {'params': head_params, 'lr': args.lr},
-    ], weight_decay=args.wd)
+
+    if args.layer_wise_lr_decay < 1.0 and _layer_wise_groups:
+        max_layer = max(k for k in _layer_wise_groups if k >= 0) if any(k >= 0 for k in _layer_wise_groups) else 0
+        param_groups = []
+        for layer_idx in sorted(_layer_wise_groups.keys()):
+            if layer_idx < 0:
+                depth = 0
+            else:
+                depth = max_layer - layer_idx
+            layer_lr = backbone_lr * (args.layer_wise_lr_decay ** depth)
+            param_groups.append({'params': _layer_wise_groups[layer_idx], 'lr': layer_lr})
+        param_groups.append({'params': head_params, 'lr': args.lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=args.wd)
+        _backbone_group_count = len(param_groups) - 1
+    else:
+        optimizer = torch.optim.AdamW([
+            {'params': backbone_params, 'lr': backbone_lr},
+            {'params': head_params, 'lr': args.lr},
+        ], weight_decay=args.wd)
+        _backbone_group_count = 1
 
     if is_main:
         tprint(f"Differential LR: backbone={backbone_lr:.2e} ({len(backbone_params)} params), "
                f"heads={args.lr:.2e} ({len(head_params)} params)")
+        if args.layer_wise_lr_decay < 1.0 and _layer_wise_groups:
+            for i, pg in enumerate(optimizer.param_groups[:-1]):
+                tprint(f"  Layer group {i}: lr={pg['lr']:.2e} ({len(pg['params'])} params)")
+        if args.backbone_warmup_epochs > 0:
+            tprint(f"Backbone warmup: {args.backbone_warmup_epochs} epochs "
+                   f"(1%→100% of backbone_lr={backbone_lr:.2e})")
 
     scheduler = None
     scheduler_choice = args.scheduler > 0
@@ -1261,6 +1392,28 @@ def main():
         if train_sampler is not None and hasattr(train_sampler, 'set_epoch'):
             train_sampler.set_epoch(epoch)
         model.train()
+        if args.domain_adversarial > 0:
+            raw_model._dann_epoch_ratio = epoch / max(num_epochs - 1, 1)
+
+        if args.backbone_warmup_epochs > 0:
+            if epoch < args.backbone_warmup_epochs:
+                warmup_denom = max(1, args.backbone_warmup_epochs - 1)
+                warmup_factor = 0.01 + 0.99 * (epoch / warmup_denom)
+            else:
+                warmup_factor = 1.0
+            for gi in range(_backbone_group_count):
+                base_lr = optimizer.param_groups[gi].get('_base_lr',
+                    optimizer.param_groups[gi]['lr'] if epoch == 0 else
+                    optimizer.param_groups[gi].get('_base_lr', backbone_lr))
+                if epoch == 0:
+                    optimizer.param_groups[gi]['_base_lr'] = optimizer.param_groups[gi]['lr']
+                    base_lr = optimizer.param_groups[gi]['lr']
+                optimizer.param_groups[gi]['lr'] = base_lr * warmup_factor
+            if is_main and (epoch == 0 or epoch == args.backbone_warmup_epochs - 1
+                            or epoch == args.backbone_warmup_epochs):
+                tprint(f"  Backbone warmup: factor={warmup_factor:.3f}, "
+                       f"backbone_lr={optimizer.param_groups[0]['lr']:.2e}")
+
         train_loss = {}
         for key in epoch_pose_errors:
             epoch_pose_errors[key] = 0
@@ -1288,10 +1441,21 @@ def main():
             if batch_data is None:
                 t_iter_start = time.time()
                 continue
-            imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
+            if len(batch_data) == 6:
+                imgs, pcs, masks, gt_T_to_camera, intrinsics, domain_ids_list = batch_data
+            else:
+                imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
+                domain_ids_list = None
 
             t_prep_start = time.time()
             gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
+            if args.augment_mount_jitter_prob > 0:
+                gt_T_to_camera_np = augment_mount_jitter(
+                    gt_T_to_camera_np,
+                    prob=args.augment_mount_jitter_prob,
+                    rotation_sigma_deg=args.augment_mount_jitter_rot_sigma,
+                    translation_sigma_m=args.augment_mount_jitter_trans_sigma,
+                )
             _sign_flip_p = getattr(args, 'augment_pitch_sign_flip_prob', 0.0)
             if args.augment_pitch_flip_prob > 0 or _sign_flip_p > 0:
                 gt_T_to_camera_np = augment_gt_pitch_flip(
@@ -1359,6 +1523,9 @@ def main():
             B_cur = gt_T_to_camera_t.shape[0]
             post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
             intrinsic_matrix = torch.from_numpy(np.array(intrinsics, dtype=np.float32)).to(device, non_blocking=True)
+            domain_ids_t = None
+            if domain_ids_list is not None:
+                domain_ids_t = torch.tensor(domain_ids_list, dtype=torch.long, device=device)
             if args.augment_intrinsic > 0:
                 _cxcy = getattr(args, 'augment_intrinsic_cxcy', 0.0)
                 intrinsic_matrix = _augment_intrinsics(
@@ -1380,7 +1547,7 @@ def main():
             with sync_ctx:
                 try:
                     with autocast(enabled=use_amp, dtype=amp_dtype):
-                        T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice)
+                        T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice, domain_ids=domain_ids_t)
                         total_loss = loss["total_loss"]
                         if fd_mode == "supervision" and use_foundation_depth:
                             ds_loss = raw_model.img_branch.get_depth_supervision_loss(alpha=args.depth_sup_alpha)
@@ -1784,7 +1951,7 @@ def main():
                     for batch_index, batch_data in enumerate(val_loader):
                         if batch_index >= 5 or batch_data is None:
                             break
-                        imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
+                        imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data[:5]
                         
                         gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
                         init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
@@ -1958,7 +2125,7 @@ def main():
                 for batch_index, batch_data in enumerate(val_loader):
                     if batch_data is None:
                         continue
-                    imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data
+                    imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data[:5]
                     gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
                     init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
                         gt_T_to_camera_np, angle_range_deg=eval_angle_range, trans_range=eval_trans_range,

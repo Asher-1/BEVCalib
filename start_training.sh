@@ -41,6 +41,10 @@
 #   --augment_pitch_flip_prob P  GT pitch X轴随机扰动概率 (默认: 0.0=禁用)
 #   --augment_pitch_flip_max_deg D  pitch扰动最大旋转角 (默认: 2.0°)
 #   --augment_pitch_sign_flip_prob P  GT pitch符号翻转概率 (默认: 0.0=禁用, 精确反转pitch角)
+#   --backbone_warmup_epochs N 骨干网络LR渐进解冻epoch数 (默认: 0=禁用)
+#   --layer_wise_lr_decay F  SwinT层级LR衰减因子 (默认: 1.0=无衰减, 0.65=推荐)
+#   --use_pitch_branch 0/1   启用双流Pitch分支 (默认: 0)
+#   --pitch_aux_weight W     Pitch辅助损失权重 (默认: 0.3)
 #   --sample_step N         采样步长 (每隔N帧取1帧, 与--max_frames_per_seq互斥)
 #   --early_stopping_patience N 早停耐心值 (默认: 0=禁用)
 #   --seed N               全局随机种子 (默认: 42)
@@ -254,6 +258,16 @@ AUGMENT_COLOR_JITTER=""
 AUGMENT_INTRINSIC=""
 AUGMENT_INTRINSIC_CXCY=""
 INTRINSIC_INPUT=""
+BACKBONE_WARMUP_EPOCHS=""
+LAYER_WISE_LR_DECAY=""
+USE_PITCH_BRANCH=""
+PITCH_AUX_WEIGHT=""
+BEV_INSTANCE_NORM=""
+AUGMENT_MOUNT_JITTER_PROB=""
+AUGMENT_MOUNT_JITTER_ROT_SIGMA=""
+AUGMENT_MOUNT_JITTER_TRANS_SIGMA=""
+USE_CONTRASTIVE_EXTRINSIC=""
+CONTRASTIVE_WEIGHT=""
 EVAL_ANGLE=""
 EARLY_STOPPING_PATIENCE=""
 SEED=""
@@ -359,6 +373,44 @@ while [[ $# -gt 0 ]]; do
             AUGMENT_PITCH_FLIP_MAX_DEG="$2"; shift 2 ;;
         --augment_pitch_sign_flip_prob)
             AUGMENT_PITCH_SIGN_FLIP_PROB="$2"; shift 2 ;;
+        --backbone_warmup_epochs)
+            BACKBONE_WARMUP_EPOCHS="$2"; shift 2 ;;
+        --layer_wise_lr_decay)
+            LAYER_WISE_LR_DECAY="$2"; shift 2 ;;
+        --use_pitch_branch)
+            USE_PITCH_BRANCH="$2"; shift 2 ;;
+        --pitch_aux_weight)
+            PITCH_AUX_WEIGHT="$2"; shift 2 ;;
+        --bev_instance_norm)
+            BEV_INSTANCE_NORM="$2"; shift 2 ;;
+        --augment_mount_jitter_prob)
+            AUGMENT_MOUNT_JITTER_PROB="$2"; shift 2 ;;
+        --augment_mount_jitter_rot_sigma)
+            AUGMENT_MOUNT_JITTER_ROT_SIGMA="$2"; shift 2 ;;
+        --augment_mount_jitter_trans_sigma)
+            AUGMENT_MOUNT_JITTER_TRANS_SIGMA="$2"; shift 2 ;;
+        --use_contrastive_extrinsic)
+            USE_CONTRASTIVE_EXTRINSIC="$2"; shift 2 ;;
+        --contrastive_weight)
+            CONTRASTIVE_WEIGHT="$2"; shift 2 ;;
+        --domain_adversarial)
+            DOMAIN_ADVERSARIAL="$2"; shift 2 ;;
+        --domain_adversarial_weight)
+            DOMAIN_ADVERSARIAL_WEIGHT="$2"; shift 2 ;;
+        --num_domains)
+            NUM_DOMAINS="$2"; shift 2 ;;
+        --cam2bev_mode)
+            CAM2BEV_MODE="$2"; shift 2 ;;
+        --backbone_type)
+            BACKBONE_TYPE="$2"; shift 2 ;;
+        --backbone_variant)
+            BACKBONE_VARIANT="$2"; shift 2 ;;
+        --freeze_backbone)
+            FREEZE_BACKBONE="$2"; shift 2 ;;
+        --backbone_freeze_layers)
+            BACKBONE_FREEZE_LAYERS="$2"; shift 2 ;;
+        --backbone_weights)
+            BACKBONE_WEIGHTS="$2"; shift 2 ;;
         --voxel_mode)
             VOXEL_MODE="$2"; shift 2 ;;
         --to_bev_mode)
@@ -369,6 +421,8 @@ while [[ $# -gt 0 ]]; do
             FUSER_TYPE="$2"; shift 2 ;;
         --cam_drop_prob)
             CAM_DROP_PROB="$2"; shift 2 ;;
+        --cam_drop_mode)
+            CAM_DROP_MODE="$2"; shift 2 ;;
         --intrinsic_input)
             INTRINSIC_INPUT="--intrinsic_input"
             shift
@@ -395,6 +449,8 @@ while [[ $# -gt 0 ]]; do
             SAVE_CKPT_PER_EPOCHES="$2"; shift 2 ;;
         --use_geodesic_loss)
             USE_GEODESIC_LOSS="$2"; shift 2 ;;
+        --use_balanced_axis_loss)
+            USE_BALANCED_AXIS_LOSS="$2"; shift 2 ;;
         --use_mlp_head)
             USE_MLP_HEAD="$2"; shift 2 ;;
         --use_deformable)
@@ -413,6 +469,12 @@ while [[ $# -gt 0 ]]; do
             MAX_FRAMES_PER_SEQ="$2"; shift 2 ;;
         --sample_step)
             SAMPLE_STEP="$2"; shift 2 ;;
+        --pose_aware_sampling)
+            POSE_AWARE_SAMPLING="--pose_aware_sampling"
+            shift
+            ;;
+        --poses_dir)
+            POSES_DIR="$2"; shift 2 ;;
         --eval_epoches)
             EVAL_EPOCHES="$2"; shift 2 ;;
         --grad_accum_steps)
@@ -518,7 +580,9 @@ while [[ $# -gt 0 ]]; do
             echo "          --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
             echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
             echo "          --rdzv_timeout SECONDS, --use_geodesic_loss 0/1, --use_mlp_head 0/1,"
-            echo "          --use_deformable 0/1, --bev_pool_factor N --use_foundation_depth 0/1"
+            echo "          --use_deformable 0/1, --bev_pool_factor N, --use_foundation_depth 0/1,"
+            echo "          --backbone_warmup_epochs N, --layer_wise_lr_decay F,"
+            echo "          --use_pitch_branch 0/1, --pitch_aux_weight W"
             exit 1
             ;;
     esac
@@ -1005,6 +1069,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
     [ -n "$SAVE_CKPT_PER_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --save_ckpt_per_epoches $SAVE_CKPT_PER_EPOCHES"
     [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
+    [ -n "$USE_BALANCED_AXIS_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_balanced_axis_loss $USE_BALANCED_AXIS_LOSS"
     [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
     [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
     [ -n "$BEV_POOL_FACTOR" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_pool_factor $BEV_POOL_FACTOR"
@@ -1014,6 +1079,8 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
     [ -n "$SAMPLE_STEP" ] && OPTIM_ARGS="$OPTIM_ARGS --sample_step $SAMPLE_STEP"
+    [ -n "$POSE_AWARE_SAMPLING" ] && OPTIM_ARGS="$OPTIM_ARGS $POSE_AWARE_SAMPLING"
+    [ -n "$POSES_DIR" ] && OPTIM_ARGS="$OPTIM_ARGS --poses_dir $POSES_DIR"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
     [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
     [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
@@ -1021,6 +1088,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
     [ -n "$FUSER_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --fuser_type $FUSER_TYPE"
     [ -n "$CAM_DROP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --cam_drop_prob $CAM_DROP_PROB"
+    [ -n "$CAM_DROP_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --cam_drop_mode $CAM_DROP_MODE"
     [ -n "$INTRINSIC_INPUT" ] && OPTIM_ARGS="$OPTIM_ARGS $INTRINSIC_INPUT"
     [ -n "$ENABLE_VIS" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_vis $ENABLE_VIS"
     [ -n "$VIS_FREQ" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_freq $VIS_FREQ"
@@ -1039,6 +1107,25 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$WEIGHT_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --wd $WEIGHT_DECAY"
     [ -n "$TARGET_WIDTH" ] && OPTIM_ARGS="$OPTIM_ARGS --target_width $TARGET_WIDTH"
     [ -n "$TARGET_HEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --target_height $TARGET_HEIGHT"
+    [ -n "$BACKBONE_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_warmup_epochs $BACKBONE_WARMUP_EPOCHS"
+    [ -n "$LAYER_WISE_LR_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --layer_wise_lr_decay $LAYER_WISE_LR_DECAY"
+    [ -n "$USE_PITCH_BRANCH" ] && OPTIM_ARGS="$OPTIM_ARGS --use_pitch_branch $USE_PITCH_BRANCH"
+    [ -n "$PITCH_AUX_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --pitch_aux_weight $PITCH_AUX_WEIGHT"
+    [ -n "$BEV_INSTANCE_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_instance_norm $BEV_INSTANCE_NORM"
+    [ -n "$AUGMENT_MOUNT_JITTER_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_mount_jitter_prob $AUGMENT_MOUNT_JITTER_PROB"
+    [ -n "$AUGMENT_MOUNT_JITTER_ROT_SIGMA" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_mount_jitter_rot_sigma $AUGMENT_MOUNT_JITTER_ROT_SIGMA"
+    [ -n "$AUGMENT_MOUNT_JITTER_TRANS_SIGMA" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_mount_jitter_trans_sigma $AUGMENT_MOUNT_JITTER_TRANS_SIGMA"
+    [ -n "$USE_CONTRASTIVE_EXTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --use_contrastive_extrinsic $USE_CONTRASTIVE_EXTRINSIC"
+    [ -n "$CONTRASTIVE_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --contrastive_weight $CONTRASTIVE_WEIGHT"
+    [ -n "$DOMAIN_ADVERSARIAL" ] && OPTIM_ARGS="$OPTIM_ARGS --domain_adversarial $DOMAIN_ADVERSARIAL"
+    [ -n "$DOMAIN_ADVERSARIAL_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --domain_adversarial_weight $DOMAIN_ADVERSARIAL_WEIGHT"
+    [ -n "$NUM_DOMAINS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_domains $NUM_DOMAINS"
+    [ -n "$CAM2BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --cam2bev_mode $CAM2BEV_MODE"
+    [ -n "$BACKBONE_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_type $BACKBONE_TYPE"
+    [ -n "$BACKBONE_VARIANT" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_variant $BACKBONE_VARIANT"
+    [ -n "$FREEZE_BACKBONE" ] && OPTIM_ARGS="$OPTIM_ARGS --freeze_backbone $FREEZE_BACKBONE"
+    [ -n "$BACKBONE_FREEZE_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_freeze_layers $BACKBONE_FREEZE_LAYERS"
+    [ -n "$BACKBONE_WEIGHTS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_weights $BACKBONE_WEIGHTS"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
@@ -1152,6 +1239,7 @@ else
     [ -n "$NUM_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_epochs $NUM_EPOCHS"
     [ -n "$SAVE_CKPT_PER_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --save_ckpt_per_epoches $SAVE_CKPT_PER_EPOCHES"
     [ -n "$USE_GEODESIC_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_geodesic_loss $USE_GEODESIC_LOSS"
+    [ -n "$USE_BALANCED_AXIS_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_balanced_axis_loss $USE_BALANCED_AXIS_LOSS"
     [ -n "$USE_MLP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mlp_head $USE_MLP_HEAD"
     [ -n "$USE_DEFORMABLE" ] && OPTIM_ARGS="$OPTIM_ARGS --use_deformable $USE_DEFORMABLE"
     [ -n "$BEV_POOL_FACTOR" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_pool_factor $BEV_POOL_FACTOR"
@@ -1161,6 +1249,8 @@ else
     [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
     [ -n "$SAMPLE_STEP" ] && OPTIM_ARGS="$OPTIM_ARGS --sample_step $SAMPLE_STEP"
+    [ -n "$POSE_AWARE_SAMPLING" ] && OPTIM_ARGS="$OPTIM_ARGS $POSE_AWARE_SAMPLING"
+    [ -n "$POSES_DIR" ] && OPTIM_ARGS="$OPTIM_ARGS --poses_dir $POSES_DIR"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
     [ -n "$GRAD_ACCUM_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --grad_accum_steps $GRAD_ACCUM_STEPS"
     [ -n "$VOXEL_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --voxel_mode $VOXEL_MODE"
@@ -1168,6 +1258,7 @@ else
     [ -n "$SCATTER_REDUCE" ] && OPTIM_ARGS="$OPTIM_ARGS --scatter_reduce $SCATTER_REDUCE"
     [ -n "$FUSER_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --fuser_type $FUSER_TYPE"
     [ -n "$CAM_DROP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --cam_drop_prob $CAM_DROP_PROB"
+    [ -n "$CAM_DROP_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --cam_drop_mode $CAM_DROP_MODE"
     [ -n "$INTRINSIC_INPUT" ] && OPTIM_ARGS="$OPTIM_ARGS $INTRINSIC_INPUT"
     [ -n "$ENABLE_VIS" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_vis $ENABLE_VIS"
     [ -n "$VIS_FREQ" ] && OPTIM_ARGS="$OPTIM_ARGS --vis_freq $VIS_FREQ"
@@ -1186,6 +1277,25 @@ else
     [ -n "$WEIGHT_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --wd $WEIGHT_DECAY"
     [ -n "$TARGET_WIDTH" ] && OPTIM_ARGS="$OPTIM_ARGS --target_width $TARGET_WIDTH"
     [ -n "$TARGET_HEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --target_height $TARGET_HEIGHT"
+    [ -n "$BACKBONE_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_warmup_epochs $BACKBONE_WARMUP_EPOCHS"
+    [ -n "$LAYER_WISE_LR_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --layer_wise_lr_decay $LAYER_WISE_LR_DECAY"
+    [ -n "$USE_PITCH_BRANCH" ] && OPTIM_ARGS="$OPTIM_ARGS --use_pitch_branch $USE_PITCH_BRANCH"
+    [ -n "$PITCH_AUX_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --pitch_aux_weight $PITCH_AUX_WEIGHT"
+    [ -n "$BEV_INSTANCE_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_instance_norm $BEV_INSTANCE_NORM"
+    [ -n "$AUGMENT_MOUNT_JITTER_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_mount_jitter_prob $AUGMENT_MOUNT_JITTER_PROB"
+    [ -n "$AUGMENT_MOUNT_JITTER_ROT_SIGMA" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_mount_jitter_rot_sigma $AUGMENT_MOUNT_JITTER_ROT_SIGMA"
+    [ -n "$AUGMENT_MOUNT_JITTER_TRANS_SIGMA" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_mount_jitter_trans_sigma $AUGMENT_MOUNT_JITTER_TRANS_SIGMA"
+    [ -n "$USE_CONTRASTIVE_EXTRINSIC" ] && OPTIM_ARGS="$OPTIM_ARGS --use_contrastive_extrinsic $USE_CONTRASTIVE_EXTRINSIC"
+    [ -n "$CONTRASTIVE_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --contrastive_weight $CONTRASTIVE_WEIGHT"
+    [ -n "$DOMAIN_ADVERSARIAL" ] && OPTIM_ARGS="$OPTIM_ARGS --domain_adversarial $DOMAIN_ADVERSARIAL"
+    [ -n "$DOMAIN_ADVERSARIAL_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --domain_adversarial_weight $DOMAIN_ADVERSARIAL_WEIGHT"
+    [ -n "$NUM_DOMAINS" ] && OPTIM_ARGS="$OPTIM_ARGS --num_domains $NUM_DOMAINS"
+    [ -n "$CAM2BEV_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --cam2bev_mode $CAM2BEV_MODE"
+    [ -n "$BACKBONE_TYPE" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_type $BACKBONE_TYPE"
+    [ -n "$BACKBONE_VARIANT" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_variant $BACKBONE_VARIANT"
+    [ -n "$FREEZE_BACKBONE" ] && OPTIM_ARGS="$OPTIM_ARGS --freeze_backbone $FREEZE_BACKBONE"
+    [ -n "$BACKBONE_FREEZE_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_freeze_layers $BACKBONE_FREEZE_LAYERS"
+    [ -n "$BACKBONE_WEIGHTS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_weights $BACKBONE_WEIGHTS"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"

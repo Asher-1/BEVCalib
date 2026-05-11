@@ -1,58 +1,94 @@
 #!/bin/bash
 # =============================================================================
-# BEVCalib 训练停止脚本
-# 用法: ./stop_training.sh [--force]
+# BEVCalib 训练停止脚本 — 彻底停止所有训练（含批量队列和重试）
+#
+# 用法:
+#   ./stop_training.sh           # 交互确认后停止
+#   ./stop_training.sh --force   # 直接停止，不确认
+#   ./stop_training.sh --status  # 仅查看状态，不停止
 # =============================================================================
 
+set -euo pipefail
+
 FORCE=0
-if [ "$1" == "--force" ] || [ "$1" == "-f" ]; then
-    FORCE=1
-fi
+STATUS_ONLY=0
+case "${1:-}" in
+    --force|-f)  FORCE=1 ;;
+    --status|-s) STATUS_ONLY=1 ;;
+esac
+
+# 所有需要匹配的进程模式（父进程在前，子进程在后）
+PATTERNS=(
+    "batch_train.sh"
+    "start_training.sh"
+    "train_universal.sh"
+    "train_B26A.sh"
+    "torchrun"
+    "train_kitti.py"
+    "tensorboard.*--logdir"
+)
+GREP_PATTERN=$(IFS='|'; echo "${PATTERNS[*]}")
 
 echo "========================================"
-echo "BEVCalib 训练停止"
+echo "BEVCalib 训练进程管理"
 echo "========================================"
 echo ""
 
-# 查找训练进程
-echo "查找训练进程..."
-TRAIN_PIDS=$(ps aux | grep -E "train_kitti.py" | grep -v grep | awk '{print $2}')
-TORCHRUN_PIDS=$(ps aux | grep -E "torchrun" | grep -v grep | awk '{print $2}')
-BASH_PIDS=$(ps aux | grep -E "train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep | awk '{print $2}')
-TB_PIDS=$(ps aux | grep -E "tensorboard.*--logdir" | grep -v grep | awk '{print $2}')
+# ── 1. 收集所有相关进程 ──
+collect_pids() {
+    local pattern="$1"
+    ps aux | grep -E "$pattern" | grep -v grep | awk '{print $2}' | sort -n
+}
 
-# 显示当前进程
-echo ""
-echo "当前训练进程:"
-ps aux | grep -E "train_kitti.py|torchrun|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep || echo "  无运行中的训练进程"
-if [ -n "$TB_PIDS" ] && [ "$TB_PIDS" != "" ]; then
+show_status() {
+    echo "── 当前训练进程 ──"
     echo ""
-    echo "TensorBoard 进程:"
-    ps aux | grep -E "tensorboard.*--logdir" | grep -v grep
-fi
-echo ""
 
-# 统计进程数量
-TRAIN_COUNT=$(echo "$TRAIN_PIDS" | grep -v "^$" | wc -l)
-TORCHRUN_COUNT=$(echo "$TORCHRUN_PIDS" | grep -v "^$" | wc -l)
-BASH_COUNT=$(echo "$BASH_PIDS" | grep -v "^$" | wc -l)
-TB_COUNT=$(echo "$TB_PIDS" | grep -v "^$" | wc -l)
-TOTAL_COUNT=$((TRAIN_COUNT + TORCHRUN_COUNT + BASH_COUNT + TB_COUNT))
+    local has_any=0
 
-if [ "$TOTAL_COUNT" -eq 0 ]; then
-    echo "✅ 没有找到运行中的训练进程"
+    for pat in "${PATTERNS[@]}"; do
+        local pids
+        pids=$(collect_pids "$pat" 2>/dev/null || true)
+        local count=0
+        if [ -n "$pids" ]; then
+            count=$(echo "$pids" | wc -l)
+        fi
+        if [ "$count" -gt 0 ]; then
+            has_any=1
+            printf "  %-30s %d 个进程\n" "$pat" "$count"
+        fi
+    done
+
+    if [ "$has_any" -eq 0 ]; then
+        echo "  ✅ 没有运行中的训练进程"
+        echo ""
+        echo "GPU 状态:"
+        nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv 2>/dev/null || echo "  无法获取GPU状态"
+        return 1
+    fi
+
+    echo ""
+    echo "── 进程详情 ──"
+    ps aux | grep -E "$GREP_PATTERN" | grep -v grep | \
+        awk '{printf "  PID=%-8s CPU=%5s MEM=%5s CMD=%s\n", $2, $3, $4, $11" "$12" "$13}' || true
+    echo ""
+    return 0
+}
+
+# ── 2. 显示状态 ──
+if ! show_status; then
     exit 0
 fi
 
-echo "找到 $TRAIN_COUNT 个 Python 训练进程"
-echo "找到 $TORCHRUN_COUNT 个 torchrun 进程"
-echo "找到 $BASH_COUNT 个 Bash 训练脚本进程"
-echo "找到 $TB_COUNT 个 TensorBoard 进程"
-echo ""
+if [ "$STATUS_ONLY" -eq 1 ]; then
+    echo "GPU 状态:"
+    nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv 2>/dev/null || echo "  无法获取GPU状态"
+    exit 0
+fi
 
-# 确认停止
+# ── 3. 确认 ──
 if [ "$FORCE" -eq 0 ]; then
-    echo "是否停止所有训练进程? (y/n)"
+    echo "是否停止所有训练进程（含批量队列和重试）? (y/n)"
     read -t 10 -p "> " CONFIRM || CONFIRM="n"
     if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
         echo "已取消"
@@ -61,80 +97,76 @@ if [ "$FORCE" -eq 0 ]; then
 fi
 
 echo ""
-echo "正在停止训练进程..."
+echo "正在停止所有训练进程..."
 
-# 停止 Python 训练进程
-if [ -n "$TRAIN_PIDS" ] && [ "$TRAIN_PIDS" != "" ]; then
-    for PID in $TRAIN_PIDS; do
-        if [ -n "$PID" ]; then
-            echo "  停止 Python 进程: $PID"
-            kill -TERM $PID 2>/dev/null || true
-        fi
+# ── 4. 先杀父进程（调度器），阻止新实验和重试 ──
+PARENT_PATTERNS=("batch_train.sh" "start_training.sh" "train_universal.sh" "train_B26A.sh")
+for pat in "${PARENT_PATTERNS[@]}"; do
+    local_pids=$(collect_pids "$pat" 2>/dev/null || true)
+    for pid in $local_pids; do
+        [ -z "$pid" ] && continue
+        echo "  [TERM] 停止调度进程: $pid ($pat)"
+        kill -TERM "$pid" 2>/dev/null || true
+        # 同时杀掉其所有子进程
+        pkill -TERM -P "$pid" 2>/dev/null || true
     done
-fi
+done
 
-# 停止 torchrun 进程
-if [ -n "$TORCHRUN_PIDS" ] && [ "$TORCHRUN_PIDS" != "" ]; then
-    for PID in $TORCHRUN_PIDS; do
-        if [ -n "$PID" ]; then
-            echo "  停止 torchrun 进程: $PID"
-            kill -TERM $PID 2>/dev/null || true
-        fi
-    done
-fi
+sleep 1
 
-# 停止 Bash 脚本进程
-if [ -n "$BASH_PIDS" ] && [ "$BASH_PIDS" != "" ]; then
-    for PID in $BASH_PIDS; do
-        if [ -n "$PID" ]; then
-            echo "  停止 Bash 进程: $PID"
-            kill -TERM $PID 2>/dev/null || true
-        fi
-    done
-fi
+# ── 5. 杀 torchrun 及其子进程树 ──
+TORCHRUN_PIDS=$(collect_pids "torchrun" 2>/dev/null || true)
+for pid in $TORCHRUN_PIDS; do
+    [ -z "$pid" ] && continue
+    echo "  [TERM] 停止 torchrun: $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    pkill -TERM -P "$pid" 2>/dev/null || true
+done
 
-# 停止 TensorBoard 进程
-if [ -n "$TB_PIDS" ] && [ "$TB_PIDS" != "" ]; then
-    for PID in $TB_PIDS; do
-        if [ -n "$PID" ]; then
-            echo "  停止 TensorBoard: $PID"
-            kill -TERM $PID 2>/dev/null || true
-        fi
-    done
-fi
+# ── 6. 杀 train_kitti.py 工作进程 ──
+TRAIN_PIDS=$(collect_pids "train_kitti.py" 2>/dev/null || true)
+for pid in $TRAIN_PIDS; do
+    [ -z "$pid" ] && continue
+    echo "  [TERM] 停止训练进程: $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+done
 
-# 等待进程结束
+# ── 7. 杀 TensorBoard ──
+TB_PIDS=$(collect_pids "tensorboard.*--logdir" 2>/dev/null || true)
+for pid in $TB_PIDS; do
+    [ -z "$pid" ] && continue
+    echo "  [TERM] 停止 TensorBoard: $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+done
+
+# ── 8. 等待优雅退出 ──
 echo ""
-echo "等待进程结束..."
+echo "等待进程退出 (3s)..."
 sleep 3
 
-# 检查是否还有残留进程
-REMAINING=$(ps aux | grep -E "train_kitti.py|train_B26A.sh|train_universal.sh|start_training.sh" | grep -v grep | wc -l)
+# ── 9. 检查残留，强制杀死 ──
+REMAINING=$(ps aux | grep -E "$GREP_PATTERN" | grep -v grep | wc -l)
 
 if [ "$REMAINING" -gt 0 ]; then
-    echo "⚠️  还有 $REMAINING 个进程未停止，强制终止..."
-    pkill -9 -f "train_kitti.py" 2>/dev/null || true
-    pkill -9 -f "torchrun" 2>/dev/null || true
-    pkill -9 -f "train_B26A.sh" 2>/dev/null || true
-    pkill -9 -f "train_universal.sh" 2>/dev/null || true
-    pkill -9 -f "start_training.sh" 2>/dev/null || true
-    pkill -9 -f "tensorboard" 2>/dev/null || true
+    echo "⚠️  还有 $REMAINING 个进程未退出，强制终止 (SIGKILL)..."
+    for pat in "${PATTERNS[@]}"; do
+        pkill -9 -f "$pat" 2>/dev/null || true
+    done
     sleep 2
 fi
 
-# 最终检查
-FINAL=$(ps aux | grep -E "train_kitti.py|torchrun|train_B26A.sh|train_universal.sh|start_training.sh|tensorboard" | grep -v grep | wc -l)
+# ── 10. 最终验证 ──
+FINAL=$(ps aux | grep -E "$GREP_PATTERN" | grep -v grep | wc -l)
 
 echo ""
 if [ "$FINAL" -eq 0 ]; then
-    echo "✅ 所有训练进程已停止"
+    echo "✅ 所有训练进程已彻底停止（含批量队列和重试调度）"
 else
-    echo "❌ 仍有 $FINAL 个进程运行中，请手动检查"
-    ps aux | grep -E "train_kitti.py|torchrun|train_B26A.sh|train_universal.sh|start_training.sh|tensorboard" | grep -v grep
+    echo "❌ 仍有 $FINAL 个进程运行中，请手动检查:"
+    ps aux | grep -E "$GREP_PATTERN" | grep -v grep
 fi
 
 echo ""
 echo "GPU 状态:"
-nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv 2>/dev/null || echo "无法获取GPU状态"
+nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv 2>/dev/null || echo "  无法获取GPU状态"
 echo ""
-

@@ -1,5 +1,8 @@
 # spconv vs drcv 泛化对比评估
 #
+# 模型架构参数由 evaluate_checkpoint.py 从 checkpoint 自动检测；保留 use_drcv: 1 为显式 DRCV；
+# bev_zbound_step 须手写。
+#
 # 包含 8 个模型: 4 个新 spconv 实验 + 4 个已有 drcv 对照
 #
 # 目的:
@@ -38,12 +41,6 @@ models:
     dir_name: "model_small_5deg_spconv_z10_wt3"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
-    use_drcv: 0
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "spconv"
@@ -54,12 +51,7 @@ models:
     dir_name: "test_models2/model_small_5deg_v20_v8_z10_pitch_wt3_drcv"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v20-drcv"
@@ -76,12 +68,6 @@ models:
     dir_name: "model_small_5deg_spconv_z5_wt1"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
-    rotation_only: 1
-    use_drcv: 0
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 5
     version: "spconv"
@@ -92,12 +78,7 @@ models:
     dir_name: "test_models2/model_small_5deg_v20_v8_z10_drcv"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v20-drcv"
@@ -112,12 +93,6 @@ models:
     dir_name: "model_small_5deg_spconv_z10_wt3_fullaug"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
-    use_drcv: 0
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "spconv"
@@ -128,12 +103,7 @@ models:
     dir_name: "test_models2/model_small_5deg_v16_ultimate"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v16-drcv"
@@ -148,12 +118,6 @@ models:
     dir_name: "model_small_5deg_spconv_z10_wt3_signflip"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
-    use_drcv: 0
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "spconv"
@@ -164,12 +128,7 @@ models:
     dir_name: "test_models2/model_small_5deg_v16_pitch3_signflip"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "2.0"
-    rotation_only: 1
     use_drcv: 1
-    use_mlp_head: 0
-    voxel_mode: "scatter"
-    scatter_reduce: "mean"
-    to_bev_mode: "concat"
     angle_deg: 5
     z_voxels: 10
     version: "v16-drcv"

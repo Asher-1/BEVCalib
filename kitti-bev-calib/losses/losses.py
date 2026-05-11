@@ -191,6 +191,49 @@ class GeodesicRotationLoss(nn.Module):
         return angle.mean()
 
 
+class BalancedAxisRotationLoss(nn.Module):
+    """Balanced axis rotation loss with Huber smoothing per axis.
+
+    Instead of amplifying certain axes via static weights, this loss applies
+    Huber (smooth L1) loss per axis, capping the gradient for large errors.
+    This prevents the model from over-fitting to dominant-axis patterns in
+    the training set while still providing per-axis supervision.
+    """
+
+    def __init__(self, delta=0.02):
+        super().__init__()
+        self.delta = delta
+
+    @staticmethod
+    def _rotation_matrix_to_euler(R):
+        sy = torch.sqrt(R[:, 0, 0] ** 2 + R[:, 1, 0] ** 2)
+        singular = sy < 1e-6
+        roll  = torch.where(singular, torch.atan2(-R[:, 1, 2], R[:, 1, 1]),
+                            torch.atan2(R[:, 2, 1], R[:, 2, 2]))
+        pitch = torch.where(singular, torch.atan2(-R[:, 2, 0], sy),
+                            torch.atan2(-R[:, 2, 0], sy))
+        yaw   = torch.where(singular, torch.zeros_like(sy),
+                            torch.atan2(R[:, 1, 0], R[:, 0, 0]))
+        return torch.stack([roll, pitch, yaw], dim=1)
+
+    def forward(self, pred_rotation, gt_rotation):
+        pred_euler = self._rotation_matrix_to_euler(pred_rotation)
+        gt_euler   = self._rotation_matrix_to_euler(gt_rotation)
+
+        diff = torch.abs(pred_euler - gt_euler)
+        diff = torch.min(diff, 2 * torch.pi - diff)
+
+        per_axis = {
+            'roll':  diff[:, 0].mean(),
+            'pitch': diff[:, 1].mean(),
+            'yaw':   diff[:, 2].mean(),
+        }
+
+        loss = F.smooth_l1_loss(diff, torch.zeros_like(diff),
+                                beta=self.delta, reduction='mean')
+        return loss, per_axis
+
+
 class PC_reproj_loss(nn.Module):
     def __init__(self):
         super(PC_reproj_loss, self).__init__()
@@ -240,11 +283,13 @@ class realworld_loss(nn.Module):
                  l1 = False, rotation_only = False,
                  enable_axis_loss = False, weight_axis_rotation = 0.3,
                  axis_weights = (3.0, 1.5, 1.0),
-                 use_geodesic_loss = False):
+                 use_geodesic_loss = False,
+                 use_balanced_axis_loss = False):
         super(realworld_loss, self).__init__()
         self.rotation_only = rotation_only
         self.enable_axis_loss = enable_axis_loss
         self.use_geodesic_loss = use_geodesic_loss
+        self.use_balanced_axis_loss = use_balanced_axis_loss
         if rotation_only:
             self.weight_translation = 0.0
             self.weight_rotation = weight_rotation * 2.0
@@ -264,9 +309,12 @@ class realworld_loss(nn.Module):
         self.quat_norm_loss = quat_norm_loss()
         self.PC_reproj_loss = PC_reproj_loss()
         if enable_axis_loss:
-            self.axis_rotation_loss = AdaptiveAxisRotationLoss(
-                axis_weights=axis_weights,
-            )
+            if use_balanced_axis_loss:
+                self.axis_rotation_loss = BalancedAxisRotationLoss()
+            else:
+                self.axis_rotation_loss = AdaptiveAxisRotationLoss(
+                    axis_weights=axis_weights,
+                )
     
     def forward(self, pred_translation, pred_rotation, pcs, gt_T_to_camera, init_T_to_camera, mask = None):
         """
@@ -352,7 +400,10 @@ class realworld_loss(nn.Module):
         if self.use_geodesic_loss:
             ret["geodesic_loss"] = geo_loss / torch.pi * 180.0
         if self.enable_axis_loss:
-            ret["axis_rotation_loss"] = axis_loss_val / torch.pi * 180.0
+            if self.use_balanced_axis_loss:
+                ret["axis_rotation_loss"] = axis_loss_val
+            else:
+                ret["axis_rotation_loss"] = axis_loss_val / torch.pi * 180.0
             for k, v in axis_details.items():
                 ret[f"axis_{k}_loss"] = v / torch.pi * 180.0
         return ret, T_gt_expected

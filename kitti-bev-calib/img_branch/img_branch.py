@@ -225,6 +225,11 @@ class Cam2BEV(nn.Module):
                  use_foundation_depth = False,
                  depth_model_type = "midas_small",
                  fd_mode = "replace",
+                 backbone_type = "swin",
+                 backbone_variant = "dinov2-small",
+                 freeze_backbone = False,
+                 freeze_layers = None,
+                 backbone_weights = None,
                  ):
         super(Cam2BEV, self).__init__()
         if img_shape is None:
@@ -284,7 +289,18 @@ class Cam2BEV(nn.Module):
                 raise ValueError(f"Unknown fd_mode: {fd_mode}")
         else:
             self.lss = LSS(transformedImgShape=transformedImgShape, featureShape=featureShape)
-        self.CamEncode = SwinT_tiny_Encoder(output_indices, featureShape, encoder_out_channels, FPN_in_channels, FPN_out_channels)
+        if backbone_type == "dinov2":
+            from img_branch.dinov2_encoder import DINOv2Encoder
+            self.CamEncode = DINOv2Encoder(
+                featureShape=featureShape,
+                out_channels=encoder_out_channels,
+                variant=backbone_variant,
+                freeze_backbone=freeze_backbone,
+                freeze_layers=freeze_layers,
+                weights_path=backbone_weights,
+            )
+        else:
+            self.CamEncode = SwinT_tiny_Encoder(output_indices, featureShape, encoder_out_channels, FPN_in_channels, FPN_out_channels)
         dx, bx, nx = gen_dx_bx(xbound=xbound, ybound=ybound, zbound=zbound)
         self.dx = nn.Parameter(dx, requires_grad = False)
         self.bx = nn.Parameter(bx, requires_grad = False)
@@ -360,7 +376,8 @@ class Cam2BEV(nn.Module):
                 cam2ego_T,
                 cam_intrins,
                 post_cam2ego_T,
-                imgs
+                imgs,
+                return_z_features=False,
                 ):
         """
         Args:
@@ -368,9 +385,12 @@ class Cam2BEV(nn.Module):
             cam_intrins: (B, 3, 3), camera intrinsic matrix.
             post_cam2ego_T: (B, N, 4, 4), transformation matrix from camera to ego after data aug.
             imgs: (B, N, 3, H, W), original image (with data aug).
+            return_z_features: if True, also return globally-pooled pre-projection
+                BEV features (B, C*nZ) that preserve Z-axis distribution information.
         Returns:
             bev_feats: (B, C, H, W), bird eye view features.
-            cam_bev_mask: (B, H, W), mask for bev_feats. Noting cam_bev_mask[:, i, :, :] is the same for all i.
+            cam_bev_mask: (B, H, W), mask for bev_feats.
+            z_summary (optional): (B, C*nZ) globally-pooled Z-aware features.
         """
         cam2ego_rot = cam2ego_T[:, :, :3, :3]
         cam2ego_trans = cam2ego_T[:, :, :3, 3]
@@ -406,6 +426,13 @@ class Cam2BEV(nn.Module):
                 post_cam2ego_trans=post_cam2ego_trans, img_feats=img_feats,
             )
         bev_feats = self.bev_pool(geometry=geometry, img_depth_feature=img_depth_feature)
+
+        z_summary = None
+        if return_z_features:
+            z_summary = torch.nn.functional.adaptive_avg_pool2d(
+                bev_feats, 1).flatten(1)  # (B, C*nZ)
+            img_feat_2d = img_feats  # (B, N, C_fpn, fH, fW) - preserve 2D features
+
         with torch.no_grad():
             geom_detach = geometry.detach()
             ones_feat = torch.ones_like(img_depth_feature).to(img_depth_feature.device).detach()
@@ -425,6 +452,9 @@ class Cam2BEV(nn.Module):
         bev_feats = bev_feats.permute(0, 2, 3, 1).reshape(B*H*W, C)
         bev_feats = self.proj_head(bev_feats)
         bev_feats = bev_feats.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+
+        if return_z_features:
+            return bev_feats, cam_bev_mask[:, 0, :, :], z_summary, img_feat_2d
         return bev_feats, cam_bev_mask[:, 0, :, :]
     
     def get_depth_supervision_loss(self, alpha=0.5):
