@@ -1054,9 +1054,11 @@ def _average_rotation_svd(R_list):
     return U @ S @ Vt
 
 
+from scipy.spatial.transform import Rotation as ScipyRot
+
+
 def _rotation_to_axis_angle(R):
     """Convert rotation matrix to axis-angle vector (radians)."""
-    from scipy.spatial.transform import Rotation as ScipyRot
     return ScipyRot.from_matrix(R).as_rotvec()
 
 
@@ -1326,10 +1328,27 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
 
     calib_ratios = [0.05, 0.10, 0.20, 0.50]
 
+    # Pre-compute per-sequence axis-angle arrays for median/trimmed methods
+    _seq_aa_cache = {}
+    _seq_R_cache = {}
+    _seq_t_cache = {}
+    for sid in unique_seqs:
+        mask = seq_arr == sid
+        seq_Rs = T_pred_arr[mask, :3, :3]
+        seq_ts = T_pred_arr[mask, :3, 3]
+        _seq_R_cache[sid] = seq_Rs
+        _seq_t_cache[sid] = seq_ts
+        _seq_aa_cache[sid] = ScipyRot.from_matrix(seq_Rs).as_rotvec()
+
     def _compute_agg_errors(T_preds, T_gts, seqs, wsize, method='svd_mean'):
-        """Compute aggregated errors for a given window size and method."""
+        """Compute aggregated errors for a given window size.
+
+        Uses pre-computed axis-angle cache for median/trimmed methods.
+        """
         agg_errors = {'rot_error': [], 'roll_error': [],
                       'pitch_error': [], 'yaw_error': []}
+
+        use_cache = (T_preds is T_pred_arr)
 
         for sid in unique_seqs:
             mask = seqs == sid
@@ -1340,15 +1359,24 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
                 continue
             gt_T = seq_T_gt[0]
 
+            if use_cache and sid in _seq_aa_cache:
+                seq_aa = _seq_aa_cache[sid]
+                seq_Rs = _seq_R_cache[sid]
+                seq_ts = _seq_t_cache[sid]
+            else:
+                seq_Rs = seq_T_pred[:, :3, :3]
+                seq_ts = seq_T_pred[:, :3, 3]
+                seq_aa = ScipyRot.from_matrix(seq_Rs).as_rotvec()
+
             if wsize >= n:
-                Rs = [t[:3, :3] for t in seq_T_pred]
                 if method == 'median':
-                    R_avg = _robust_median_rotation(Rs)
+                    aa_med = np.median(seq_aa, axis=0)
+                    R_avg = ScipyRot.from_rotvec(aa_med).as_matrix()
                 elif method == 'trimmed':
-                    R_avg = _trimmed_mean_rotation(Rs)
+                    R_avg = _trimmed_mean_rotation(list(seq_Rs))
                 else:
-                    R_avg = _average_rotation_svd(Rs)
-                t_avg = np.mean([t[:3, 3] for t in seq_T_pred], axis=0)
+                    R_avg = _average_rotation_svd(list(seq_Rs))
+                t_avg = np.mean(seq_ts, axis=0)
                 T_agg = np.eye(4)
                 T_agg[:3, :3] = R_avg
                 T_agg[:3, 3] = t_avg
@@ -1357,24 +1385,62 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
                     agg_errors[k].append(errs[k])
             else:
                 half = wsize // 2
-                for i in range(n):
-                    start = max(0, i - half)
-                    end = min(n, i + half + 1)
-                    window = seq_T_pred[start:end]
-                    Rs = [t[:3, :3] for t in window]
-                    if method == 'median':
-                        R_avg = _robust_median_rotation(Rs)
-                    elif method == 'trimmed':
-                        R_avg = _trimmed_mean_rotation(Rs)
-                    else:
-                        R_avg = _average_rotation_svd(Rs)
-                    t_avg = np.mean([t[:3, 3] for t in window], axis=0)
-                    T_agg = np.eye(4)
-                    T_agg[:3, :3] = R_avg
-                    T_agg[:3, 3] = t_avg
-                    errs = compute_pose_errors(T_agg, gt_T)
-                    for k in agg_errors:
-                        agg_errors[k].append(errs[k])
+                if method == 'svd_mean':
+                    R_cumsum = np.cumsum(seq_Rs.astype(np.float64), axis=0)
+                    t_cumsum = np.cumsum(seq_ts.astype(np.float64), axis=0)
+                    for i in range(n):
+                        start = max(0, i - half)
+                        end = min(n, i + half + 1)
+                        cnt = end - start
+                        if start == 0:
+                            R_sum = R_cumsum[end - 1]
+                            t_sum = t_cumsum[end - 1]
+                        else:
+                            R_sum = R_cumsum[end - 1] - R_cumsum[start - 1]
+                            t_sum = t_cumsum[end - 1] - t_cumsum[start - 1]
+                        R_mean = R_sum / cnt
+                        U, _, Vt = np.linalg.svd(R_mean)
+                        d = np.linalg.det(U @ Vt)
+                        R_avg = U @ np.diag([1, 1, d]) @ Vt
+                        t_avg = t_sum / cnt
+                        T_agg = np.eye(4)
+                        T_agg[:3, :3] = R_avg
+                        T_agg[:3, 3] = t_avg
+                        errs = compute_pose_errors(T_agg, gt_T)
+                        for k in agg_errors:
+                            agg_errors[k].append(errs[k])
+                elif method == 'median':
+                    for i in range(n):
+                        start = max(0, i - half)
+                        end = min(n, i + half + 1)
+                        aa_med = np.median(seq_aa[start:end], axis=0)
+                        R_avg = ScipyRot.from_rotvec(aa_med).as_matrix()
+                        t_avg = np.mean(seq_ts[start:end], axis=0)
+                        T_agg = np.eye(4)
+                        T_agg[:3, :3] = R_avg
+                        T_agg[:3, 3] = t_avg
+                        errs = compute_pose_errors(T_agg, gt_T)
+                        for k in agg_errors:
+                            agg_errors[k].append(errs[k])
+                else:  # trimmed
+                    for i in range(n):
+                        start = max(0, i - half)
+                        end = min(n, i + half + 1)
+                        window_aa = seq_aa[start:end]
+                        nw = len(window_aa)
+                        trim_k = max(1, int(nw * 0.1))
+                        trimmed = np.zeros(3)
+                        for ax in range(3):
+                            sv = np.sort(window_aa[:, ax])
+                            trimmed[ax] = np.mean(sv[trim_k:nw - trim_k]) if nw > 2 * trim_k else np.mean(sv)
+                        R_avg = ScipyRot.from_rotvec(trimmed).as_matrix()
+                        t_avg = np.mean(seq_ts[start:end], axis=0)
+                        T_agg = np.eye(4)
+                        T_agg[:3, :3] = R_avg
+                        T_agg[:3, 3] = t_avg
+                        errs = compute_pose_errors(T_agg, gt_T)
+                        for k in agg_errors:
+                            agg_errors[k].append(errs[k])
         return agg_errors
 
     def _format_errors(errs):
