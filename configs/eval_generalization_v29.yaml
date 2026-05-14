@@ -1,22 +1,14 @@
-# V29 泛化评估: 4组组合消融实验 + V28-F5/V27-E10 基线对照
-#
-# V29 策略: F5 (frozen DINOv2 + Query-BEV) × E10 (DANN + strong jitter) 融合
-# cam2bev_mode, backbone_type, rotation_only, use_mlp_head, voxel_mode,
-# scatter_reduce, to_bev_mode, fuser_type 等参数由 evaluate_checkpoint.py 自动从
-# checkpoint 检测, 无需在配置中重复指定。仅传入 checkpoint 无法提取的参数:
-#   - bev_zbound_step: 来自训练时的环境变量, checkpoint 中不保存
-#   - mode_desc: 元数据描述, 仅用于报告展示
+# V29 Full 泛化评估: F5×E10 组合消融 (32节点训练)
+# 模型参数由 evaluate_checkpoint.py 从 checkpoint 自动检测
+# 注意: V29 full 训练尚未启动，此配置为 full 训练完成后使用
 #
 # 用法:
 #   python run_generalization_eval.py --config configs/eval_generalization_v29.yaml --parallel -1
-#
-# 评估目标: V29 组合策略是否超越 V28-F5 (BEST=0.296°) 和 V27-E10 (BEST=0.321°)
 
 bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
-models_dir: "logs/all_training_data"
+models_dir: "logs/all_training_data/v29"
 test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
 output_dir: "logs/evaluations/generalization_eval_v29"
-eval_script: "evaluate_checkpoint.py"
 
 eval_params:
   angle_range: 5.0
@@ -27,46 +19,26 @@ eval_params:
   eval_max_frames_per_seq: 400
 
 models:
-  # ============================================================
-  # V29 系列: F5×E10 组合消融, 400 epochs, quick
-  # ============================================================
-
-  - label: "v29-G1-frozen-strong-jitter"
-    dir_name: "v29_quick/model_small_5deg_v29_G1_frozen_dinov2_strong_jitter_quick"
-    ckpt: "ckpt_best_val.pth"
-    bev_zbound_step: "4.0"
-    mode_desc: "G1: F5 + strong jitter (prob=0.7, sigma=3.0)"
-
-  - label: "v29-G2-frozen-jitter-dann"
-    dir_name: "v29_quick/model_small_5deg_v29_G2_frozen_dinov2_jitter_dann_quick"
-    ckpt: "ckpt_best_val.pth"
-    bev_zbound_step: "4.0"
-    mode_desc: "G2: F5 + strong jitter + DANN (weight=0.15)"
-
   - label: "v29-G3-partial-unfreeze"
-    dir_name: "v29_quick/model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick"
+    dir_name: "model_small_5deg_v29_G3_partial_unfreeze_dinov2"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     mode_desc: "G3: partial unfreeze DINOv2 (last2) + strong jitter"
 
+  - label: "v29-G1-frozen-strong-jitter"
+    dir_name: "model_small_5deg_v29_G1_frozen_dinov2_strong_jitter"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G1: frozen DINOv2 + strong jitter"
+
+  - label: "v29-G2-frozen-jitter-dann"
+    dir_name: "model_small_5deg_v29_G2_frozen_dinov2_jitter_dann"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G2: frozen DINOv2 + strong jitter + DANN"
+
   - label: "v29-G4-e10-query-bev"
-    dir_name: "v29_quick/model_small_5deg_v29_G4_e10_query_bev_quick"
+    dir_name: "model_small_5deg_v29_G4_e10_query_bev"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     mode_desc: "G4: E10 + Query-BEV (Swin + DANN + strong jitter)"
-
-  # ============================================================
-  # 基线对照
-  # ============================================================
-
-  - label: "v28-F5-frozen-dinov2-baseline"
-    dir_name: "v28_quick/model_small_5deg_v28_F5_query_dinov2_frozen_quick"
-    ckpt: "ckpt_best_val.pth"
-    bev_zbound_step: "4.0"
-    mode_desc: "F5 baseline: Query-BEV + frozen DINOv2 (light jitter, BEST=0.296°)"
-
-  - label: "v27-E10-dann-baseline"
-    dir_name: "v27_quick/model_small_5deg_v27_E10_dann_very_strong_jitter_quick"
-    ckpt: "ckpt_best_val.pth"
-    bev_zbound_step: "4.0"
-    mode_desc: "E10 baseline: LSS + Swin + DANN + strong jitter (BEST=0.321°)"

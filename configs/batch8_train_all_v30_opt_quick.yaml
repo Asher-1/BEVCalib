@@ -1,21 +1,18 @@
-# V30 Full (32 nodes): dinov2-small 最优配置 + 消融实验
+# V30 Optimized Quick (1 node): dinov2-small 消融实验
 #
-# 决策: dinov2-base 淘汰 (backbone 大 3.9x, 泛化仅好 5.4%, 过拟合严重)
-# 全部使用 dinov2-small (V29-G3 配方), 聚焦: DANN / auto_scale / 扰动范围 消融
+# 决策依据:
+#   dinov2-base backbone 大 3.9x (86.6M vs 22.1M), 泛化仅好 5.4%
+#   无 DANN 时 base (0.107°) 比 small (0.092°) 差 16% (过拟合)
+#   800 帧评估确认: G3-small (0.103°) 持续优于 H8-base (0.110°)
+#   结论: dinov2-small 是部署最佳选择, 淘汰 dinov2-base
 #
-# 消融矩阵 (4 experiments):
-#   G3:       dinov2-small + unfreeze2 + AS=1         ← 部署首选
-#   G3-noAS:  dinov2-small + unfreeze2 + AS=0         ← auto_scale 消融
-#   G3-DANN:  dinov2-small + unfreeze2 + DANN + AS=1  ← DANN 效果
-#   G3-10deg: dinov2-small + unfreeze2 + 10° + AS=1   ← 大扰动消融
-#
-# 回答的关键问题:
-#   G3 vs G3-noAS   → ddp_auto_scale 对 32-node 的提升幅度
-#   G3 vs G3-DANN   → DANN 对 dinov2-small + unfreeze2 是否有效
-#   G3 vs G3-10deg  → 10° 训练能否突破单帧精度上限
+# 实验 (3组):
+#   G3:       dinov2-small + unfreeze2              — 部署首选 (V29-G3 配方)
+#   G3-DANN:  dinov2-small + unfreeze2 + DANN       — DANN 效果验证
+#   G3-10deg: dinov2-small + unfreeze2 + 10° 扰动   — 大扰动消融
 #
 # Usage:
-#   bash batch_train.sh configs/batch8_train_all_v30.yaml
+#   bash batch_train.sh configs/batch8_train_all_v30_opt_quick.yaml
 
 global:
   dry_run: false
@@ -42,11 +39,11 @@ defaults:
 
     use_ddp: true
     ddp_gpus: 8
-    nnodes: 32
+    nnodes: 1
     node_rank: null
     master_addr: null
     master_port: null
-    ddp_auto_scale: 1
+    ddp_auto_scale: 0
 
     use_compile: false
     no_amp: 1
@@ -95,7 +92,7 @@ defaults:
 
     pose_aware_sampling: true
 
-    max_frames_per_seq: 10000
+    max_frames_per_seq: 500
     num_epochs: 400
     save_ckpt_per_epoches: 50
 
@@ -121,13 +118,14 @@ defaults:
 
 experiments:
   # =========================================================================
-  # G3: dinov2-small + unfreeze2 + strong jitter — 部署首选
-  # Quick BEST (V29-G3): 0.092° / 800帧: 0.103° (MEDW400)
+  # G3-full: dinov2-small + unfreeze2 — V29-G3 配方 (部署首选)
+  # Quick BEST (V29-G3): 0.092° (MEDW400)
+  # 目标: 确认 G3 配方在 V30 参数体系下的表现
   # =========================================================================
-  - name: "v30_G3_dinov2small_full"
-    description: "G3: dinov2-small + unfreeze2 + strong jitter (deploy candidate)"
+  - name: "v30_opt_G3_dinov2small_quick"
+    description: "G3-full: dinov2-small + unfreeze2 + strong jitter (deploy candidate)"
     dataset: "all"
-    version: "v30_G3_dinov2small_full"
+    version: "v30_opt_G3_dinov2small_quick"
     params:
       cam2bev_mode: "query"
       backbone_type: "dinov2"
@@ -141,34 +139,14 @@ experiments:
       augment_mount_jitter_rot_sigma: 3.0
 
   # =========================================================================
-  # G3-noAS: 同 G3 但关闭 ddp_auto_scale
-  # 消融目标: auto_scale 对 dinov2-small 32-node 训练的效果
+  # G3-DANN: dinov2-small + unfreeze2 + DANN — 填补关键缺失数据
+  # 目标: DANN 对 dinov2-small + unfreeze2 是否也有效 (目前只有 frozen 数据)
+  # 对比 H8: 隔离 backbone size 效果 (base vs small, 都有 DANN)
   # =========================================================================
-  - name: "v30_G3_dinov2small_noAS"
-    description: "G3-noAS: dinov2-small + unfreeze2 + no auto_scale (ablation)"
+  - name: "v30_opt_G3_dinov2small_dann_quick"
+    description: "G3-DANN: dinov2-small + unfreeze2 + DANN (ablation)"
     dataset: "all"
-    version: "v30_G3_dinov2small_noAS"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-small"
-      freeze_backbone: 1
-      backbone_freeze_layers: "0:-2"
-      backbone_lr_scale: 0.01
-      drop_path_rate: 0.1
-      head_dropout: 0.2
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-      ddp_auto_scale: 0
-
-  # =========================================================================
-  # G3-DANN: dinov2-small + unfreeze2 + DANN
-  # 消融目标: DANN 对 dinov2-small + unfreeze2 的效果
-  # =========================================================================
-  - name: "v30_G3_dinov2small_dann"
-    description: "G3-DANN: dinov2-small + unfreeze2 + DANN"
-    dataset: "all"
-    version: "v30_G3_dinov2small_dann"
+    version: "v30_opt_G3_dinov2small_dann_quick"
     params:
       cam2bev_mode: "query"
       backbone_type: "dinov2"
@@ -184,13 +162,14 @@ experiments:
       domain_adversarial_weight: 0.15
 
   # =========================================================================
-  # G3-10deg: dinov2-small + unfreeze2 + 10° 扰动
-  # 消融目标: 10° 训练→5° 评估，验证更大扰动是否降低单帧精度上限
+  # G3-10deg: dinov2-small + unfreeze2 + angle_range=10° — 大扰动消融
+  # 假设: 10° 训练 → 5° 评估时预测更鲁棒
+  # 验证: 单帧精度上限 (~2.25°) 是否因更大训练范围而降低
   # =========================================================================
-  - name: "v30_G3_dinov2small_10deg"
+  - name: "v30_opt_G3_dinov2small_10deg_quick"
     description: "G3-10deg: dinov2-small + unfreeze2 + 10deg perturbation"
     dataset: "all"
-    version: "v30_G3_dinov2small_10deg"
+    version: "v30_opt_G3_dinov2small_10deg_quick"
     params:
       cam2bev_mode: "query"
       backbone_type: "dinov2"

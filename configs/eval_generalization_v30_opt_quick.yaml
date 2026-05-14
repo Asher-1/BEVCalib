@@ -1,0 +1,59 @@
+# V30 Optimized Quick 泛化评估: dinov2-small 实验
+# 严格匹配 batch8_train_all_v30_opt_quick.yaml 的 3 个实验
+# 每个实验评估 best_val + ckpt_400 两个 checkpoint
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v30_opt_quick.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v30_opt_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v30_opt_quick"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # === G3: dinov2-small + unfreeze2 (部署首选) ===
+  - label: "v30opt-G3-small"
+    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3: dinov2-small + unfreeze2 (best_val)"
+
+  - label: "v30opt-G3-small-ckpt400"
+    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3: dinov2-small + unfreeze2 (ckpt_400)"
+
+  # === G3-DANN: DANN 效果 ===
+  - label: "v30opt-G3-dann"
+    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3-DANN: dinov2-small + DANN (best_val)"
+
+  - label: "v30opt-G3-dann-ckpt400"
+    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_dann_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3-DANN: dinov2-small + DANN (ckpt_400)"
+
+  # === G3-10deg: 大扰动消融 ===
+  - label: "v30opt-G3-10deg"
+    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_10deg_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3-10deg: 10deg perturbation (best_val)"
+
+  - label: "v30opt-G3-10deg-ckpt400"
+    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_10deg_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3-10deg: 10deg perturbation (ckpt_400)"

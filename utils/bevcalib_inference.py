@@ -132,8 +132,16 @@ class TemporalCalibrationAggregator:
     """
     Production-ready temporal aggregator for BEVCalib online calibration.
 
-    Implements the MEDW (axis-angle median) method that achieved BEST=0.085°
-    in V29-G3 evaluation — superior to element-wise matrix median + SVD.
+    Implements the MEDW (axis-angle median) method — the best temporal
+    aggregation approach for BEVCalib deployment.
+
+    800-frame evaluation results (2026-05-14, geodesic metric):
+      V29-G3 (dinov2-small, 49.7M):  MEDW800 = 0.070°,  MEDW400 = 0.092°
+      V30-H8 (dinov2-base, 115M):    MEDW800 = 0.080°,  MEDW400 = 0.087°
+    MEDW400: H8 slightly better. MEDW800: G3 wins by 13.3% with 2.3x smaller model.
+
+    √N scaling verified: 400→800 frames gives 93% of theoretical improvement for G3.
+    Recommendation: max_frames=800 for high-precision, 400 for low-latency.
 
     Supports two aggregation modes:
       - 'axis_angle_median' (default, BEST): rotation → axis-angle → per-axis
@@ -141,7 +149,7 @@ class TemporalCalibrationAggregator:
       - 'svd_mean': rotation matrix Euclidean mean → SVD projection to SO(3).
 
     Usage (streaming -- accumulate then query):
-        agg = TemporalCalibrationAggregator(min_frames=50, max_frames=400)
+        agg = TemporalCalibrationAggregator(min_frames=50, max_frames=800)
         for frame in sequence:
             pred_T = model(img, pc, init_T, post_T, K)
             agg.add(pred_T)
@@ -155,7 +163,7 @@ class TemporalCalibrationAggregator:
         calib = TemporalCalibrationAggregator.aggregate_batch(Ts)
     """
 
-    def __init__(self, min_frames=50, max_frames=400,
+    def __init__(self, min_frames=50, max_frames=800,
                  method='axis_angle_median'):
         self.min_frames = min_frames
         self.max_frames = max_frames
@@ -589,12 +597,18 @@ def load_bevcalib_inference(
 
 def load_bevcalib_with_aggregation(
     ckpt_path: str,
-    min_frames=5,
-    max_frames=200,
+    min_frames=50,
+    max_frames=800,
     **kwargs,
 ):
     """
     Load BEVCalib + create a SequenceMedianAggregator for production deployment.
+
+    Recommended checkpoint: V29-G3 recipe (dinov2-small + partial unfreeze + strong jitter).
+      - 49.7M params, ~400MB checkpoint
+      - MEDW400 = 0.092°, MEDW800 = 0.070° (geodesic, 800-frame unified eval)
+      - max_frames=800 recommended for high-precision deployment
+      - dinov2-base (H8): MEDW800 = 0.080° — 13% worse with 2.3x model size
 
     Returns:
         wrapper:    BEVCalibInference model

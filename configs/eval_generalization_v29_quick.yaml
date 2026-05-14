@@ -1,0 +1,63 @@
+# V29 Quick 泛化评估: F5 x E10 组合消融 (单机训练, 4组 + 2基线)
+# 模型参数由 evaluate_checkpoint.py 从 checkpoint 自动检测
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v29_quick.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v29_quick"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # ============================================================
+  # V29 系列: F5×E10 组合消融, 400 epochs, quick
+  # ============================================================
+
+  - label: "v29-G1-frozen-strong-jitter"
+    dir_name: "v29_quick/model_small_5deg_v29_G1_frozen_dinov2_strong_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G1: frozen DINOv2 + strong jitter (prob=0.7, sigma=3.0)"
+
+  - label: "v29-G2-frozen-jitter-dann"
+    dir_name: "v29_quick/model_small_5deg_v29_G2_frozen_dinov2_jitter_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G2: frozen DINOv2 + strong jitter + DANN (weight=0.15)"
+
+  - label: "v29-G3-partial-unfreeze"
+    dir_name: "v29_quick/model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3: partial unfreeze DINOv2 (last2) + strong jitter"
+
+  - label: "v29-G4-e10-query-bev"
+    dir_name: "v29_quick/model_small_5deg_v29_G4_e10_query_bev_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G4: E10 + Query-BEV (Swin + DANN + strong jitter)"
+
+  # ============================================================
+  # 基线对照
+  # ============================================================
+
+  - label: "v28-F5-frozen-dinov2-baseline"
+    dir_name: "v28_quick/model_small_5deg_v28_F5_query_dinov2_frozen_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F5 baseline: Query-BEV + frozen DINOv2 (light jitter, BEST=0.296)"
+
+  - label: "v27-E10-dann-baseline"
+    dir_name: "v27_quick/model_small_5deg_v27_E10_dann_very_strong_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E10 baseline: LSS + Swin + DANN + strong jitter (BEST=0.321)"

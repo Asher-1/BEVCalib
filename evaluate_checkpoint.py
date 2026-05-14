@@ -1316,7 +1316,7 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
             unique_seqs.append(sid)
 
     agg_file = os.path.join(eval_dir, "temporal_aggregation.txt")
-    window_sizes = [1, 5, 10, 20, 50, 100, 200, 400]
+    window_sizes = [1, 5, 10, 20, 50, 100, 200, 400, 800]
 
     calib_ratios = [0.05, 0.10, 0.20, 0.50]
 

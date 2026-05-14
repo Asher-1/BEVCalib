@@ -1,0 +1,140 @@
+# V27 Full 泛化评估: LSS+Swin 域适应实验 (32节点训练, 10组)
+# 模型参数由 evaluate_checkpoint.py 从 checkpoint 自动检测
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v27.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v27"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v27"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v27-E1-v24b-repro"
+    dir_name: "model_small_5deg_v27_E1_v24b_repro"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E1: V24-B reproduction (LSS+Swin, no aug)"
+
+  - label: "v27-E2-balanced-axis-only"
+    dir_name: "model_small_5deg_v27_E2_balanced_axis_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E2: V24-B + BalancedAxisLoss only (axis_weights 1,1,1)"
+
+  - label: "v27-E3-strong-mount-jitter"
+    dir_name: "model_small_5deg_v27_E3_strong_mount_jitter_only"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E3: V24-B + mount jitter (prob=0.5, sigma=2.0, no BalancedAxis)"
+
+  - label: "v27-E4-balanced-plus-mount"
+    dir_name: "model_small_5deg_v27_E4_balanced_plus_mount"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E4: BalancedAxisLoss + strong mount jitter (prob=0.5, sigma=2.0)"
+
+  - label: "v27-E5-balanced-mount-reg"
+    dir_name: "model_small_5deg_v27_E5_balanced_mount_strong_reg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E5: balanced mount jitter + strong reg (drop0.2, head0.3)"
+
+  - label: "v27-E6-extra-augmentation"
+    dir_name: "model_small_5deg_v27_E6_extra_augmentation"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E6: E5 + extra augmentation (color_jitter=0.3, pc_jitter=0.05)"
+
+  - label: "v27-E7-very-strong-mount"
+    dir_name: "model_small_5deg_v27_E7_very_strong_mount_jitter"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E7: E5 + very strong mount jitter (prob=0.7, sigma=3.0)"
+
+  - label: "v27-E8-z10-balanced-mount"
+    dir_name: "model_small_5deg_v27_E8_z10_balanced_mount_reg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "E8: same as E5 with Z=10 (BEV_ZBOUND_STEP=2.0)"
+
+  - label: "v27-E9-dann-mount-reg"
+    dir_name: "model_small_5deg_v27_E9_dann_balanced_mount_reg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E9: DANN(0.1) + balanced mount + strong reg"
+
+  - label: "v27-E10-dann-strong-jitter"
+    dir_name: "model_small_5deg_v27_E10_dann_very_strong_jitter"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E10: DANN(0.15) + very strong jitter (prob0.7, sigma3.0)"
+
+
+  - label: "v27-E1-v24b-repro-ckpt_400"
+    dir_name: "model_small_5deg_v27_E1_v24b_repro"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E1: V24-B reproduction (LSS+Swin, no aug)"
+
+  - label: "v27-E2-balanced-axis-only-ckpt_400"
+    dir_name: "model_small_5deg_v27_E2_balanced_axis_only"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E2: V24-B + BalancedAxisLoss only (axis_weights 1,1,1)"
+
+  - label: "v27-E3-strong-mount-jitter-ckpt_400"
+    dir_name: "model_small_5deg_v27_E3_strong_mount_jitter_only"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E3: V24-B + mount jitter (prob=0.5, sigma=2.0, no BalancedAxis)"
+
+  - label: "v27-E4-balanced-plus-mount-ckpt_400"
+    dir_name: "model_small_5deg_v27_E4_balanced_plus_mount"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E4: BalancedAxisLoss + strong mount jitter (prob=0.5, sigma=2.0)"
+
+  - label: "v27-E5-balanced-mount-reg-ckpt_400"
+    dir_name: "model_small_5deg_v27_E5_balanced_mount_strong_reg"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E5: balanced mount jitter + strong reg (drop0.2, head0.3)"
+
+  - label: "v27-E6-extra-augmentation-ckpt_400"
+    dir_name: "model_small_5deg_v27_E6_extra_augmentation"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E6: E5 + extra augmentation (color_jitter=0.3, pc_jitter=0.05)"
+
+  - label: "v27-E7-very-strong-mount-ckpt_400"
+    dir_name: "model_small_5deg_v27_E7_very_strong_mount_jitter"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E7: E5 + very strong mount jitter (prob=0.7, sigma=3.0)"
+
+  - label: "v27-E8-z10-balanced-mount-ckpt_400"
+    dir_name: "model_small_5deg_v27_E8_z10_balanced_mount_reg"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "2.0"
+    mode_desc: "E8: same as E5 with Z=10 (BEV_ZBOUND_STEP=2.0)"
+
+  - label: "v27-E9-dann-mount-reg-ckpt_400"
+    dir_name: "model_small_5deg_v27_E9_dann_balanced_mount_reg"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E9: DANN(0.1) + balanced mount + strong reg"
+
+  - label: "v27-E10-dann-strong-jitter-ckpt_400"
+    dir_name: "model_small_5deg_v27_E10_dann_very_strong_jitter"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "E10: DANN(0.15) + very strong jitter (prob0.7, sigma3.0)"

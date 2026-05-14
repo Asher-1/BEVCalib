@@ -1,0 +1,76 @@
+# V29 vs V30 统一对比评估: 用同一代码版本公平对比
+# 解决: V29-G3 (0.085°) 和 V30-H8 (0.087°) 来自不同评估运行的不可比性
+#
+# 包含:
+#   V29: G1 (frozen), G2 (frozen+DANN), G3 (unfreeze2) — dinov2-small
+#   V30: H1 (unfreeze2), H3 (frozen+DANN), H8 (unfreeze2+DANN) — dinov2-base
+#
+# 对比矩阵:
+#   dinov2-small vs dinov2-base: G3 vs H1, G2 vs H3
+#   DANN effect on small: G1 vs G2
+#   DANN effect on base: H1 vs H8, H2 vs H3
+#   unfreeze vs frozen: G3 vs G1, H1 vs H2
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v29_v30_unified.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v30_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v29_v30_unified"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # === V29 Quick (dinov2-small) — 使用 base_dir 指向 v29_quick ===
+  - label: "v29-G1-frozen-no-dann"
+    base_dir: "logs/all_training_data/v29_quick"
+    dir_name: "model_small_5deg_v29_G1_frozen_dinov2_strong_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G1: dinov2-small frozen + strong jitter (no DANN)"
+
+  - label: "v29-G2-frozen-dann"
+    base_dir: "logs/all_training_data/v29_quick"
+    dir_name: "model_small_5deg_v29_G2_frozen_dinov2_jitter_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G2: dinov2-small frozen + strong jitter + DANN"
+
+  - label: "v29-G3-unfreeze2-no-dann"
+    base_dir: "logs/all_training_data/v29_quick"
+    dir_name: "model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3: dinov2-small partial unfreeze (last2) + strong jitter (no DANN)"
+
+  # === V30 Quick (dinov2-base) — 默认使用 models_dir ===
+  - label: "v30-H2-frozen-no-dann"
+    dir_name: "model_small_5deg_v30_H2_dinov2base_frozen_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H2: dinov2-base frozen + strong jitter (no DANN)"
+
+  - label: "v30-H3-frozen-dann"
+    dir_name: "model_small_5deg_v30_H3_dinov2base_frozen_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H3: dinov2-base frozen + strong jitter + DANN"
+
+  - label: "v30-H1-unfreeze2-no-dann"
+    dir_name: "model_small_5deg_v30_H1_dinov2base_partial_unfreeze_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H1: dinov2-base partial unfreeze (last2) + strong jitter (no DANN)"
+
+  - label: "v30-H8-unfreeze2-dann"
+    dir_name: "model_small_5deg_v30_H8_dinov2base_unfreeze_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H8: dinov2-base partial unfreeze (last2) + strong jitter + DANN"

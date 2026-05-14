@@ -1,0 +1,50 @@
+# V28 Quick 泛化评估: 架构对比 (Query-BEV/LSS x Swin/DINOv2), 单机训练
+# 包含所有 V28 的 5 组实验 + F1 epoch200 变体
+# 模型参数由 evaluate_checkpoint.py 从 checkpoint 自动检测
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v28_quick.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v28_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v28_quick"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v28-F1-query-swin-quick"
+    dir_name: "model_small_5deg_v28_F1_query_bev_swin_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F1-quick: Query-BEV + Swin"
+
+  - label: "v28-F2-lss-dinov2-quick"
+    dir_name: "model_small_5deg_v28_F2_lss_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F2-quick: LSS + DINOv2 backbone"
+
+  - label: "v28-F3-query-dinov2-quick"
+    dir_name: "model_small_5deg_v28_F3_query_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F3-quick: Query-BEV + DINOv2 (full upgrade)"
+
+  - label: "v28-F4-query-dinov2-dann-quick"
+    dir_name: "model_small_5deg_v28_F4_query_dinov2_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F4-quick: Query-BEV + DINOv2 + strong jitter + DANN"
+
+  - label: "v28-F5-query-dinov2-frozen-quick"
+    dir_name: "model_small_5deg_v28_F5_query_dinov2_frozen_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "F5-quick: Query-BEV + frozen DINOv2"

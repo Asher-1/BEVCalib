@@ -1,23 +1,21 @@
-# V30 Full (32 nodes): DINOv2-Base backbone — 终极泛化版本
+# V30 Full A30 (32 nodes, batch_size=8): dinov2-small 最优配置 + 消融实验
 #
-# 目标: V30 是面向量产落地的最终优化版本
-# 基线: V29-G3 (dinov2-small, partial unfreeze, strong jitter) BEST=0.085°
-# 方向: dinov2-base (86M vs 21M) 更强域不变特征 → 预期 BEST < 0.07°
+# 决策: dinov2-base 淘汰 (backbone 大 3.9x, 泛化仅好 5.4%, 过拟合严重)
+# 全部使用 dinov2-small (V29-G3 配方), 聚焦: DANN / auto_scale / 扰动范围 消融
 #
-# 实验矩阵 (9组全面对比):
-#   H1: dinov2-base + partial unfreeze (last 2) + strong jitter — G3 直接升级
-#   H2: dinov2-base + full freeze + strong jitter — 纯特征质量对照
-#   H3: dinov2-base + full freeze + strong jitter + DANN — 域对抗增强
-#   H4: dinov2-base + partial unfreeze (last 4) + strong jitter — 更深解冻
-#   H5: dinov2-base + partial unfreeze (last 2) + moderate jitter — jitter 消融
-#   H6: dinov2-base + partial unfreeze (last 2) + strong jitter + lower lr — lr 消融
-#   H7: dinov2-small + partial unfreeze (last 2) + strong jitter — G3 复现基线
-#   H8: dinov2-base + partial unfreeze (last 2) + strong jitter + DANN — V29全优势组合
-#   H9: dinov2-base + partial unfreeze (last 4) + strong jitter + DANN — 深解冻+DANN
+# 消融矩阵 (4 experiments):
+#   G3:       dinov2-small + unfreeze2 + AS=1         ← 部署首选
+#   G3-noAS:  dinov2-small + unfreeze2 + AS=0         ← auto_scale 消融
+#   G3-DANN:  dinov2-small + unfreeze2 + DANN + AS=1  ← DANN 效果
+#   G3-10deg: dinov2-small + unfreeze2 + 10° + AS=1   ← 大扰动消融
+#
+# 回答的关键问题:
+#   G3 vs G3-noAS   → ddp_auto_scale 对 32-node 的提升幅度
+#   G3 vs G3-DANN   → DANN 对 dinov2-small + unfreeze2 是否有效
+#   G3 vs G3-10deg  → 10° 训练能否突破单帧精度上限
 #
 # Usage:
-#   bash batch_train.sh configs/batch8_train_all_v30_quick.yaml
-#   bash batch_train.sh --dry-run configs/batch8_train_all_v30_quick.yaml
+#   bash batch_train.sh configs/batch8_train_all_v30_a30.yaml
 
 global:
   dry_run: false
@@ -48,7 +46,7 @@ defaults:
     node_rank: null
     master_addr: null
     master_port: null
-    ddp_auto_scale: 0
+    ddp_auto_scale: 1
 
     use_compile: false
     no_amp: 1
@@ -123,178 +121,13 @@ defaults:
 
 experiments:
   # =========================================================================
-  # H8: dinov2-base + partial unfreeze (last 2) + strong jitter + DANN [优先级 1]
-  # 结合 V29 所有最优策略: 大 backbone + 部分解冻 + 强 jitter + 域对抗
-  # 预期: 全因子叠加 → BEST < 0.06° (V29-G3: 0.085°)
+  # G3: dinov2-small + unfreeze2 + strong jitter — 部署首选
+  # Quick BEST (V29-G3): 0.092° / 800帧: 0.103° (MEDW400)
   # =========================================================================
-  - name: "v30_H8_dinov2base_unfreeze_dann"
-    description: "H8: dinov2-base + partial unfreeze + strong jitter + DANN"
+  - name: "v30_G3_dinov2small_full"
+    description: "G3: dinov2-small + unfreeze2 + strong jitter (deploy candidate)"
     dataset: "all"
-    version: "v30_H8_dinov2base_unfreeze_dann"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_freeze_layers: "0:-2"
-      backbone_lr_scale: 0.01
-      drop_path_rate: 0.1
-      head_dropout: 0.2
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-      domain_adversarial: 1
-      domain_adversarial_weight: 0.15
-
-  # =========================================================================
-  # H1: dinov2-base + partial unfreeze (last 2) + strong jitter [优先级 2]
-  # V29-G3 recipe 直接升级 backbone
-  # 对照 H8: 验证 DANN 的边际贡献
-  # =========================================================================
-  - name: "v30_H1_dinov2base_partial_unfreeze"
-    description: "H1: dinov2-base + partial unfreeze (last2) + strong jitter"
-    dataset: "all"
-    version: "v30_H1_dinov2base_partial_unfreeze"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_freeze_layers: "0:-2"
-      backbone_lr_scale: 0.01
-      drop_path_rate: 0.1
-      head_dropout: 0.2
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-
-  # =========================================================================
-  # H9: dinov2-base + partial unfreeze (last 4) + strong jitter + DANN [优先级 3]
-  # H8 的更深解冻版: 探索 base 更多层解冻 + DANN
-  # 对照 H8: 解冻深度从 2 → 4 层的影响
-  # =========================================================================
-  - name: "v30_H9_dinov2base_unfreeze4_dann"
-    description: "H9: dinov2-base + unfreeze 4 layers + strong jitter + DANN"
-    dataset: "all"
-    version: "v30_H9_dinov2base_unfreeze4_dann"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_freeze_layers: "0:-4"
-      backbone_lr_scale: 0.005
-      drop_path_rate: 0.15
-      head_dropout: 0.2
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-      domain_adversarial: 1
-      domain_adversarial_weight: 0.15
-
-  # =========================================================================
-  # H3: dinov2-base + full freeze + strong jitter + DANN [优先级 4]
-  # 对照 H8: 不解冻时 DANN + base 的效果
-  # =========================================================================
-  - name: "v30_H3_dinov2base_frozen_dann"
-    description: "H3: dinov2-base frozen + strong jitter + DANN"
-    dataset: "all"
-    version: "v30_H3_dinov2base_frozen_dann"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_lr_scale: 0.0
-      drop_path_rate: 0.0
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-      domain_adversarial: 1
-      domain_adversarial_weight: 0.15
-
-  # =========================================================================
-  # H4: dinov2-base + partial unfreeze (last 4) + strong jitter [优先级 5]
-  # 对照 H9: 去掉 DANN 后的 4 层解冻效果
-  # =========================================================================
-  - name: "v30_H4_dinov2base_unfreeze4"
-    description: "H4: dinov2-base + unfreeze last 4 layers + strong jitter"
-    dataset: "all"
-    version: "v30_H4_dinov2base_unfreeze4"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_freeze_layers: "0:-4"
-      backbone_lr_scale: 0.005
-      drop_path_rate: 0.15
-      head_dropout: 0.2
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-
-  # =========================================================================
-  # H2: dinov2-base + full freeze + strong jitter [优先级 6]
-  # 对照 H3/H1: 纯 base 冻结特征基线
-  # =========================================================================
-  - name: "v30_H2_dinov2base_frozen_jitter"
-    description: "H2: dinov2-base fully frozen + strong jitter"
-    dataset: "all"
-    version: "v30_H2_dinov2base_frozen_jitter"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_lr_scale: 0.0
-      drop_path_rate: 0.0
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-
-  # =========================================================================
-  # H6: dinov2-base + partial unfreeze (last 2) + strong jitter + lower lr [优先级 7]
-  # 对照 H1: lr 消融 (0.005 vs 0.01)
-  # =========================================================================
-  - name: "v30_H6_dinov2base_lower_lr"
-    description: "H6: dinov2-base + partial unfreeze + lower lr (0.005)"
-    dataset: "all"
-    version: "v30_H6_dinov2base_lower_lr"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_freeze_layers: "0:-2"
-      backbone_lr_scale: 0.005
-      drop_path_rate: 0.1
-      head_dropout: 0.2
-      augment_mount_jitter_prob: 0.7
-      augment_mount_jitter_rot_sigma: 3.0
-
-  # =========================================================================
-  # H5: dinov2-base + partial unfreeze (last 2) + moderate jitter [优先级 8]
-  # 对照 H1: jitter 消融 (prob=0.4, sigma=2.0 vs 0.7/3.0)
-  # =========================================================================
-  - name: "v30_H5_dinov2base_moderate_jitter"
-    description: "H5: dinov2-base + partial unfreeze + moderate jitter"
-    dataset: "all"
-    version: "v30_H5_dinov2base_moderate_jitter"
-    params:
-      cam2bev_mode: "query"
-      backbone_type: "dinov2"
-      backbone_variant: "dinov2-base"
-      freeze_backbone: 1
-      backbone_freeze_layers: "0:-2"
-      backbone_lr_scale: 0.01
-      drop_path_rate: 0.1
-      head_dropout: 0.2
-      augment_mount_jitter_prob: 0.4
-      augment_mount_jitter_rot_sigma: 2.0
-
-  # =========================================================================
-  # H7: dinov2-small 复现基线 (G3 同参数), 确保 quick 训练环境一致性
-  # 对照: V29-G3 (BEST=0.085°), 消除环境差异对 dinov2-base 对比的干扰
-  # =========================================================================
-  - name: "v30_H7_dinov2small_baseline"
-    description: "H7: dinov2-small baseline (G3 replication)"
-    dataset: "all"
-    version: "v30_H7_dinov2small_baseline"
+    version: "v30_G3_dinov2small_full"
     params:
       cam2bev_mode: "query"
       backbone_type: "dinov2"
@@ -307,3 +140,66 @@ experiments:
       augment_mount_jitter_prob: 0.7
       augment_mount_jitter_rot_sigma: 3.0
 
+  # =========================================================================
+  # G3-noAS: 同 G3 但关闭 ddp_auto_scale
+  # 消融目标: auto_scale 对 dinov2-small 32-node 训练的效果
+  # =========================================================================
+  - name: "v30_G3_dinov2small_noAS"
+    description: "G3-noAS: dinov2-small + unfreeze2 + no auto_scale (ablation)"
+    dataset: "all"
+    version: "v30_G3_dinov2small_noAS"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      ddp_auto_scale: 0
+
+  # =========================================================================
+  # G3-DANN: dinov2-small + unfreeze2 + DANN
+  # 消融目标: DANN 对 dinov2-small + unfreeze2 的效果
+  # =========================================================================
+  - name: "v30_G3_dinov2small_dann"
+    description: "G3-DANN: dinov2-small + unfreeze2 + DANN"
+    dataset: "all"
+    version: "v30_G3_dinov2small_dann"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.15
+
+  # =========================================================================
+  # G3-10deg: dinov2-small + unfreeze2 + 10° 扰动
+  # 消融目标: 10° 训练→5° 评估，验证更大扰动是否降低单帧精度上限
+  # =========================================================================
+  - name: "v30_G3_dinov2small_10deg"
+    description: "G3-10deg: dinov2-small + unfreeze2 + 10deg perturbation"
+    dataset: "all"
+    version: "v30_G3_dinov2small_10deg"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      angle_range_deg: 10

@@ -1,0 +1,131 @@
+# V30 Quick 泛化评估: dinov2-base backbone (单机训练, 9组 + 2基线)
+# 模型参数由 evaluate_checkpoint.py 从 checkpoint 自动检测
+# 注意: H5, H6, H7 尚未训练，评估时会自动跳过
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v30_quick.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v30_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v30_quick"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  eval_max_frames_per_seq: 400
+
+models:
+  # V30 quick experiments (priority order)
+  - label: "v30-H8-base-unfreeze-dann"
+    dir_name: "model_small_5deg_v30_H8_dinov2base_unfreeze_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H8: dinov2-base + partial unfreeze + strong jitter + DANN"
+
+  - label: "v30-H1-base-partial-unfreeze"
+    dir_name: "model_small_5deg_v30_H1_dinov2base_partial_unfreeze_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H1: dinov2-base + partial unfreeze (last2) + strong jitter"
+
+  - label: "v30-H9-base-unfreeze4-dann"
+    dir_name: "model_small_5deg_v30_H9_dinov2base_unfreeze4_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H9: dinov2-base + unfreeze 4 layers + strong jitter + DANN"
+
+  - label: "v30-H3-base-frozen-dann"
+    dir_name: "model_small_5deg_v30_H3_dinov2base_frozen_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H3: dinov2-base frozen + strong jitter + DANN"
+
+  - label: "v30-H4-base-unfreeze4"
+    dir_name: "model_small_5deg_v30_H4_dinov2base_unfreeze4_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H4: dinov2-base + unfreeze last 4 layers + strong jitter"
+
+  - label: "v30-H2-base-frozen"
+    dir_name: "model_small_5deg_v30_H2_dinov2base_frozen_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H2: dinov2-base fully frozen + strong jitter"
+
+  - label: "v30-H6-base-lower-lr"
+    dir_name: "model_small_5deg_v30_H6_dinov2base_lower_lr_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H6: dinov2-base + partial unfreeze + lower lr (0.005)"
+
+  - label: "v30-H5-base-moderate-jitter"
+    dir_name: "model_small_5deg_v30_H5_dinov2base_moderate_jitter_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H5: dinov2-base + partial unfreeze + moderate jitter"
+
+  - label: "v30-H7-small-baseline"
+    dir_name: "model_small_5deg_v30_H7_dinov2small_baseline_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H7: dinov2-small baseline (G3 replication)"
+
+
+  # V30 quick experiments (ckpt_400)
+  - label: "v30-H8-base-unfreeze-dann-ckpt_400"
+    dir_name: "model_small_5deg_v30_H8_dinov2base_unfreeze_dann_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H8: dinov2-base + partial unfreeze + strong jitter + DANN"
+
+  - label: "v30-H1-base-partial-unfreeze-ckpt_400"
+    dir_name: "model_small_5deg_v30_H1_dinov2base_partial_unfreeze_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H1: dinov2-base + partial unfreeze (last2) + strong jitter"
+
+  - label: "v30-H9-base-unfreeze4-dann-ckpt_400"
+    dir_name: "model_small_5deg_v30_H9_dinov2base_unfreeze4_dann_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H9: dinov2-base + unfreeze 4 layers + strong jitter + DANN"
+
+  - label: "v30-H3-base-frozen-dann-ckpt_400"
+    dir_name: "model_small_5deg_v30_H3_dinov2base_frozen_dann_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H3: dinov2-base frozen + strong jitter + DANN"
+
+  - label: "v30-H4-base-unfreeze4-ckpt_400"
+    dir_name: "model_small_5deg_v30_H4_dinov2base_unfreeze4_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H4: dinov2-base + unfreeze last 4 layers + strong jitter"
+
+  - label: "v30-H2-base-frozen-ckpt_400"
+    dir_name: "model_small_5deg_v30_H2_dinov2base_frozen_jitter_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H2: dinov2-base fully frozen + strong jitter"
+
+  - label: "v30-H6-base-lower-lr-ckpt_400"
+    dir_name: "model_small_5deg_v30_H6_dinov2base_lower_lr_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H6: dinov2-base + partial unfreeze + lower lr (0.005)"
+
+  - label: "v30-H5-base-moderate-jitter-ckpt_400"
+    dir_name: "model_small_5deg_v30_H5_dinov2base_moderate_jitter_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H5: dinov2-base + partial unfreeze + moderate jitter"
+
+  - label: "v30-H7-small-baseline-ckpt_400"
+    dir_name: "model_small_5deg_v30_H7_dinov2small_baseline_quick"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H7: dinov2-small baseline (G3 replication)"
