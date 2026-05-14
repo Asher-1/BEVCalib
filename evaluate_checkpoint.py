@@ -1315,8 +1315,14 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
         if sid not in unique_seqs:
             unique_seqs.append(sid)
 
+    pred_gt_path = os.path.join(eval_dir, "all_T_pred_gt.npz")
+    np.savez(pred_gt_path,
+             all_T_pred=T_pred_arr, all_T_gt=T_gt_arr,
+             sample_sequences=seq_arr)
+    print(f"   预测/GT数据提前保存至: {pred_gt_path}")
+
     agg_file = os.path.join(eval_dir, "temporal_aggregation.txt")
-    window_sizes = [1, 5, 10, 20, 50, 100, 200, 400, 800]
+    window_sizes = [1, 5, 10, 20, 50, 100, 200, 400, 800, 1600]
 
     calib_ratios = [0.05, 0.10, 0.20, 0.50]
 
@@ -1387,8 +1393,10 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
         f.write("=" * 80 + "\n\n")
 
         # === Section 1: Basic SVD-mean ===
+        # SVD is O(n*w) per frame; skip window>800 for performance
+        svd_window_sizes = [w for w in window_sizes if w <= 800]
         f.write("--- Section 1: SVD-Mean Temporal Aggregation ---\n")
-        for wsize in window_sizes:
+        for wsize in svd_window_sizes:
             label = "per-frame" if wsize == 1 else f"{wsize}-frame avg"
             errs = _compute_agg_errors(T_pred_arr, T_gt_arr, seq_arr, wsize, 'svd_mean')
             rot, roll, pitch, yaw = _format_errors(errs)
@@ -1403,7 +1411,7 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
 
         # === Section 2: Robust Median ===
         f.write("\n--- Section 2: Robust Median Temporal Aggregation ---\n")
-        for wsize in [1, 10, 50, 200, 400]:
+        for wsize in window_sizes:
             label = "per-frame" if wsize == 1 else f"{wsize}-frame med"
             errs = _compute_agg_errors(T_pred_arr, T_gt_arr, seq_arr, wsize, 'median')
             rot, roll, pitch, yaw = _format_errors(errs)
@@ -1418,7 +1426,7 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
 
         # === Section 3: Trimmed Mean ===
         f.write("\n--- Section 3: Trimmed-Mean (10% trim) Temporal Aggregation ---\n")
-        for wsize in [1, 10, 50, 200, 400]:
+        for wsize in window_sizes:
             label = "per-frame" if wsize == 1 else f"{wsize}-frame trm"
             errs = _compute_agg_errors(T_pred_arr, T_gt_arr, seq_arr, wsize, 'trimmed')
             rot, roll, pitch, yaw = _format_errors(errs)
@@ -1596,13 +1604,6 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
     agg_T_path = os.path.join(eval_dir, "temporal_aggregated_T.npy")
     np.save(agg_T_path, T_agg_per_sample)
     print(f"   聚合外参保存至 (GT-free): {agg_T_path}")
-
-    # Save raw prediction and GT arrays for future re-analysis
-    pred_gt_path = os.path.join(eval_dir, "all_T_pred_gt.npz")
-    np.savez(pred_gt_path,
-             all_T_pred=T_pred_arr, all_T_gt=T_gt_arr,
-             sample_sequences=seq_arr)
-    print(f"   预测/GT数据保存至: {pred_gt_path}")
 
     print(f"   聚合分析保存至: {agg_file}")
     return T_agg_per_sample

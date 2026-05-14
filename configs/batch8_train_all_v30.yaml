@@ -42,7 +42,7 @@ defaults:
 
     use_ddp: true
     ddp_gpus: 8
-    nnodes: 32
+    nnodes: 16
     node_rank: null
     master_addr: null
     master_port: null

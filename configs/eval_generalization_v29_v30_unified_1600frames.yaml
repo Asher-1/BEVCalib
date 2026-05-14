@@ -1,0 +1,35 @@
+# V29 vs V30 统一对比评估: 1600帧版本
+# 验证: 1600帧聚合效果 (理论预测 MEDW1600 ≈ 0.050°)
+#
+# 注: Seq 04(595), 05(533), 10(405) 不足 1600 帧, 使用全部可用帧
+# 其余 9 个 seq 均有 970-6431 帧, 大部分支持 1600 帧聚合
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v29_v30_unified_1600frames.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v30_quick"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v29_v30_unified_1600frames"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 28800
+  eval_max_frames_per_seq: 1600
+
+models:
+  - label: "v29-G3-unfreeze2-no-dann"
+    base_dir: "logs/all_training_data/v29_quick"
+    dir_name: "model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "G3: dinov2-small partial unfreeze (last2) + strong jitter (no DANN)"
+
+  - label: "v30-H8-unfreeze2-dann"
+    dir_name: "model_small_5deg_v30_H8_dinov2base_unfreeze_dann_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "H8: dinov2-base partial unfreeze (last2) + strong jitter + DANN"
