@@ -1454,6 +1454,11 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
     best_desc = ""
     best_roll = best_pitch = best_yaw = 0.0
 
+    _chart_data_svd = []  # list of (wsize, rot, roll, pitch, yaw)
+    _chart_data_med = []
+    _chart_data_trm = []
+    per_seq_rows = []
+
     with open(agg_file, 'w') as f:
         f.write("MULTI-FRAME TEMPORAL AGGREGATION ANALYSIS\n")
         f.write("=" * 80 + "\n\n")
@@ -1471,6 +1476,7 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
             f.write(line + "\n")
             print(f"   [SVD] {label:>15s}: Rot={rot:.4f}° "
                   f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            _chart_data_svd.append((wsize, rot, roll, pitch, yaw))
             if rot < best_rot:
                 best_rot, best_desc = rot, f"SVDW{wsize}"
                 best_roll, best_pitch, best_yaw = roll, pitch, yaw
@@ -1486,6 +1492,7 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
             f.write(line + "\n")
             print(f"   [MED] {label:>15s}: Rot={rot:.4f}° "
                   f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            _chart_data_med.append((wsize, rot, roll, pitch, yaw))
             if rot < best_rot:
                 best_rot, best_desc = rot, f"MEDW{wsize}"
                 best_roll, best_pitch, best_yaw = roll, pitch, yaw
@@ -1501,6 +1508,7 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
             f.write(line + "\n")
             print(f"   [TRM] {label:>15s}: Rot={rot:.4f}° "
                   f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+            _chart_data_trm.append((wsize, rot, roll, pitch, yaw))
             if rot < best_rot:
                 best_rot, best_desc = rot, f"TRMW{wsize}"
                 best_roll, best_pitch, best_yaw = roll, pitch, yaw
@@ -1646,6 +1654,11 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
               f"(R={oracle_best_roll:.4f}° P={oracle_best_pitch:.4f}° "
               f"Y={oracle_best_yaw:.4f}°)")
 
+    # === Generate temporal aggregation charts ===
+    _generate_temporal_agg_charts(
+        _chart_data_svd, _chart_data_med, _chart_data_trm,
+        per_seq_rows, best_desc, eval_dir)
+
     # Compute per-sequence aggregated transforms using BEST (deployable) method
     best_method_key, _ = _parse_deployable_best_desc(best_desc)
 
@@ -1673,6 +1686,155 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
 
     print(f"   聚合分析保存至: {agg_file}")
     return T_agg_per_sample
+
+
+def _generate_temporal_agg_charts(chart_svd, chart_med, chart_trm,
+                                   per_seq_rows, best_desc, eval_dir):
+    """Generate charts for temporal aggregation analysis."""
+    charts_dir = os.path.join(eval_dir, "charts")
+    os.makedirs(charts_dir, exist_ok=True)
+
+    def _save(fig, name):
+        fig.savefig(os.path.join(charts_dir, name), dpi=150, bbox_inches='tight',
+                    facecolor='white')
+        plt.close(fig)
+
+    # Chart 1: Temporal convergence - Rot error vs window size for all methods
+    if chart_svd or chart_med or chart_trm:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+
+        method_data = [
+            (chart_svd, 'SVD-Mean', '#2196F3', 'o'),
+            (chart_med, 'Robust Median', '#FF5722', 's'),
+            (chart_trm, 'Trimmed Mean', '#4CAF50', '^'),
+        ]
+        for data, label, color, marker in method_data:
+            if not data:
+                continue
+            ws = [d[0] for d in data]
+            rots = [d[1] for d in data]
+            ax1.plot(ws, rots, color=color, marker=marker, markersize=6,
+                     linewidth=2, label=label, alpha=0.9)
+            for w, r in zip(ws, rots):
+                if w in (1, 50, 200, 400, 800):
+                    ax1.annotate(f'{r:.3f}°', (w, r), textcoords="offset points",
+                                 xytext=(0, 10), ha='center', fontsize=8, color=color)
+
+        ax1.set_xscale('symlog', linthresh=2)
+        ax1.set_xlabel('Window Size (frames)', fontsize=12)
+        ax1.set_ylabel('Rotation Error (°)', fontsize=12)
+        ax1.set_title('Temporal Aggregation Convergence', fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=10)
+        ax1.grid(True, alpha=0.3)
+
+        for data, label, color, marker in method_data:
+            if not data:
+                continue
+            ws = [d[0] for d in data]
+            rolls = [d[2] for d in data]
+            pitches = [d[3] for d in data]
+            yaws = [d[4] for d in data]
+            ax2.plot(ws, rolls, color=color, marker=marker, markersize=4,
+                     linewidth=1.5, linestyle='-', alpha=0.7, label=f'{label} Roll')
+            ax2.plot(ws, pitches, color=color, marker=marker, markersize=4,
+                     linewidth=1.5, linestyle='--', alpha=0.7, label=f'{label} Pitch')
+            ax2.plot(ws, yaws, color=color, marker=marker, markersize=4,
+                     linewidth=1.5, linestyle=':', alpha=0.7, label=f'{label} Yaw')
+
+        ax2.set_xscale('symlog', linthresh=2)
+        ax2.set_xlabel('Window Size (frames)', fontsize=12)
+        ax2.set_ylabel('Component Error (°)', fontsize=12)
+        ax2.set_title('RPY Convergence by Method', fontsize=14, fontweight='bold')
+        ax2.legend(fontsize=7, ncol=3, loc='upper right')
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        _save(fig, 'temporal_convergence.png')
+        print(f"   ✓ temporal_convergence.png")
+
+    # Chart 2: Methods comparison at key window sizes
+    if chart_svd and chart_med and chart_trm:
+        key_windows = [1, 50, 200, 400]
+        svd_dict = {d[0]: d for d in chart_svd}
+        med_dict = {d[0]: d for d in chart_med}
+        trm_dict = {d[0]: d for d in chart_trm}
+
+        available_keys = [w for w in key_windows
+                          if w in svd_dict and w in med_dict and w in trm_dict]
+        if available_keys:
+            n = len(available_keys)
+            x = np.arange(n)
+            w = 0.25
+            fig, ax = plt.subplots(figsize=(max(10, n * 3), 6))
+            svd_vals = [svd_dict[k][1] for k in available_keys]
+            med_vals = [med_dict[k][1] for k in available_keys]
+            trm_vals = [trm_dict[k][1] for k in available_keys]
+            bars_s = ax.bar(x - w, svd_vals, w, label='SVD-Mean', color='#2196F3',
+                            alpha=0.85, edgecolor='white')
+            bars_m = ax.bar(x, med_vals, w, label='Robust Median', color='#FF5722',
+                            alpha=0.85, edgecolor='white')
+            bars_t = ax.bar(x + w, trm_vals, w, label='Trimmed Mean', color='#4CAF50',
+                            alpha=0.85, edgecolor='white')
+            for bars in [bars_s, bars_m, bars_t]:
+                for bar in bars:
+                    h = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., h + 0.005,
+                            f'{h:.3f}°', ha='center', va='bottom', fontsize=9)
+            xlabels = ['Per-frame' if k == 1 else f'{k}-frame' for k in available_keys]
+            ax.set_xticks(x)
+            ax.set_xticklabels(xlabels, fontsize=11)
+            ax.set_ylabel('Rotation Error (°)', fontsize=12)
+            ax.set_title('Aggregation Methods Comparison', fontsize=14, fontweight='bold')
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.2, axis='y')
+            plt.tight_layout()
+            _save(fig, 'temporal_methods_comparison.png')
+            print(f"   ✓ temporal_methods_comparison.png")
+
+    # Chart 3: Per-sequence BEST breakdown
+    if per_seq_rows:
+        n = len(per_seq_rows)
+        seq_labels = [str(r['seq']) for r in per_seq_rows]
+        rots = [r['rot_error'] for r in per_seq_rows]
+        rolls = [r['roll_error'] for r in per_seq_rows]
+        pitches = [r['pitch_error'] for r in per_seq_rows]
+        yaws = [r['yaw_error'] for r in per_seq_rows]
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(12, n * 1.5), 10))
+
+        x = np.arange(n)
+        colors_rot = ['#e74c3c' if r > np.mean(rots) * 1.5 else
+                       '#f39c12' if r > np.mean(rots) else '#2ecc71' for r in rots]
+        bars = ax1.bar(x, rots, color=colors_rot, alpha=0.85, edgecolor='white', linewidth=1)
+        ax1.axhline(np.mean(rots), color='blue', ls='--', lw=1.5,
+                     label=f'Mean={np.mean(rots):.4f}°')
+        for i, v in enumerate(rots):
+            ax1.text(i, v + 0.002, f'{v:.4f}', ha='center', fontsize=8, fontweight='bold')
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(seq_labels, fontsize=10)
+        ax1.set_ylabel('Rotation Error (°)', fontsize=12)
+        ax1.set_title(f'Per-Sequence Rotation Error (BEST: {best_desc})',
+                       fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=10)
+        ax1.grid(True, alpha=0.2, axis='y')
+
+        w = 0.25
+        ax2.bar(x - w, rolls, w, label='Roll', color='#E45756', alpha=0.85)
+        ax2.bar(x, pitches, w, label='Pitch', color='#4C78A8', alpha=0.85)
+        ax2.bar(x + w, yaws, w, label='Yaw', color='#72B7B2', alpha=0.85)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(seq_labels, fontsize=10)
+        ax2.set_ylabel('Component Error (°)', fontsize=12)
+        ax2.set_title(f'Per-Sequence RPY Breakdown (BEST: {best_desc})',
+                       fontsize=14, fontweight='bold')
+        ax2.legend(fontsize=10)
+        ax2.grid(True, alpha=0.2, axis='y')
+
+        plt.tight_layout()
+        _save(fig, 'temporal_per_seq_breakdown.png')
+        print(f"   ✓ temporal_per_seq_breakdown.png")
+
+    print(f"   ✓ 时序聚合图表已保存至: {charts_dir}/")
 
 
 def _generate_temporal_projections(vis_data_cache, T_agg_per_sample, eval_dir,

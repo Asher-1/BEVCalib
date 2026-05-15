@@ -362,6 +362,30 @@ def parse_train_log_final(log_path):
     return last_train
 
 
+def _detect_backbone_from_model(mcfg):
+    """Detect backbone type from training log or dir_name.
+
+    Priority: train.log > dir_name > default 'Swin'.
+    """
+    model_base = _resolve_model_base(mcfg)
+    train_log = os.path.join(model_base, "train.log")
+    if os.path.isfile(train_log):
+        with open(train_log, 'r', errors='ignore') as f:
+            for line in f:
+                if 'backbone=' in line:
+                    if 'backbone=dinov2' in line:
+                        return 'DINOv2'
+                    elif 'backbone=swin' in line.lower():
+                        return 'Swin'
+                if '[DINOv2Encoder]' in line:
+                    return 'DINOv2'
+                if '[SwinTransformer]' in line:
+                    return 'Swin'
+    if 'dinov2' in mcfg.get('dir_name', '').lower():
+        return 'DINOv2'
+    return 'Swin'
+
+
 def _resolve_model_base(mcfg):
     """Resolve model base directory, respecting per-model base_dir override."""
     per_model_base_dir = mcfg.get("base_dir")
@@ -527,10 +551,16 @@ def _precheck_models():
         extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
 
         if os.path.isfile(extrinsics_path) and not getattr(_script_args, 'force', False):
+            _is_complete = False
             with open(extrinsics_path, 'r') as f:
-                if "EVALUATION STATISTICS" in f.read():
-                    done.append((idx, label, mcfg, per_model_dir, None, "eval complete"))
-                    continue
+                _content = f.read()
+                _is_complete = "EVALUATION STATISTICS" in _content
+            if not _is_complete:
+                _ta_path = os.path.join(per_model_dir, "temporal_aggregation.txt")
+                _is_complete = os.path.isfile(_ta_path)
+            if _is_complete:
+                done.append((idx, label, mcfg, per_model_dir, None, "eval complete"))
+                continue
 
         model_base = _resolve_model_base(mcfg)
         ckpt_path = os.path.join(model_base,
@@ -856,6 +886,7 @@ def collect_all_stats():
             train_log = os.path.join(_resolve_model_base(mcfg), "train.log")
             train_metrics = parse_train_log_final(train_log)
             stats['train_metrics'] = train_metrics
+            stats['backbone'] = _detect_backbone_from_model(mcfg)
             ta_path = os.path.join(per_model_dir, "temporal_aggregation.txt")
             stats['temporal'] = _parse_temporal_aggregation(ta_path)
             all_stats.append(stats)
@@ -1106,6 +1137,134 @@ def generate_charts(all_stats):
         plt.tight_layout()
         _save(fig, 'translation_components.png')
 
+    # Chart 6: Temporal aggregation convergence (multi-model)
+    temporal_models = [s for s in all_stats if s.get('temporal', {}).get('svd')]
+    if temporal_models:
+        fig, ax = plt.subplots(figsize=(14, 8))
+        cmap = plt.cm.get_cmap('tab10', len(temporal_models))
+        markers = ['o', 's', '^', 'D', 'v', 'P', '*', 'X', 'p', 'h']
+
+        for idx, s in enumerate(temporal_models):
+            svd_data = s['temporal'].get('svd', {})
+            if not svd_data:
+                continue
+            ws = sorted(svd_data.keys())
+            rots = [svd_data[w]['rot'] for w in ws]
+            marker = markers[idx % len(markers)]
+            ax.plot(ws, rots, color=cmap(idx), marker=marker, markersize=5,
+                    linewidth=1.8, label=s['label'], alpha=0.85)
+
+        ax.set_xscale('symlog', linthresh=2)
+        ax.set_xlabel('Window Size (frames)', fontsize=12)
+        ax.set_ylabel('Rotation Error (°)', fontsize=12)
+        ax.set_title('Temporal Aggregation Convergence (SVD-Mean, All Models)',
+                      fontsize=14, fontweight='bold')
+        ax.legend(fontsize=8, loc='upper right', ncol=2)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        _save(fig, 'temporal_convergence_all.png')
+
+    # Chart 7: BEST aggregated ranking (horizontal bar)
+    best_models = [s for s in all_stats
+                   if s.get('temporal', {}).get('best', {}).get('rot') is not None]
+    if best_models:
+        sorted_by_best = sorted(best_models, key=lambda s: s['temporal']['best']['rot'])
+        nb = len(sorted_by_best)
+        fig, ax = plt.subplots(figsize=(12, max(4, nb * 0.7)))
+        b_labels = [s['label'] for s in sorted_by_best]
+        b_rots = [s['temporal']['best']['rot'] for s in sorted_by_best]
+        b_methods = [s['temporal']['best'].get('method', '?') for s in sorted_by_best]
+        bar_colors = ['#2ecc71' if r < 0.1 else '#f39c12' if r < 0.3 else '#e74c3c'
+                      for r in b_rots]
+        bars = ax.barh(range(nb), b_rots, color=bar_colors, edgecolor='white',
+                       linewidth=1.5, height=0.6)
+        for i, (bar, v, m) in enumerate(zip(bars, b_rots, b_methods)):
+            ax.text(v + 0.005, i, f'{v:.3f}° ({m})', va='center', fontsize=10,
+                    fontweight='bold')
+        ax.set_yticks(range(nb))
+        ax.set_yticklabels(b_labels, fontsize=11)
+        ax.set_xlabel('BEST Aggregated Rotation Error (°)', fontsize=12)
+        ax.set_title('Model Ranking by BEST Temporal Aggregation (lower is better)',
+                      fontsize=14, fontweight='bold')
+        ax.axvline(0.1, color='red', ls='--', lw=1.5, alpha=0.7, label='0.1° target')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.2, axis='x')
+        ax.invert_yaxis()
+        plt.tight_layout()
+        _save(fig, 'best_aggregated_ranking.png')
+
+    # Chart 8: BEST vs Per-frame scatter
+    if best_models:
+        fig, ax = plt.subplots(figsize=(10, 8))
+        perframe_vals = [s.get('rot_error_mean', 0) for s in best_models]
+        best_vals = [s['temporal']['best']['rot'] for s in best_models]
+        scat_labels = [s['label'] for s in best_models]
+        sc_colors = [colors[labels.index(s['label'])] if s['label'] in labels else '#888'
+                     for s in best_models]
+        ax.scatter(perframe_vals, best_vals, s=120, c=sc_colors, edgecolor='black',
+                   linewidth=1, zorder=3, alpha=0.85)
+        for i, lbl in enumerate(scat_labels):
+            ax.annotate(lbl, (perframe_vals[i], best_vals[i]),
+                        textcoords="offset points", xytext=(8, 5), fontsize=8)
+        max_v = max(max(perframe_vals), max(best_vals)) * 1.15
+        ax.plot([0, max_v], [0, max_v], 'k--', alpha=0.3, label='y=x (no improvement)')
+        ax.axhline(0.1, color='red', ls=':', lw=1.5, alpha=0.6, label='BEST 0.1° target')
+        ax.set_xlabel('Per-frame Mean Rotation Error (°)', fontsize=12)
+        ax.set_ylabel('BEST Aggregated Rotation Error (°)', fontsize=12)
+        ax.set_title('Per-frame vs BEST Aggregated (lower-right = high gain)',
+                      fontsize=14, fontweight='bold')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        _save(fig, 'best_vs_perframe_scatter.png')
+
+    # Chart 9: Best model per-sequence breakdown
+    if sorted_by_best:
+        top_model = sorted_by_best[0]
+        per_seq_data = top_model.get('temporal', {}).get('best_per_sequence', {})
+        per_seq_list = per_seq_data.get('per_sequence', []) if per_seq_data else []
+        if per_seq_list:
+            ns = len(per_seq_list)
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(12, ns * 1.5), 10))
+            seq_ids = [str(p['seq']) for p in per_seq_list]
+            rots_ps = [p['rot'] for p in per_seq_list]
+            rolls_ps = [p['roll'] for p in per_seq_list]
+            pitches_ps = [p['pitch'] for p in per_seq_list]
+            yaws_ps = [p['yaw'] for p in per_seq_list]
+            xs = np.arange(ns)
+
+            mean_rot_ps = np.mean(rots_ps)
+            bar_cs = ['#e74c3c' if r > mean_rot_ps * 1.5 else
+                       '#f39c12' if r > mean_rot_ps else '#2ecc71' for r in rots_ps]
+            ax1.bar(xs, rots_ps, color=bar_cs, alpha=0.85, edgecolor='white')
+            ax1.axhline(mean_rot_ps, color='blue', ls='--', lw=1.5,
+                         label=f'Mean={mean_rot_ps:.4f}°')
+            for i, v in enumerate(rots_ps):
+                ax1.text(i, v + 0.002, f'{v:.4f}', ha='center', fontsize=8,
+                         fontweight='bold')
+            ax1.set_xticks(xs)
+            ax1.set_xticklabels(seq_ids, fontsize=10)
+            ax1.set_ylabel('Rotation Error (°)', fontsize=12)
+            ax1.set_title(f'Best Model ({top_model["label"]}) Per-Sequence Rot Error',
+                           fontsize=14, fontweight='bold')
+            ax1.legend(fontsize=10)
+            ax1.grid(True, alpha=0.2, axis='y')
+
+            w_bar = 0.25
+            ax2.bar(xs - w_bar, rolls_ps, w_bar, label='Roll', color='#E45756', alpha=0.85)
+            ax2.bar(xs, pitches_ps, w_bar, label='Pitch', color='#4C78A8', alpha=0.85)
+            ax2.bar(xs + w_bar, yaws_ps, w_bar, label='Yaw', color='#72B7B2', alpha=0.85)
+            ax2.set_xticks(xs)
+            ax2.set_xticklabels(seq_ids, fontsize=10)
+            ax2.set_ylabel('Component Error (°)', fontsize=12)
+            ax2.set_title(f'Best Model ({top_model["label"]}) Per-Sequence RPY Breakdown',
+                           fontsize=14, fontweight='bold')
+            ax2.legend(fontsize=10)
+            ax2.grid(True, alpha=0.2, axis='y')
+
+            plt.tight_layout()
+            _save(fig, 'best_model_per_seq.png')
+
     print(f"   All charts saved to: {charts_dir}/")
 
 
@@ -1203,8 +1362,10 @@ def generate_report(all_stats):
             if 'version' in c:
                 parts.append(c['version'])
             desc = ', '.join(parts) if parts else s['label']
-        bev_mode = "Query-BEV" if "query" in s['label'].lower() or "query" in desc.lower() else "LSS"
-        backbone = "DINOv2" if "dinov2" in s['label'].lower() or "dinov2" in desc.lower() else "Swin"
+        _dir = c.get('dir_name', '').lower()
+        _all_text = f"{s['label'].lower()} {desc.lower()} {_dir}"
+        bev_mode = "Query-BEV" if "query" in _all_text else "LSS"
+        backbone = s.get('backbone', 'DINOv2' if 'dinov2' in _all_text else 'Swin')
         if "frozen" in s['label'].lower() or "frozen" in desc.lower():
             backbone += " (frozen)"
         lines.append(f"| {s['label']} | {bev_mode} | {backbone} | {desc} | {c.get('ckpt', 'best_val')} |")
@@ -1423,6 +1584,15 @@ def generate_report(all_stats):
                              "BEST 机制自动选择最优组合, 无需人工指定。"
                              "报告展示 SVD/MED 聚合趋势有助于理解误差随帧数的收敛行为。")
                 lines.append("")
+
+        lines.append("![Temporal Convergence](charts/temporal_convergence_all.png)")
+        lines.append("")
+        lines.append("![BEST Aggregated Ranking](charts/best_aggregated_ranking.png)")
+        lines.append("")
+        lines.append("![BEST vs Per-frame](charts/best_vs_perframe_scatter.png)")
+        lines.append("")
+        lines.append("![Best Model Per-Sequence](charts/best_model_per_seq.png)")
+        lines.append("")
 
     _sec = 5 if has_temporal else 4
 
