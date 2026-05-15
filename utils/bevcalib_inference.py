@@ -251,7 +251,7 @@ class TemporalCalibrationAggregator:
         else:
             R_agg = TemporalCalibrationAggregator._axis_angle_median(Rs)
 
-        t_agg = np.median(ts, axis=0)
+        t_agg = np.mean(ts, axis=0)
 
         agg_T = np.eye(4, dtype=np.float64)
         agg_T[:3, :3] = R_agg
@@ -283,6 +283,226 @@ class TemporalCalibrationAggregator:
 
 
 SequenceMedianAggregator = TemporalCalibrationAggregator
+
+
+def infer_sequence(
+    ckpt_path,
+    data_dir,
+    seq_ids=None,
+    max_frames=800,
+    agg_method='axis_angle_median',
+    angle_range_deg=5.0,
+    eval_seed=42,
+    batch_size=8,
+    device='cuda',
+    rotation_only=None,
+    img_shape=(360, 640),
+    verbose=True,
+    **model_kwargs,
+):
+    """
+    Run BEVCalib inference on sequence(s) and return MEDW-aggregated calibration.
+
+    Reproduces the same pipeline as evaluate_checkpoint.py:
+      1. Load model from checkpoint
+      2. Load sequence data via CustomDataset
+      3. Apply fixed-seed perturbation to GT extrinsics
+      4. Run model forward per frame
+      5. Aggregate all frames per sequence via axis-angle median (MEDW)
+      6. Compute geodesic errors vs GT
+
+    Args:
+        ckpt_path:        path to .pth checkpoint
+        data_dir:         dataset root (KITTI-like layout with sequences/ subdir)
+        seq_ids:          list of sequence IDs to evaluate, or None for all
+        max_frames:       max frames per sequence for aggregation (default 800)
+        agg_method:       'axis_angle_median' (MEDW, default) or 'svd_mean'
+        angle_range_deg:  perturbation range in degrees (must match eval config)
+        eval_seed:        random seed for perturbation (must match eval config)
+        batch_size:       inference batch size
+        device:           'cuda' or 'cpu'
+        rotation_only:    None=auto-detect from checkpoint
+        img_shape:        (H, W) input image size
+        verbose:          print progress
+        **model_kwargs:   extra kwargs for load_bevcalib_inference
+
+    Returns:
+        list of dict, one per sequence:
+            {
+                'seq_id':       str,
+                'agg_T':        (4, 4) ndarray — aggregated LiDAR→Camera transform,
+                'gt_T':         (4, 4) ndarray — ground truth LiDAR→Camera,
+                'n_frames':     int,
+                'rot_error':    float (degrees, geodesic),
+                'roll_error':   float,
+                'pitch_error':  float,
+                'yaw_error':    float,
+                'confidence':   dict (per-axis std),
+            }
+    """
+    import sys as _sys
+    import cv2
+    _kitti_dir = os.path.join(os.path.dirname(__file__), '..', 'kitti-bev-calib')
+    if _kitti_dir not in _sys.path:
+        _sys.path.insert(0, _kitti_dir)
+    from custom_dataset import CustomDataset
+    from tools import generate_single_perturbation_from_T
+    from visualization import compute_pose_errors
+    from torch.utils.data import DataLoader
+
+    wrapper, epoch = load_bevcalib_inference(
+        ckpt_path, device=device, img_shape=img_shape,
+        rotation_only=rotation_only, **model_kwargs,
+    )
+    _rotation_only = wrapper.rotation_only
+    if verbose:
+        print(f"[infer_sequence] model loaded (epoch={epoch}, "
+              f"rotation_only={_rotation_only})")
+
+    target_w, target_h = img_shape[1], img_shape[0]
+    ds = CustomDataset(
+        data_folder=data_dir,
+        suf='.png',
+        sequences=seq_ids,
+        target_size=(target_w, target_h),
+        max_frames_per_seq=max_frames,
+    )
+    if verbose:
+        print(f"[infer_sequence] dataset: {len(ds)} frames, "
+              f"sequences={ds.sequences}")
+
+    seq_boundaries = []
+    cur_seq, cur_start = None, 0
+    idx_to_seq = {}
+    for i, fpath in enumerate(ds.all_files):
+        sid = fpath.split('/')[0]
+        idx_to_seq[i] = sid
+        if sid != cur_seq:
+            if cur_seq is not None:
+                seq_boundaries.append((cur_seq, cur_start, i - 1))
+            cur_seq, cur_start = sid, i
+    if cur_seq is not None:
+        seq_boundaries.append((cur_seq, cur_start, len(ds.all_files) - 1))
+
+    def _collate(batch):
+        raw_imgs, raw_pcs, gts, Ks = [], [], [], []
+        for item in batch:
+            if item is None:
+                continue
+            img, pc, gt_T, K = item
+            img_np = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            if img_np.shape[:2] != (target_h, target_w):
+                h, w = img_np.shape[:2]
+                K = np.array(K, dtype=np.float64)
+                K[0, 0] *= target_w / w
+                K[0, 2] *= target_w / w
+                K[1, 1] *= target_h / h
+                K[1, 2] *= target_h / h
+                img_np = cv2.resize(img_np, (target_w, target_h))
+            raw_imgs.append(img_np)
+            raw_pcs.append(np.array(pc)[:, :3])
+            gts.append(np.array(gt_T))
+            Ks.append(np.array(K))
+        if not raw_imgs:
+            return None
+        max_pts = max(p.shape[0] for p in raw_pcs)
+        pcs, masks = [], []
+        for pc in raw_pcs:
+            mask = np.concatenate([np.ones(pc.shape[0]),
+                                   np.zeros(max_pts - pc.shape[0])])
+            if pc.shape[0] < max_pts:
+                pc = np.concatenate([pc, np.full((max_pts - pc.shape[0], 3),
+                                                 999999, dtype=pc.dtype)])
+            pcs.append(pc)
+            masks.append(mask)
+        return (np.stack(raw_imgs), np.stack(pcs), np.stack(masks),
+                np.stack(gts), np.stack(Ks))
+
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                        num_workers=4, collate_fn=_collate)
+
+    np.random.seed(eval_seed)
+    torch.manual_seed(eval_seed)
+
+    per_seq_preds = {}
+    per_seq_gt = {}
+    sample_idx = 0
+
+    with torch.no_grad():
+        for batch_data in loader:
+            if batch_data is None:
+                continue
+            imgs_np, pcs_np, masks_np, gt_T_np, K_np = batch_data
+            B = imgs_np.shape[0]
+
+            init_T_np, _, _ = generate_single_perturbation_from_T(
+                gt_T_np,
+                angle_range_deg=angle_range_deg,
+                trans_range=0.0 if _rotation_only else 0.15,
+                rotation_only=_rotation_only,
+            )
+
+            imgs_t = torch.from_numpy(imgs_np).permute(0, 3, 1, 2).float().to(device)
+            pcs_t = torch.from_numpy(pcs_np).float().to(device)
+            init_T_t = torch.from_numpy(init_T_np).float().to(device)
+            post_T = torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1).contiguous()
+            K_t = torch.from_numpy(K_np).float().to(device)
+
+            with torch.cuda.amp.autocast():
+                pred_T = wrapper(imgs_t, pcs_t, init_T_t, post_T, K_t)
+            pred_np = pred_T.detach().cpu().numpy()
+
+            for i in range(B):
+                sid = idx_to_seq.get(sample_idx, 'unknown')
+                if sid not in per_seq_preds:
+                    per_seq_preds[sid] = []
+                    per_seq_gt[sid] = gt_T_np[i].copy()
+                per_seq_preds[sid].append(pred_np[i].copy())
+                sample_idx += 1
+
+            if verbose and sample_idx % 100 == 0:
+                print(f"  processed {sample_idx}/{len(ds)} frames", flush=True)
+
+    results = []
+    for sid, start, end in seq_boundaries:
+        preds = per_seq_preds.get(sid, [])
+        if not preds:
+            continue
+        gt_T = per_seq_gt[sid]
+
+        agg = TemporalCalibrationAggregator(
+            min_frames=1, max_frames=len(preds), method=agg_method)
+        for p in preds:
+            agg.add(p)
+        agg_T = agg.aggregate()
+        conf = agg.get_confidence()
+        errs = compute_pose_errors(agg_T, gt_T)
+
+        entry = {
+            'seq_id': sid,
+            'agg_T': agg_T,
+            'gt_T': gt_T,
+            'n_frames': len(preds),
+            'rot_error': errs['rot_error'],
+            'roll_error': errs['roll_error'],
+            'pitch_error': errs['pitch_error'],
+            'yaw_error': errs['yaw_error'],
+            'confidence': conf,
+        }
+        results.append(entry)
+        if verbose:
+            print(f"  Seq {sid}: {len(preds)} frames → "
+                  f"Rot={errs['rot_error']:.4f}° "
+                  f"(R={errs['roll_error']:.3f}° "
+                  f"P={errs['pitch_error']:.3f}° "
+                  f"Y={errs['yaw_error']:.3f}°)")
+
+    if verbose and results:
+        rots = [r['rot_error'] for r in results]
+        print(f"\n  Overall MEDW{max_frames} ({len(results)} sequences): "
+              f"Mean Rot = {np.mean(rots):.4f}° ± {np.std(rots):.4f}°")
+
+    return results
 
 
 def _detect_use_mlp_head(state_dict):
@@ -506,6 +726,8 @@ def load_bevcalib_inference(
     scatter_reduce="sum",
     bev_pool_factor=0,
     max_attn_tokens=0,
+    backbone_type=None,
+    backbone_variant=None,
 ):
     """
     Load a BEVCalib checkpoint and return an inference wrapper.
@@ -524,6 +746,8 @@ def load_bevcalib_inference(
         bev_pool_factor: BEV avg-pool factor before transformer (must match training)
         max_attn_tokens: max tokens fed to transformer (0 = all H*W; >0 packs
                          valid tokens via topk+gather to cut O(S^2) attention cost)
+        backbone_type:   None=auto-detect, 'swin' or 'dinov2'
+        backbone_variant: None=auto-detect, e.g. 'dinov2-small', 'dinov2-base'
 
     Returns:
         wrapper: BEVCalibInference on the specified device
@@ -533,7 +757,7 @@ def load_bevcalib_inference(
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
     state = ckpt.get("model_state_dict", ckpt)
-
+    ckpt_args = ckpt.get('args', {})
     if use_mlp_head is None:
         use_mlp_head = _detect_use_mlp_head(state)
         print(f"[load] Auto-detected use_mlp_head={use_mlp_head}")
@@ -552,12 +776,23 @@ def load_bevcalib_inference(
                 rotation_only = not has_trans
         print(f"[load] Auto-detected rotation_only={rotation_only}")
 
-    ckpt_args = ckpt.get('args', {})
     _intrinsic_input = ckpt_args.get('intrinsic_input', False)
     _fuser_type = ckpt_args.get('fuser_type', 'concat')
+
+    if backbone_type is None:
+        backbone_type = ckpt_args.get('backbone_type', None)
+        if backbone_type is None:
+            has_dinov2 = any('dinov2' in k for k in state)
+            backbone_type = 'dinov2' if has_dinov2 else 'swin'
+        print(f"[load] Auto-detected backbone_type={backbone_type}")
+    if backbone_variant is None:
+        backbone_variant = ckpt_args.get('backbone_variant', 'dinov2-small')
+        print(f"[load] Auto-detected backbone_variant={backbone_variant}")
     print(f"[load] voxel_mode={voxel_mode}, to_bev_mode={to_bev_mode}, scatter_reduce={scatter_reduce}"
           f", rotation_only={rotation_only}, fuser_type={_fuser_type}"
           f"{', intrinsic_input=True' if _intrinsic_input else ''}")
+    _domain_adv = ckpt_args.get('domain_adversarial', False)
+    _cam2bev = ckpt_args.get('cam2bev_mode', 'lss')
     model = BEVCalib(
         deformable=deformable,
         bev_encoder=bev_encoder,
@@ -570,6 +805,10 @@ def load_bevcalib_inference(
         bev_pool_factor=bev_pool_factor,
         intrinsic_input=_intrinsic_input,
         fuser_type=_fuser_type,
+        backbone_type=backbone_type,
+        backbone_variant=backbone_variant,
+        domain_adversarial=_domain_adv,
+        cam2bev_mode=_cam2bev,
     )
 
     _adapt_proj_heads_to_checkpoint(model, state, device)

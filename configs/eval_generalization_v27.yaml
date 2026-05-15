@@ -14,8 +14,8 @@ eval_params:
   trans_range: 0.15
   batch_size: 16
   vis_interval: 200
-  timeout: 7200
-  eval_max_frames_per_seq: 400
+  timeout: 14400
+  eval_max_frames_per_seq: 800
 
 models:
   - label: "v27-E1-v24b-repro"

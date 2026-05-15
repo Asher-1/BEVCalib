@@ -802,13 +802,141 @@ def _run_temporal_eval(cfg, device, args):
         print(f"\nReport saved to: {output_path}")
 
 
+def _run_sequence(cfg, device, args):
+    """Run sequence-level inference with MEDW temporal aggregation.
+
+    Reproduces evaluate_checkpoint.py's pipeline via infer_sequence(),
+    so the output calibration and errors match the evaluation reports.
+    """
+    from bevcalib_inference import infer_sequence
+
+    data_dir = args.data_dir or cfg.get("dataset_root")
+    if not data_dir:
+        raise ValueError("--data-dir (or dataset_root in config) is required "
+                         "for sequence mode")
+
+    seq_ids = None
+    if args.seq_ids:
+        seq_ids = [s.strip() for s in args.seq_ids.split(',')]
+
+    max_frames = args.max_frames or cfg.get("max_frames", 800)
+    agg_method = args.agg_method
+    angle_range_deg = cfg.get("angle_range_deg", 5.0)
+    eval_seed = cfg.get("eval_seed", 42)
+    batch_size = cfg.get("batch_size", 8)
+    img_h = cfg.get("img_height", 360)
+    img_w = cfg.get("img_width", 640)
+    rotation_only = cfg.get("rotation_only", None)
+
+    print("=" * 60)
+    print("BEVCalib Sequence Inference (MEDW Temporal Aggregation)")
+    print(f"  checkpoint   : {cfg['ckpt_path']}")
+    print(f"  data_dir     : {data_dir}")
+    print(f"  sequences    : {seq_ids or 'all'}")
+    print(f"  max_frames   : {max_frames}")
+    print(f"  agg_method   : {agg_method}")
+    print(f"  angle_range  : ±{angle_range_deg}°")
+    print(f"  eval_seed    : {eval_seed}")
+    print("=" * 60)
+
+    model_kwargs = {}
+    for k in ('deformable', 'bev_encoder', 'use_mlp_head', 'voxel_mode',
+              'to_bev_mode', 'scatter_reduce', 'bev_pool_factor',
+              'max_attn_tokens'):
+        if k in cfg:
+            model_kwargs[k] = cfg[k]
+
+    results = infer_sequence(
+        ckpt_path=cfg['ckpt_path'],
+        data_dir=data_dir,
+        seq_ids=seq_ids,
+        max_frames=max_frames,
+        agg_method=agg_method,
+        angle_range_deg=angle_range_deg,
+        eval_seed=eval_seed,
+        batch_size=batch_size,
+        device=device,
+        rotation_only=rotation_only,
+        img_shape=(img_h, img_w),
+        **model_kwargs,
+    )
+
+    if not results:
+        print("\nNo sequences evaluated.")
+        return
+
+    print(f"\n{'=' * 70}")
+    print(f"SEQUENCE INFERENCE REPORT  ({len(results)} sequences, "
+          f"MEDW{max_frames})")
+    print("=" * 70)
+    print(f"\n{'Seq':>6s} {'Frames':>7s} {'Rot':>8s} {'Roll':>8s} "
+          f"{'Pitch':>8s} {'Yaw':>8s}")
+    print("-" * 50)
+    for r in results:
+        print(f"{r['seq_id']:>6s} {r['n_frames']:>7d} "
+              f"{r['rot_error']:8.4f}° {r['roll_error']:8.4f}° "
+              f"{r['pitch_error']:8.4f}° {r['yaw_error']:8.4f}°")
+    rots = [r['rot_error'] for r in results]
+    rolls = [r['roll_error'] for r in results]
+    pitchs = [r['pitch_error'] for r in results]
+    yaws = [r['yaw_error'] for r in results]
+    print("-" * 50)
+    print(f"{'Mean':>6s} {'':>7s} {np.mean(rots):8.4f}° "
+          f"{np.mean(rolls):8.4f}° {np.mean(pitchs):8.4f}° "
+          f"{np.mean(yaws):8.4f}°")
+    print(f"{'Std':>6s} {'':>7s} {np.std(rots):8.4f}° "
+          f"{np.std(rolls):8.4f}° {np.std(pitchs):8.4f}° "
+          f"{np.std(yaws):8.4f}°")
+    print("=" * 70)
+
+    output_path = args.output or cfg.get("report_output")
+    if output_path:
+        report = {
+            'mode': 'sequence',
+            'method': agg_method,
+            'max_frames': max_frames,
+            'angle_range_deg': angle_range_deg,
+            'eval_seed': eval_seed,
+            'checkpoint': cfg['ckpt_path'],
+            'data_dir': data_dir,
+            'sequences': [],
+            'summary': {
+                'n_sequences': len(results),
+                'rot_mean': float(np.mean(rots)),
+                'rot_std': float(np.std(rots)),
+                'roll_mean': float(np.mean(rolls)),
+                'pitch_mean': float(np.mean(pitchs)),
+                'yaw_mean': float(np.mean(yaws)),
+            },
+        }
+        for r in results:
+            seq_entry = {
+                'seq_id': r['seq_id'],
+                'n_frames': r['n_frames'],
+                'rot_error': r['rot_error'],
+                'roll_error': r['roll_error'],
+                'pitch_error': r['pitch_error'],
+                'yaw_error': r['yaw_error'],
+                'agg_T': r['agg_T'].tolist(),
+                'gt_T': r['gt_T'].tolist(),
+            }
+            if r.get('confidence'):
+                seq_entry['confidence'] = r['confidence']
+            report['sequences'].append(seq_entry)
+        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+        with open(output_path, 'w') as f:
+            json.dump(report, f, indent=2)
+        print(f"\nReport saved to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="BEVCalib inference & evaluation")
     parser.add_argument("--config", type=str, default="utils/drinfer_config.yaml")
     parser.add_argument("--mode", type=str, default="eval",
-                        choices=["eval", "compare", "temporal"],
+                        choices=["eval", "compare", "temporal", "sequence"],
                         help="eval: single backend; compare: PyTorch vs DrInfer; "
-                             "temporal: eval with temporal aggregation")
+                             "temporal: eval with temporal aggregation; "
+                             "sequence: per-sequence MEDW inference")
     parser.add_argument("--backend", type=str, default=None,
                         choices=["pytorch", "drinfer"],
                         help="Override inference backend (for eval mode)")
@@ -819,7 +947,16 @@ def main():
     parser.add_argument("--agg-method", type=str, default="axis_angle_median",
                         choices=["axis_angle_median", "svd_mean"],
                         dest="agg_method",
-                        help="Temporal aggregation method (for --mode temporal)")
+                        help="Temporal aggregation method (for --mode temporal/sequence)")
+    parser.add_argument("--data-dir", type=str, default=None,
+                        dest="data_dir",
+                        help="Dataset root for sequence mode (overrides config)")
+    parser.add_argument("--seq-ids", type=str, default=None,
+                        dest="seq_ids",
+                        help="Comma-separated sequence IDs (default: all)")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        dest="max_frames",
+                        help="Max frames per sequence for aggregation (default: 800)")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -832,6 +969,8 @@ def main():
         _run_compare(cfg, device, args)
     elif args.mode == "temporal":
         _run_temporal_eval(cfg, device, args)
+    elif args.mode == "sequence":
+        _run_sequence(cfg, device, args)
     else:
         _run_eval(cfg, device, args)
 

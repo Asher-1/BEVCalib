@@ -15,8 +15,8 @@ eval_params:
   trans_range: 0.15
   batch_size: 16
   vis_interval: 200
-  timeout: 7200
-  eval_max_frames_per_seq: 400
+  timeout: 14400
+  eval_max_frames_per_seq: 800
 
 models:
   # === G3: dinov2-small + unfreeze2 (部署首选) ===
@@ -47,13 +47,13 @@ models:
 
   # === G3-10deg: 大扰动消融 ===
   - label: "v30opt-G3-10deg"
-    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_10deg_quick"
+    dir_name: "model_small_10deg_v30_opt_G3_dinov2small_10deg_quick"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     mode_desc: "G3-10deg: 10deg perturbation (best_val)"
 
   - label: "v30opt-G3-10deg-ckpt400"
-    dir_name: "model_small_5deg_v30_opt_G3_dinov2small_10deg_quick"
+    dir_name: "model_small_10deg_v30_opt_G3_dinov2small_10deg_quick"
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     mode_desc: "G3-10deg: 10deg perturbation (ckpt_400)"
