@@ -819,7 +819,17 @@ def load_bevcalib_inference(
         if loss_keys:
             print(f"[load] Skipped {len(loss_keys)} loss-only keys (not needed for inference)")
         if non_loss:
-            print(f"[load] WARNING: unexpected non-loss keys: {non_loss}")
+            _known_prefixes = ('pc_branch.sparse_encoder', 'domain_discriminator',
+                               'domain_classifier', 'gradient_reversal')
+            truly_unexpected = [k for k in non_loss
+                                if not any(k.startswith(p) for p in _known_prefixes)]
+            known_count = len(non_loss) - len(truly_unexpected)
+            if known_count > 0:
+                print(f"[load] Skipped {known_count} inference-irrelevant keys "
+                      f"(sparse_encoder/domain layers in ckpt but not in model)")
+            if truly_unexpected:
+                print(f"[load] WARNING: {len(truly_unexpected)} truly unexpected keys: "
+                      f"{truly_unexpected[:5]}{'...' if len(truly_unexpected) > 5 else ''}")
     if missing:
         print(f"[load] WARNING: missing keys: {missing}")
     epoch = ckpt.get("epoch", -1)

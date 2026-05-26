@@ -123,10 +123,10 @@ class UndistortionUtils:
             t2 = poses[i + 1].timestamp
             
             if t1 <= timestamp <= t2:
-                if (t2 - t1) > max_gap:
+                dt = t2 - t1
+                if dt > max_gap:
                     return None
-                
-                alpha = (timestamp - t1) / (t2 - t1)
+                alpha = (timestamp - t1) / dt if dt > 1e-9 else 0.0
                 break
         else:
             return None
@@ -610,6 +610,77 @@ class UndistortionUtils:
         return points_undistorted.astype(np.float32)
 
 
+_PP_POSES = None
+_PP_S2L_TRANSFORM = None
+_PP_NEED_S2L = False
+
+def _pp_init(poses, s2l_transform, need_s2l):
+    global _PP_POSES, _PP_S2L_TRANSFORM, _PP_NEED_S2L
+    _PP_POSES = poses
+    _PP_S2L_TRANSFORM = s2l_transform
+    _PP_NEED_S2L = need_s2l
+
+def _pp_process_frame(args):
+    """ProcessPool worker for point cloud undistortion + save."""
+    global _PP_POSES, _PP_S2L_TRANSFORM, _PP_NEED_S2L
+    idx, src_img_str, src_img_ext, src_pc_str, img_dir_str, pc_dir_str, cloud_ts, target_ts = args
+    import shutil
+    src_img = Path(src_img_str)
+    src_pc = Path(src_pc_str)
+    image_dir = Path(img_dir_str)
+    velodyne_dir = Path(pc_dir_str)
+
+    try:
+        if src_img_ext in ('.jpg', '.jpeg'):
+            dst_img = image_dir / f"{idx:06d}.jpg"
+        elif src_img_ext == '.png':
+            dst_img = image_dir / f"{idx:06d}.png"
+        else:
+            dst_img = image_dir / f"{idx:06d}.png"
+        shutil.copy2(str(src_img), str(dst_img))
+    except Exception:
+        return None
+
+    dst_pc = velodyne_dir / f"{idx:06d}.bin"
+    try:
+        points_data = np.fromfile(str(src_pc), dtype=np.float32)
+    except Exception:
+        if dst_img.exists():
+            dst_img.unlink()
+        return False
+
+    if len(points_data) % 5 == 0:
+        points_raw = points_data.reshape(-1, 5)
+        if _PP_POSES and len(_PP_POSES) > 0:
+            points_undistorted = UndistortionUtils.undistort_pointcloud(
+                points_raw, cloud_ts, target_ts, _PP_POSES,
+                debug=False, frame_idx=idx,
+            )
+            if points_undistorted is None:
+                if dst_img.exists():
+                    dst_img.unlink()
+                return None
+        else:
+            points_undistorted = points_raw[:, :4]
+    elif len(points_data) % 4 == 0:
+        points_raw = points_data.reshape(-1, 4)
+        points_undistorted = points_raw
+    else:
+        if dst_img.exists():
+            dst_img.unlink()
+        return False
+
+    points_final = points_undistorted
+    if _PP_NEED_S2L and _PP_S2L_TRANSFORM is not None:
+        xyz_hom = np.hstack([points_final[:, :3], np.ones((len(points_final), 1))])
+        xyz_lidar = (_PP_S2L_TRANSFORM @ xyz_hom.T).T[:, :3]
+        points_final = np.hstack([xyz_lidar, points_final[:, 3:4]])
+
+    points_final.astype(np.float32).tofile(str(dst_pc))
+    del points_data
+    return True
+
+
 class ConfigParser:
     """配置文件解析器"""
     
@@ -705,12 +776,27 @@ class ConfigParser:
                 'model_type': 'pinhole',
             }
         
+        iae_block = re.search(r'install_angle_error\s*\{([^}]*)\}', block)
+        install_angle_error = None
+        if iae_block:
+            iae_txt = iae_block.group(1)
+            iae_x = re.search(r'x:\s*([-\d.e]+)', iae_txt)
+            iae_y = re.search(r'y:\s*([-\d.e]+)', iae_txt)
+            iae_z = re.search(r'z:\s*([-\d.e]+)', iae_txt)
+            if iae_x and iae_y and iae_z:
+                install_angle_error = {
+                    'x': float(iae_x.group(1)),
+                    'y': float(iae_y.group(1)),
+                    'z': float(iae_z.group(1)),
+                }
+
         return {
             'camera_dev': camera_dev,
             'position': np.array([pos_x, pos_y, pos_z]),
             'orientation': np.array([ori_qx, ori_qy, ori_qz, ori_qw]),
             'intrinsic': intrinsic,
-            'distortion': distortion
+            'distortion': distortion,
+            'install_angle_error': install_angle_error,
         }
     
     @staticmethod
@@ -879,6 +965,32 @@ class ConfigParser:
         
         result['position'] = position
         result['orientation'] = orientation
+
+        # Extract install_angle_error from the chosen lidar config block
+        lidar_iae = None
+        chosen_blk = None
+        for cfg_blk in config_blocks:
+            fid_match = re.search(r'frame_id:\s*"([^"]+)"', cfg_blk)
+            fid = fid_match.group(1) if fid_match else None
+            if fid == chosen_frame_id:
+                chosen_blk = cfg_blk
+                break
+        if chosen_blk is None and config_blocks:
+            chosen_blk = config_blocks[0]
+        if chosen_blk:
+            iae_match = re.search(r'install_angle_error\s*\{([^}]*)\}', chosen_blk)
+            if iae_match:
+                iae_txt = iae_match.group(1)
+                ix = re.search(r'x:\s*([-\d.e]+)', iae_txt)
+                iy = re.search(r'y:\s*([-\d.e]+)', iae_txt)
+                iz = re.search(r'z:\s*([-\d.e]+)', iae_txt)
+                if ix and iy and iz:
+                    lidar_iae = {
+                        'x': float(ix.group(1)),
+                        'y': float(iy.group(1)),
+                        'z': float(iz.group(1)),
+                    }
+        result['install_angle_error'] = lidar_iae
         
         return result
 
@@ -2621,16 +2733,12 @@ class BEVCalibDatasetPreparer:
         # 使用检测到的topic或指定的topic
         self.active_pose_topic = detected_pose_topic or self.pose_topic
         
-        # 如果设置了max_frames，强制串行提取以便提前终止
-        if self.max_frames is not None:
-            print(f"\n⚠️  设置了max_frames={self.max_frames}，使用串行提取以便提前终止")
-            force_serial = True
-        else:
-            force_serial = False
-        
-        # 并行提取（如果有多个bag文件且未设置max_frames）
-        if len(bag_files) > 1 and self.num_workers > 1 and not force_serial:
-            print(f"\n使用 {self.num_workers} 个线程并行处理 bag 文件...")
+        # 并行提取（支持 max_frames 早期终止）
+        if len(bag_files) > 1 and self.num_workers > 1:
+            extra = ""
+            if self.max_frames is not None:
+                extra = f"，max_frames={self.max_frames} (并行+早期终止)"
+            print(f"\n使用 {self.num_workers} 个线程并行处理 bag 文件{extra}...")
             self._extract_parallel(bag_files, image_topic, possible_topics, use_rosbags)
         else:
             # 串行提取
@@ -2726,31 +2834,30 @@ class BEVCalibDatasetPreparer:
     
     def _extract_parallel(self, bag_files: List[Path], image_topic: Optional[str],
                          possible_topics: List[str], use_rosbags: bool):
-        """并行处理多个bag文件"""
+        """并行处理多个bag文件，支持 max_frames 早期终止"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
         
-        # 线程锁保护元数据列表和计数器
         lock = threading.Lock()
-        counter_lock = threading.Lock()  # 专门用于计数器的锁
+        counter_lock = threading.Lock()
+        stop_flag = [False]
         
         def process_single_bag(bag_file: Path):
             """处理单个bag文件"""
+            if stop_flag[0]:
+                return 0, 0, 0
             try:
                 if use_rosbags:
-                    # 创建临时元数据列表
                     temp_images = []
                     temp_pcs = []
                     temp_poses = []
                     
-                    # 提取数据
                     self._extract_streaming_rosbags_to_lists(
                         bag_file, image_topic, possible_topics,
                         temp_images, temp_pcs, temp_poses,
                         counter_lock=counter_lock
                     )
                     
-                    # 合并到主列表（需要加锁）
                     with lock:
                         self.image_metadata.extend(temp_images)
                         self.pc_metadata.extend(temp_pcs)
@@ -2758,37 +2865,55 @@ class BEVCalibDatasetPreparer:
                     
                     return len(temp_images), len(temp_pcs), len(temp_poses)
                 else:
-                    # rosbag库暂不支持并行（GIL限制）
                     return 0, 0, 0
             except Exception as e:
                 print(f"  错误处理 {bag_file.name}: {e}")
                 return 0, 0, 0
         
-        # ✅ 优化：使用较少的并行度避免I/O竞争
-        # 点云解析是CPU密集型，但文件I/O是瓶颈
         import gc
         actual_workers = min(self.num_workers, 4)
         
-        # 使用线程池并行处理（I/O密集型任务）
-        # 注意：点云解析是CPU密集型，但由于GIL，线程池效率有限
-        # 但进程池会导致内存问题，所以保持线程池
+        sorted_bags = sorted(bag_files, key=lambda x: (
+            1 if 'Heavy_Topic_Group' not in x.name else 0,
+            x.name
+        ))
+        
+        threshold = None
+        if self.max_frames is not None:
+            threshold = self.max_frames * 1.1
+        
         with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-            futures = {executor.submit(process_single_bag, bf): bf for bf in bag_files}
+            futures = {executor.submit(process_single_bag, bf): bf for bf in sorted_bags}
             
             completed = 0
-            for future in tqdm(as_completed(futures), total=len(bag_files),
-                             desc="  并行处理bag文件", unit="bag"):
+            total = len(sorted_bags)
+            for future in as_completed(futures):
                 bag_file = futures[future]
                 try:
                     n_images, n_pcs, n_poses = future.result()
-                    print(f"  ✓ {bag_file.name}: {n_images} 图像, {n_pcs} 点云, {n_poses} 位姿")
+                    if n_images + n_pcs + n_poses > 0:
+                        print(f"  ✓ {bag_file.name}: {n_images} img, {n_pcs} pc, {n_poses} pose")
                 except Exception as e:
-                    print(f"  ✗ {bag_file.name}: 错误 - {e}")
+                    print(f"  ✗ {bag_file.name}: {e}")
                 
-                # 每处理10个bag文件，强制GC
                 completed += 1
                 if completed % 10 == 0:
                     gc.collect()
+                
+                if threshold is not None and not stop_flag[0]:
+                    with lock:
+                        img_count = len(self.image_metadata)
+                        pc_count = len(self.pc_metadata)
+                    if img_count >= threshold and pc_count >= threshold:
+                        print(f"\n  ✓ 并行早期终止: 图像={img_count}, 点云={pc_count} "
+                              f"(阈值={threshold:.0f}, 已完成 {completed}/{total} bags)")
+                        stop_flag[0] = True
+                        for f in futures:
+                            f.cancel()
+                        break
+            
+            if not stop_flag[0]:
+                print(f"  ✓ 并行提取完成: 全部 {total} bags 处理完毕")
     
     def _find_bag_files(self) -> List[Path]:
         """查找 bag 文件"""
@@ -3538,49 +3663,64 @@ class BEVCalibDatasetPreparer:
         符合KITTI-Odometry的要求：保存的图像应已去畸变。
         """
         distortion = self.camera_config.get('distortion', {})
-        model_type = distortion.get('model_type', 'pinhole')
+        self._undist_model_type = distortion.get('model_type', 'pinhole')
         
         intrinsic = self.camera_config['intrinsic']
-        w = intrinsic['img_width']
-        h = intrinsic['img_height']
+        self._cfg_img_w = int(intrinsic['img_width'])
+        self._cfg_img_h = int(intrinsic['img_height'])
+        self._undist_K_orig = self.K.copy()
+        self._undist_resolution_adapted = False
         
-        if model_type == 'fisheye':
-            D = np.array([distortion.get('k1', 0.0),
+        if self._undist_model_type == 'fisheye':
+            self._undist_D = np.array([distortion.get('k1', 0.0),
                           distortion.get('k2', 0.0),
                           distortion.get('k3', 0.0),
                           distortion.get('k4', 0.0)])
         else:
-            D = np.array([distortion.get('k1', 0.0),
+            self._undist_D = np.array([distortion.get('k1', 0.0),
                           distortion.get('k2', 0.0),
                           distortion.get('p1', 0.0),
                           distortion.get('p2', 0.0),
                           distortion.get('k3', 0.0)])
         
-        if np.allclose(D, 0, atol=1e-10):
+        if np.allclose(self._undist_D, 0, atol=1e-10):
             self._undist_map1 = None
             self._undist_map2 = None
             print(f"  ℹ️ 畸变系数全为0，跳过去畸变初始化")
             return
         
-        K_orig = self.K.copy()
+        self._build_undistortion_maps(self._cfg_img_w, self._cfg_img_h)
+    
+    def _build_undistortion_maps(self, w: int, h: int):
+        """Build undistortion maps for the given image dimensions, scaling K if needed."""
+        sx = w / self._cfg_img_w
+        sy = h / self._cfg_img_h
+        K_scaled = self._undist_K_orig.copy()
+        K_scaled[0, 0] *= sx
+        K_scaled[0, 2] *= sx
+        K_scaled[1, 1] *= sy
+        K_scaled[1, 2] *= sy
+        
+        D = self._undist_D
+        model_type = self._undist_model_type
         
         if model_type == 'fisheye':
             D_col = D.reshape(4, 1)
             new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectifyMap(
-                K_orig, D_col, (w, h), np.eye(3), balance=0, new_size=(w, h))
+                K_scaled, D_col, (w, h), np.eye(3), balance=0, new_size=(w, h))
             self._undist_map1, self._undist_map2 = cv2.fisheye.initUndistortRectifyMap(
-                K_orig, D_col, np.eye(3), new_K, (w, h), cv2.CV_16SC2)
+                K_scaled, D_col, np.eye(3), new_K, (w, h), cv2.CV_16SC2)
         else:
             new_K, _roi = cv2.getOptimalNewCameraMatrix(
-                K_orig, D, (w, h), alpha=0, newImgSize=(w, h))
+                K_scaled, D, (w, h), alpha=0, newImgSize=(w, h))
             self._undist_map1, self._undist_map2 = cv2.initUndistortRectifyMap(
-                K_orig, D, None, new_K, (w, h), cv2.CV_16SC2)
+                K_scaled, D, None, new_K, (w, h), cv2.CV_16SC2)
         
         self.K = new_K
         
-        print(f"\n  ✓ 图像去畸变初始化完成 (模型: {model_type})")
-        print(f"    原始内参: fx={K_orig[0,0]:.2f}, fy={K_orig[1,1]:.2f}, "
-              f"cx={K_orig[0,2]:.2f}, cy={K_orig[1,2]:.2f}")
+        print(f"\n  ✓ 图像去畸变初始化完成 (模型: {model_type}, 分辨率: {w}x{h})")
+        print(f"    原始内参: fx={K_scaled[0,0]:.2f}, fy={K_scaled[1,1]:.2f}, "
+              f"cx={K_scaled[0,2]:.2f}, cy={K_scaled[1,2]:.2f}")
         print(f"    新内参:   fx={new_K[0,0]:.2f}, fy={new_K[1,1]:.2f}, "
               f"cx={new_K[0,2]:.2f}, cy={new_K[1,2]:.2f}")
         if model_type == 'fisheye':
@@ -3589,9 +3729,23 @@ class BEVCalibDatasetPreparer:
             print(f"    畸变系数: k1={D[0]:.6f}, k2={D[1]:.6f}, p1={D[2]:.6f}, p2={D[3]:.6f}, k3={D[4]:.6f}")
     
     def _undistort_image(self, image: np.ndarray) -> np.ndarray:
-        """使用预计算的映射表对图像去畸变。"""
+        """使用预计算的映射表对图像去畸变。
+        
+        自动检测图像实际分辨率：如果与cameras.cfg声明的分辨率不同
+        （常见于远程bag使用压缩/降采样图像），自动按实际分辨率重建映射表。
+        """
         if self._undist_map1 is None:
             return image
+        
+        h_img, w_img = image.shape[:2]
+        h_map, w_map = self._undist_map1.shape[:2]
+        
+        if (h_img, w_img) != (h_map, w_map) and not self._undist_resolution_adapted:
+            print(f"\n  ⚠️  图像实际分辨率 {w_img}x{h_img} ≠ cameras.cfg {self._cfg_img_w}x{self._cfg_img_h}")
+            print(f"     自动按实际分辨率重建去畸变映射...")
+            self._build_undistortion_maps(w_img, h_img)
+            self._undist_resolution_adapted = True
+        
         return cv2.remap(image, self._undist_map1, self._undist_map2,
                          cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
     
@@ -3628,20 +3782,22 @@ class BEVCalibDatasetPreparer:
         """处理单帧数据（用于并行处理）"""
         idx, img_idx, pc_idx, image_dir, velodyne_dir = args
         
-        # 复制图像（使用shutil.copy更快）
         src_img = Path(self.image_metadata[img_idx].file_path)
-        dst_img = image_dir / f"{idx:06d}.png"
+        src_ext = src_img.suffix.lower()
         
         try:
-            # 如果源文件是PNG，直接复制；否则转换
-            if src_img.suffix.lower() == '.png':
-                import shutil
+            import shutil
+            if src_ext in ('.jpg', '.jpeg'):
+                dst_img = image_dir / f"{idx:06d}.jpg"
+                shutil.copy2(str(src_img), str(dst_img))
+            elif src_ext == '.png':
+                dst_img = image_dir / f"{idx:06d}.png"
                 shutil.copy2(str(src_img), str(dst_img))
             else:
+                dst_img = image_dir / f"{idx:06d}.png"
                 img = Image.open(src_img)
                 img.save(dst_img)
         except Exception as e:
-            # 图像读取/保存失败，跳过该帧
             if idx == 0:
                 print(f"⚠️  图像处理失败: {e}")
             return None
@@ -4160,42 +4316,42 @@ class BEVCalibDatasetPreparer:
         valid_pairs = synced_pairs  # 直接使用所有配对，在保存时过滤
         skipped_count = 0  # 将在保存阶段统计
         
-        # 使用原始配对，在保存时过滤
         synced_pairs = valid_pairs
         
-        # 保存帧（去畸变和保存合并处理）
+        if self.max_frames is not None and len(synced_pairs) > int(self.max_frames * 1.3):
+            original_count = len(synced_pairs)
+            target = int(self.max_frames * 1.3)
+            indices = sorted(set(
+                int(round(i)) for i in np.linspace(0, original_count - 1, num=target)
+            ))
+            synced_pairs = [synced_pairs[i] for i in indices]
+            print(f"\n  均匀采样保存: {original_count} -> {len(synced_pairs)} 帧 "
+                  f"(max_frames={self.max_frames}, 1.3x buffer)")
+        
         print(f"\n  去畸变并保存...")
         
-        # ✅ 内存优化：限制并行度，避免OOM
-        # 每个点云约 200MB (100万点 * 5 * 4字节 * 10倍处理开销)
-        # 8个并行 = 1.6GB 内存使用，安全阈值
-        actual_workers = min(self.num_workers, 8)
-        print(f"  使用 {actual_workers} 个并行工作线程 (内存安全模式)")
+        actual_workers = max(4, min(self.num_workers, 8))
+        print(f"  使用 {actual_workers} 个并行工作线程")
         
-        # 准备任务（使用临时索引，后续重新编号）
         tasks = [
             (tmp_idx, img_idx, pc_idx, image_dir, velodyne_dir)
             for tmp_idx, (img_idx, pc_idx) in enumerate(synced_pairs)
         ]
         
-        # ✅ 内存优化：分批处理，每批处理后强制GC
         import gc
-        batch_size = 200  # 每批200帧
+        batch_size = 500
         results = []
         
         for batch_start in range(0, len(tasks), batch_size):
             batch_end = min(batch_start + batch_size, len(tasks))
             batch_tasks = tasks[batch_start:batch_end]
             
-            # 使用线程池并行处理当前批次
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 futures = [executor.submit(self._process_single_frame, task) for task in batch_tasks]
-                for future in tqdm(futures, desc=f"  批次 {batch_start//batch_size + 1}/{(len(tasks)-1)//batch_size + 1}", 
+                for future in tqdm(futures, desc=f"  批次 {batch_start//batch_size+1}/{(len(tasks)-1)//batch_size+1}", 
                                    total=len(batch_tasks), leave=False):
-                    result = future.result()
-                    results.append(result)
+                    results.append(future.result())
             
-            # 强制垃圾回收
             gc.collect()
         
         # 检查是否有跳过的帧，如果有则需要重新编号
@@ -4219,25 +4375,34 @@ class BEVCalibDatasetPreparer:
             
             # 第一步：将成功的帧移动到临时目录并重新编号
             for new_idx, old_idx in enumerate(tqdm(success_indices, desc="  重编号(1/2)")):
-                old_img = image_dir / f"{old_idx:06d}.png"
                 old_pc = velodyne_dir / f"{old_idx:06d}.bin"
-                new_img = temp_img_dir / f"{new_idx:06d}.png"
                 new_pc = temp_pc_dir / f"{new_idx:06d}.bin"
+                # 图像可能是.jpg或.png
+                old_img = None
+                new_img = None
+                for ext in ('.jpg', '.jpeg', '.png'):
+                    candidate = image_dir / f"{old_idx:06d}{ext}"
+                    if candidate.exists():
+                        old_img = candidate
+                        new_img = temp_img_dir / f"{new_idx:06d}{ext}"
+                        break
                 
-                if old_img.exists():
+                if old_img is not None and old_img.exists():
                     shutil.move(str(old_img), str(new_img))
                 if old_pc.exists():
                     shutil.move(str(old_pc), str(new_pc))
             
             # 第二步：清空原目录中的残留文件
-            for f in image_dir.glob('*.png'):
-                f.unlink()
+            for ext in ('*.png', '*.jpg', '*.jpeg'):
+                for f in image_dir.glob(ext):
+                    f.unlink()
             for f in velodyne_dir.glob('*.bin'):
                 f.unlink()
             
             # 第三步：将重新编号的文件移回原目录
-            for f in tqdm(list(temp_img_dir.glob('*.png')), desc="  重编号(2/2)", leave=False):
-                shutil.move(str(f), str(image_dir / f.name))
+            for ext in ('*.png', '*.jpg', '*.jpeg'):
+                for f in temp_img_dir.glob(ext):
+                    shutil.move(str(f), str(image_dir / f.name))
             for f in temp_pc_dir.glob('*.bin'):
                 shutil.move(str(f), str(velodyne_dir / f.name))
             
@@ -4543,39 +4708,29 @@ class BEVCalibDatasetPreparer:
             print("  ⚠️  警告: 没有同步的帧，跳过 times.txt 生成")
             return
         
-        # 提取所有图像的时间戳
+        # 提取所有图像的绝对时间戳 (Unix epoch seconds)
         timestamps = []
         for img_idx, _ in synced_pairs:
             img_ts = self.image_metadata[img_idx].timestamp
             timestamps.append(img_ts)
         
-        # 转换为相对第一帧的时间（KITTI格式）
         first_timestamp = timestamps[0]
-        relative_timestamps = [ts - first_timestamp for ts in timestamps]
+        duration = timestamps[-1] - first_timestamp if len(timestamps) > 1 else 0.0
         
-        # 写入文件
+        # 写入绝对时间戳以便后续转换为北京时间显示
         with open(times_file, 'w') as f:
-            for ts in relative_timestamps:
-                # 使用足够的精度（6位小数，足以表示毫秒级精度）
+            for ts in timestamps:
                 f.write(f"{ts:.6f}\n")
         
         print(f"时间戳文件已保存: {times_file}")
-        print(f"  总帧数: {len(relative_timestamps)}")
-        print(f"  时间范围: {relative_timestamps[0]:.3f}s ~ {relative_timestamps[-1]:.3f}s")
-        print(f"  总时长: {relative_timestamps[-1]:.3f}s")
+        print(f"  总帧数: {len(timestamps)}")
+        print(f"  时间范围: {first_timestamp:.3f}s ~ {timestamps[-1]:.3f}s (绝对时间戳)")
+        print(f"  总时长: {duration:.3f}s")
         
         # 计算平均帧率
-        if len(relative_timestamps) > 1:
-            total_duration = relative_timestamps[-1] - relative_timestamps[0]
-            if total_duration > 0:
-                avg_fps = (len(relative_timestamps) - 1) / total_duration
-                print(f"  平均帧率: {avg_fps:.2f} fps")
-        
-        # 验证第0帧时间戳应该是0
-        if abs(relative_timestamps[0]) > 1e-9:
-            print(f"  ⚠️  警告: 第0帧时间戳不是0 ({relative_timestamps[0]:.9f})")
-        else:
-            print(f"  ✓ 第0帧时间戳为0（参考时刻）")
+        if len(timestamps) > 1 and duration > 0:
+            avg_fps = (len(timestamps) - 1) / duration
+            print(f"  平均帧率: {avg_fps:.2f} fps")
 
 
 def main():

@@ -968,6 +968,20 @@ def _parse_temporal_aggregation(path):
             if os.path.isfile(jp):
                 with open(jp, 'r') as jf:
                     result['best_per_sequence'] = json.load(jf)
+        deploy_pat = re.compile(
+            r'MEDW\s*(\d+)\s+\(uniform\):\s+Rot=([\d.]+)°\s+\(R=([\d.]+)°\s+P=([\d.]+)°\s+Y=([\d.]+)°\)')
+        deploy_sim = {}
+        for dm in deploy_pat.finditer(content):
+            deploy_sim[int(dm.group(1))] = {
+                'rot': float(dm.group(2)), 'roll': float(dm.group(3)),
+                'pitch': float(dm.group(4)), 'yaw': float(dm.group(5)),
+            }
+        if deploy_sim:
+            result['deploy_sim'] = deploy_sim
+        dsj = os.path.join(os.path.dirname(os.path.abspath(path)), "deploy_simulation.json")
+        if os.path.isfile(dsj):
+            with open(dsj, 'r') as djf:
+                result['deploy_sim_detail'] = json.load(djf)
     except Exception:
         pass
     return result
@@ -1485,12 +1499,37 @@ def generate_report(all_stats):
             lines.append(f"| - | {s['label']} | - | - | - | - | - | {s.get('rot_error_mean', 0):.3f}° | - |")
         lines.append("")
 
+        # Deployment Simulation table (uniform sampling)
+        has_deploy = any(s.get('temporal', {}).get('deploy_sim') for s in all_stats)
+        if has_deploy:
+            lines.append("部署模拟 (Uniform Sampling, Median聚合):")
+            lines.append("")
+            lines.append("从每个sequence均匀采样N帧, 聚合后与GT比较, 模拟真实部署场景:")
+            lines.append("")
+            deploy_ws = [50, 100, 200, 400, 800]
+            dh = "| 模型 |" + " | ".join(f"MEDW{w}" for w in deploy_ws) + " |"
+            lines.append(dh)
+            lines.append("| --- |" + " | ".join("---:" for _ in deploy_ws) + " |")
+            for s in best_sorted:
+                ds = s.get('temporal', {}).get('deploy_sim', {})
+                row = f"| {s['label']}"
+                for w in deploy_ws:
+                    if w in ds:
+                        e = ds[w]
+                        row += f" | {e['rot']:.3f}° (R:{e['roll']:.2f} P:{e['pitch']:.2f} Y:{e['yaw']:.2f})"
+                    else:
+                        row += " | -"
+                row += " |"
+                lines.append(row)
+            lines.append("")
+
         lines.append("聚合方法说明:")
         lines.append("- SVDW{N}: 对 N 帧预测旋转矩阵取 SVD-Mean (Euclidean 均值投影到 SO(3))")
         lines.append("- MEDW{N}: 对 N 帧预测旋转矩阵转 axis-angle 后取逐轴 Median, 再映射回 SO(3)")
         lines.append("- TRMW{N}: 对 N 帧预测旋转矩阵取 Trimmed-Mean (去掉 10% 极端值后取均值)")
         lines.append("- BEST: 遍历所有 (方法, 窗口) 组合, 选 Rot 最低者作为该模型的最优可部署方案")
-        lines.append("- 计算流程: 每个 sequence (400帧) 独立聚合得到一个预测外参 → 与 GT 比较得 RPY 误差 → 12 个 seq 取均值")
+        lines.append("- 部署模拟: 从全序列均匀采样N帧, 全部聚合为一个预测外参, 与GT比较. 比滑动窗口更真实")
+        lines.append("- 计算流程: 每个 sequence 均匀采样N帧 → 独立聚合得到一个预测外参 → 与 GT 比较得 RPY 误差 → 所有 seq 取均值")
         lines.append("")
 
         has_per_seq_best = any(

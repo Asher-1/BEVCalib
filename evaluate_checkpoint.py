@@ -1513,12 +1513,85 @@ def _temporal_aggregation_analysis(all_T_pred, all_T_gt, sample_sequences,
                 best_rot, best_desc = rot, f"TRMW{wsize}"
                 best_roll, best_pitch, best_yaw = roll, pitch, yaw
 
+        # === Section 4: Deployment Simulation (Uniform Sampling) ===
+        deploy_sim_windows = [50, 100, 200, 400, 800]
+        f.write("\n--- Section 4: Deployment Simulation (Uniform Sampling, Median) ---\n")
+        f.write("  Uniformly sample N frames from each sequence, aggregate all N, "
+                "compare to GT.\n\n")
+        _deploy_sim_data = {}
+        for dw in deploy_sim_windows:
+            per_seq_errs = {'rot_error': [], 'roll_error': [],
+                            'pitch_error': [], 'yaw_error': []}
+            per_seq_detail = []
+            for sid in unique_seqs:
+                mask = seq_arr == sid
+                seq_aa_full = _seq_aa_cache.get(sid)
+                seq_ts_full = _seq_t_cache.get(sid)
+                if seq_aa_full is None or seq_ts_full is None:
+                    continue
+                n = len(seq_aa_full)
+                if n == 0:
+                    continue
+                gt_T = T_gt_arr[mask][0]
+                ns = min(dw, n)
+                indices = np.linspace(0, n - 1, num=ns, dtype=int)
+                aa_sub = seq_aa_full[indices]
+                ts_sub = seq_ts_full[indices]
+                aa_med = np.median(aa_sub, axis=0)
+                R_avg = ScipyRot.from_rotvec(aa_med).as_matrix()
+                t_avg = np.mean(ts_sub, axis=0)
+                T_agg = np.eye(4)
+                T_agg[:3, :3] = R_avg
+                T_agg[:3, 3] = t_avg
+                errs = compute_pose_errors(T_agg, gt_T)
+                for k in per_seq_errs:
+                    per_seq_errs[k].append(errs[k])
+                per_seq_detail.append({
+                    'seq': sid, 'rot': errs['rot_error'],
+                    'roll': errs['roll_error'], 'pitch': errs['pitch_error'],
+                    'yaw': errs['yaw_error'], 'n_sampled': ns,
+                })
+            if per_seq_errs['rot_error']:
+                rot = np.mean(per_seq_errs['rot_error'])
+                roll = np.mean(per_seq_errs['roll_error'])
+                pitch = np.mean(per_seq_errs['pitch_error'])
+                yaw = np.mean(per_seq_errs['yaw_error'])
+                line = (f"  MEDW{dw:>4d} (uniform): "
+                        f"Rot={rot:.4f}° (R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+                f.write(line + "\n")
+                print(f"   [DEPLOY] MEDW{dw:>4d}: Rot={rot:.4f}° "
+                      f"(R={roll:.4f}° P={pitch:.4f}° Y={yaw:.4f}°)")
+                _deploy_sim_data[dw] = {
+                    'rot': rot, 'roll': roll, 'pitch': pitch, 'yaw': yaw,
+                    'per_seq': per_seq_detail,
+                }
+                if rot < best_rot:
+                    best_rot, best_desc = rot, f"MEDW{dw}"
+                    best_roll, best_pitch, best_yaw = roll, pitch, yaw
+
+        deploy_json_path = os.path.join(eval_dir, "deploy_simulation.json")
+        with open(deploy_json_path, 'w') as djf:
+            _deploy_json = {}
+            for dw, dv in _deploy_sim_data.items():
+                _deploy_json[str(dw)] = {
+                    'mean_rot': dv['rot'], 'mean_roll': dv['roll'],
+                    'mean_pitch': dv['pitch'], 'mean_yaw': dv['yaw'],
+                    'per_seq': [{
+                        'seq': int(s['seq']) if isinstance(s['seq'], np.integer) else s['seq'],
+                        'rot': s['rot'], 'roll': s['roll'],
+                        'pitch': s['pitch'], 'yaw': s['yaw'],
+                    } for s in dv['per_seq']],
+                }
+            json.dump(_deploy_json, djf, indent=2)
+
         f.write(f"\n{'='*80}\n")
         f.write(f"BEST RESULT (deployable, no GT required): {best_desc}\n")
         f.write(f"  Rot={best_rot:.4f}° (R={best_roll:.4f}° P={best_pitch:.4f}° "
                 f"Y={best_yaw:.4f}°)\n")
         f.write(f"\nMethods: SVD=SVD rotation averaging, MED=Robust median, "
                 f"TRM=10% trimmed mean\n")
+        f.write(f"Section 4 (Deployment Simulation): uniformly sample N frames from full "
+                f"sequence, aggregate, compare to GT. More realistic than sliding window.\n")
         f.write(f"All methods above are GT-free and can be used in real deployment.\n")
 
         print(f"\n   ★ BEST (deployable): {best_desc} → Rot={best_rot:.4f}° "
@@ -2717,6 +2790,21 @@ def _parse_temporal_aggregation(path):
             if os.path.isfile(jp):
                 with open(jp, 'r') as jf:
                     result['best_per_sequence'] = json.load(jf)
+        # Parse deployment simulation results
+        deploy_pat = re.compile(
+            r'MEDW\s*(\d+)\s+\(uniform\):\s+Rot=([\d.]+)°\s+\(R=([\d.]+)°\s+P=([\d.]+)°\s+Y=([\d.]+)°\)')
+        deploy_sim = {}
+        for dm in deploy_pat.finditer(content):
+            deploy_sim[int(dm.group(1))] = {
+                'rot': float(dm.group(2)), 'roll': float(dm.group(3)),
+                'pitch': float(dm.group(4)), 'yaw': float(dm.group(5)),
+            }
+        if deploy_sim:
+            result['deploy_sim'] = deploy_sim
+        dsj = os.path.join(os.path.dirname(os.path.abspath(path)), "deploy_simulation.json")
+        if os.path.isfile(dsj):
+            with open(dsj, 'r') as djf:
+                result['deploy_sim_detail'] = json.load(djf)
     except Exception:
         pass
     return result

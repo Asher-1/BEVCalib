@@ -66,13 +66,13 @@ models:
 
   # === G3-10deg: 大扰动消融 ===
   - label: "v30-G3-10deg"
-    dir_name: "model_small_5deg_v30_G3_dinov2small_10deg"
+    dir_name: "model_small_10deg_v30_G3_dinov2small_10deg"
     ckpt: "ckpt_best_val.pth"
     bev_zbound_step: "4.0"
     mode_desc: "G3-10deg: 10deg perturbation (best_val)"
 
   - label: "v30-G3-10deg-ckpt400"
-    dir_name: "model_small_5deg_v30_G3_dinov2small_10deg"
+    dir_name: "model_small_10deg_v30_G3_dinov2small_10deg"
     ckpt: "ckpt_400.pth"
     bev_zbound_step: "4.0"
     mode_desc: "G3-10deg: 10deg perturbation (ckpt_400)"

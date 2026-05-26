@@ -1,0 +1,193 @@
+# V32 Full: T_init 不变性训练 - 解决 v30 透传 shortcut 问题
+#
+# V30 根因分析:
+#   模型学习了 T_pred ≈ Identity → 输出 ≈ T_init (透传)
+#   KITTI 评估中随机扰动围绕 GT → 聚合后噪声抵消 → 精度 0.067° (统计幻觉)
+#   实际标定中固定 T_init → 系统偏差保留 → 无校正能力
+#
+# V32 三重机制:
+#   1. T_init Dropout: 30% 概率替换 T_init 为随机旋转 → 迫使从视觉学习
+#   2. Consistency Loss: 同一场景不同 T_init → 预测应一致 → 减少对 T_init 依赖
+#   3. Progressive Curriculum: 2°→5° 渐进扰动 → 先学简单再学难
+#
+# V32/V32.1 消融矩阵 (3 experiments):
+#   v32_tinit_inv:          原始 v32: binary dropout + Consistency + Progressive
+#   v32_1_ema_continuous: v32.1: EMA consistency + continuous T_init noise
+#   v32_strong:             更强 dropout(0.5) + 更高 consistency(1.0) ← 激进方案
+#
+# Usage:
+#   bash batch_train.sh configs/batch8_train_all_v32_full.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 3
+  retry_delay: 30
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 24
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+    use_balanced_axis_loss: 1
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 100
+    cosine_Tmult: 2
+    warmup_epochs: 5
+    backbone_lr_scale: 0.01
+    backbone_warmup_epochs: 10
+    layer_wise_lr_decay: 0.65
+
+    use_pitch_branch: 0
+    pitch_aux_weight: 0.0
+    bev_instance_norm: 0
+    use_contrastive_extrinsic: 0
+    contrastive_weight: 0.0
+
+    augment_mount_jitter_prob: 0.7
+    augment_mount_jitter_rot_sigma: 3.0
+    augment_mount_jitter_trans_sigma: 0.01
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+
+    max_frames_per_seq: 10000
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+
+    early_stopping_patience: 30
+    eval_epoches: 50
+
+    seed: 42
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "diff"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+
+    domain_adversarial: 1
+    domain_adversarial_weight: 0.15
+    num_domains: 0
+
+experiments:
+
+  # =========================================================================
+  # v32_1_ema_continuous: v32.1 EMA consistency + continuous T_init noise
+  # EMA target 替代双 forward; 连续噪声替代 binary dropout
+  # tinit_dropout_prob 保留为 fallback (continuous_tinit_noise=1 优先)
+  # =========================================================================
+  - name: "v32_1_ema_continuous"
+    description: "V32.1: EMA consistency + continuous T_init noise"
+    dataset: "all"
+    version: "v32_1_ema_continuous"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      tinit_dropout_prob: 0.3
+      consistency_loss_weight: 0.5
+      consistency_loss_start_epoch: 20
+      progressive_angle_start: 2.0
+      progressive_angle_end: 5.0
+      progressive_warmup_epochs: 200
+      ema_consistency: 1
+      ema_decay: 0.996
+      continuous_tinit_noise: 1
+      continuous_noise_max_deg: 30.0
+
+  # =========================================================================
+  # v32_strong: 激进方案 (更强 dropout + 更高 consistency)
+  # 测试更极端的配置是否能进一步提升
+  # =========================================================================
+  - name: "v32_strong"
+    description: "V32: strong T_init invariance (dropout=0.5 + consistency=1.0)"
+    dataset: "all"
+    version: "v32_strong"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      tinit_dropout_prob: 0.5
+      consistency_loss_weight: 1.0
+      consistency_loss_start_epoch: 10
+      progressive_angle_start: 2.0
+      progressive_angle_end: 5.0
+      progressive_warmup_epochs: 150
+
+  # =========================================================================
+  # v32_tinit_inv: 完整 T_init 不变性方案 (推荐)
+  # T_init Dropout(0.3) + Consistency(0.5) + Progressive(2→5°)
+  # 基于 v30-G3-dann 最佳配置，添加 v32 三重机制
+  # =========================================================================
+  - name: "v32_tinit_inv"
+    description: "V32: T_init invariance (dropout=0.3 + consistency=0.5 + progressive)"
+    dataset: "all"
+    version: "v32_tinit_inv"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      tinit_dropout_prob: 0.3
+      consistency_loss_weight: 0.5
+      consistency_loss_start_epoch: 20
+      progressive_angle_start: 2.0
+      progressive_angle_end: 5.0
+      progressive_warmup_epochs: 200

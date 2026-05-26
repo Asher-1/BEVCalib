@@ -1,0 +1,127 @@
+# V36 Deep: Multi-layer Native-Domain Cross-Attention (3 layers)
+# Architecture: DINOv2 (frozen) + PointEncoder + 3× CrossAttentionBlock + MLP Head
+# ~8.7M trainable params (vs 0.81M for MVP)
+#
+# Usage:
+#   bash batch_train.sh configs/v36_native_cross_deep.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 0
+  retry_delay: 30
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 12
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+    use_balanced_axis_loss: 1
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.15
+    head_dropout: 0.1
+
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 40
+    cosine_Tmult: 2
+    warmup_epochs: 5
+    backbone_lr_scale: 0.0
+    backbone_warmup_epochs: 0
+    layer_wise_lr_decay: 1.0
+
+    use_pitch_branch: 0
+    pitch_aux_weight: 0.0
+    bev_instance_norm: 0
+    use_contrastive_extrinsic: 0
+    contrastive_weight: 0.0
+
+    augment_mount_jitter_prob: 0.5
+    augment_mount_jitter_rot_sigma: 3.0
+    augment_mount_jitter_trans_sigma: 0.01
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+
+    max_frames_per_seq: 500
+    num_epochs: 300
+    save_ckpt_per_epoches: 30
+
+    early_stopping_patience: 0
+    eval_epoches: 10
+
+    seed: 42
+    grad_accum_steps: 2
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "diff"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+
+    domain_adversarial: 0
+    domain_adversarial_weight: 0.0
+    num_domains: 0
+
+experiments:
+  - name: "v36_native_cross_3layer"
+    description: "V36 Deep: 3-layer Cross-Attention, DINOv2 frozen, 192 PC groups"
+    dataset: "all"
+    version: "v36_native_cross_3layer"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      native_cross: 1
+      native_cross_pc_groups: 192
+      native_cross_n_harmonic: 6
+      native_cross_n_layers: 3
+      explicit_tinit: 0
+      fuser_type: "diff"

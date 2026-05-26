@@ -1,0 +1,252 @@
+# V31 Full (32 nodes): 基于 V30 BEST (v30-G3-dann-ckpt400 = 0.067°) 的精度突破实验
+#
+# V30 关键发现:
+#   1. DANN+ckpt400 最佳 (0.067° MEDW800), 但 ddp_auto_scale=1 (默认)
+#   2. noAS 较差 (0.082°~0.088°) → auto_scale 对精度有帮助, V31 保持 AS=1
+#   3. 10deg-ckpt400 不错 (0.069°) 但未结合 DANN
+#   4. 所有模型 per-frame 差异极小 (2.316°±0.001°), 差异主要在聚合精度
+#
+# V31 消融矩阵 (5 experiments):
+#   DANN-noAS:   DANN + no auto_scale         ← V30 缺失的关键组合
+#   DANN-10deg:  DANN + 10° 扰动              ← 大角度泛化 + DANN
+#   DANN-long:   DANN + 600 epochs            ← 更长训练挖掘潜力
+#   DANN-lr:     DANN + 降低 lr 到 5e-5       ← 学习率调优
+#   10deg-DANN:  10° + DANN + 降低 lr         ← 全组合最强配置
+#
+# 回答的关键问题:
+#   DANN-noAS vs v30-G3-dann  → noAS 是否在 DANN 下反而更好
+#   DANN-10deg vs v30-G3-dann → 10° 大扰动能否结合 DANN 提升泛化
+#   DANN-long vs v30-G3-dann  → 400 vs 600 epochs, 是否还有收益
+#   DANN-lr vs v30-G3-dann    → 更精细 lr 能否进一步降低聚合误差
+#   10deg-DANN vs all others  → 全组合是否最优
+#
+# Usage:
+#   bash batch_train.sh configs/batch8_train_all_v31.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 3
+  retry_delay: 30
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+
+    batch_size: 8
+    learning_rate: 1e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 1
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+    use_balanced_axis_loss: 1
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.3
+    backbone_warmup_epochs: 10
+    layer_wise_lr_decay: 0.65
+    step_size: 80
+
+    use_pitch_branch: 0
+    pitch_aux_weight: 0.0
+    bev_instance_norm: 0
+    use_contrastive_extrinsic: 0
+    contrastive_weight: 0.0
+
+    augment_mount_jitter_prob: 0.15
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+
+    max_frames_per_seq: 10000
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+
+    early_stopping_patience: 30
+    eval_epoches: 50
+
+    seed: 42
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "diff"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+
+    domain_adversarial: 0
+    domain_adversarial_weight: 0.1
+    num_domains: 0
+
+experiments:
+  # =========================================================================
+  # DANN-noAS: DANN + no auto_scale (V30 缺失的关键消融)
+  # 目标: 验证 auto_scale 在 DANN 模式下是否仍然必要
+  # V30 baseline: v30-G3-dann-ckpt400 = 0.067° (with AS=1)
+  # =========================================================================
+  - name: "v31_DANN_noAS"
+    description: "V31: DANN + no auto_scale (ablation)"
+    dataset: "all"
+    version: "v31_DANN_noAS"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.15
+      ddp_auto_scale: 0
+
+  # =========================================================================
+  # DANN-10deg: DANN + 10° 扰动 (大角度泛化 + 域适应双保险)
+  # 目标: 10deg 训练在 DANN 辅助下是否能同时覆盖大角度和提高精度
+  # V30 ref: v30-G3-10deg-ckpt400=0.069° vs v30-G3-dann-ckpt400=0.067°
+  # =========================================================================
+  - name: "v31_DANN_10deg"
+    description: "V31: DANN + 10deg perturbation (wide-angle generalization)"
+    dataset: "all"
+    version: "v31_DANN_10deg"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.15
+      angle_range_deg: 10
+
+  # =========================================================================
+  # DANN-long: DANN + 600 epochs (挖掘更长训练的收益)
+  # 目标: ckpt_400 已是 V30 BEST, 600 epochs 是否有进一步收益
+  # =========================================================================
+  - name: "v31_DANN_long"
+    description: "V31: DANN + 600 epochs (longer training)"
+    dataset: "all"
+    version: "v31_DANN_long"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.15
+      num_epochs: 600
+      save_ckpt_per_epoches: 50
+      step_size: 120
+
+  # =========================================================================
+  # DANN-lr: DANN + 更低学习率 (精细调优)
+  # 目标: 降低 lr 到 5e-5, 可能减少聚合时的方差
+  # =========================================================================
+  - name: "v31_DANN_lr"
+    description: "V31: DANN + lower lr=5e-5 (fine-tuning)"
+    dataset: "all"
+    version: "v31_DANN_lr"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.15
+      learning_rate: 5e-5
+      warmup_epochs: 8
+
+  # =========================================================================
+  # 10deg-DANN-lr: 全组合最强配置 (10° + DANN + 低 lr + 长训练)
+  # 目标: 同时覆盖大角度泛化 + 域适应 + 精细优化
+  # =========================================================================
+  - name: "v31_10deg_DANN_lr"
+    description: "V31: 10deg + DANN + lr=5e-5 (full combo)"
+    dataset: "all"
+    version: "v31_10deg_DANN_lr"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      backbone_lr_scale: 0.01
+      drop_path_rate: 0.1
+      head_dropout: 0.2
+      augment_mount_jitter_prob: 0.7
+      augment_mount_jitter_rot_sigma: 3.0
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.15
+      angle_range_deg: 10
+      learning_rate: 5e-5
+      warmup_epochs: 8
+      num_epochs: 600
+      save_ckpt_per_epoches: 50
+      step_size: 120

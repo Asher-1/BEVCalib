@@ -1,0 +1,104 @@
+# V31 泛化评估: 基于 V30 BEST (DANN-ckpt400) 的精度突破实验
+# 严格匹配 batch8_train_all_v31.yaml 的 5 个实验
+# 每个实验评估 best_val + ckpt_400 + ckpt_600 (长训练实验)
+#
+# V31 消融矩阵:
+#   DANN-noAS:     DANN + no auto_scale         ← V30 缺失的关键消融
+#   DANN-10deg:    DANN + 10° 扰动              ← 大角度泛化 + 域适应
+#   DANN-long:     DANN + 600 epochs            ← 更长训练挖掘潜力
+#   DANN-lr:       DANN + lr=5e-5               ← 学习率调优
+#   10deg-DANN-lr: 10° + DANN + lr=5e-5 + 600e ← 全组合最强
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v31.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data/v31"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_eval_v31"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 16
+  vis_interval: 200
+  timeout: 14400
+  eval_max_frames_per_seq: 800
+
+models:
+  # === DANN-noAS: DANN + no auto_scale ===
+  - label: "v31-DANN-noAS"
+    dir_name: "model_small_5deg_v31_DANN_noAS"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + no auto_scale (best_val)"
+
+  - label: "v31-DANN-noAS-ckpt400"
+    dir_name: "model_small_5deg_v31_DANN_noAS"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + no auto_scale (ckpt_400)"
+
+  # === DANN-10deg: DANN + 10° 扰动 ===
+  - label: "v31-DANN-10deg"
+    dir_name: "model_small_10deg_v31_DANN_10deg"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + 10deg perturbation (best_val)"
+
+  - label: "v31-DANN-10deg-ckpt400"
+    dir_name: "model_small_10deg_v31_DANN_10deg"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + 10deg perturbation (ckpt_400)"
+
+  # === DANN-long: DANN + 600 epochs ===
+  - label: "v31-DANN-long"
+    dir_name: "model_small_5deg_v31_DANN_long"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + 600 epochs (best_val)"
+
+  - label: "v31-DANN-long-ckpt400"
+    dir_name: "model_small_5deg_v31_DANN_long"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + 600 epochs (ckpt_400)"
+
+  - label: "v31-DANN-long-ckpt600"
+    dir_name: "model_small_5deg_v31_DANN_long"
+    ckpt: "ckpt_600.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + 600 epochs (ckpt_600)"
+
+  # === DANN-lr: DANN + lower lr ===
+  - label: "v31-DANN-lr"
+    dir_name: "model_small_5deg_v31_DANN_lr"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + lr=5e-5 (best_val)"
+
+  - label: "v31-DANN-lr-ckpt400"
+    dir_name: "model_small_5deg_v31_DANN_lr"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "DANN + lr=5e-5 (ckpt_400)"
+
+  # === 10deg-DANN-lr: 全组合 ===
+  - label: "v31-combo"
+    dir_name: "model_small_10deg_v31_10deg_DANN_lr"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "10deg + DANN + lr=5e-5 + 600e (best_val)"
+
+  - label: "v31-combo-ckpt400"
+    dir_name: "model_small_10deg_v31_10deg_DANN_lr"
+    ckpt: "ckpt_400.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "10deg + DANN + lr=5e-5 + 600e (ckpt_400)"
+
+  - label: "v31-combo-ckpt600"
+    dir_name: "model_small_10deg_v31_10deg_DANN_lr"
+    ckpt: "ckpt_600.pth"
+    bev_zbound_step: "4.0"
+    mode_desc: "10deg + DANN + lr=5e-5 + 600e (ckpt_600)"

@@ -1,0 +1,56 @@
+# BEVCalib Remote Streaming Calibration Config
+# Streams trips via drfile: downloads and calibrates concurrently
+# Usage: python run_bag_calibration.py --config configs/calibration_remote.yaml
+
+# --- Input ---
+input_file: /mnt/drtraining/user/dahailu/data/bevcalib/bag_lists/remote_trips.txt
+input_format: remote
+trips_base: /mnt/drtraining/user/dahailu/data/bevcalib/dummy_data
+
+# --- Model ---
+ckpt_path: /mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data/v30/model_small_5deg_v30_G3_dinov2small_dann/all_training_data_scratch/checkpoint/ckpt_400.pth
+
+# --- Output ---
+output_dir: /mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/remote_calibration
+
+# --- Calibration Parameters ---
+max_frames: 400
+min_agg_frames: 50
+camera_name: traffic_2
+batch_size: 24
+img_h: 360
+img_w: 640
+projection_ratio: 0.1
+
+# --- Speed & Acceleration Filters ---
+min_speed_kmh: 5.0
+max_speed_kmh: 120.0
+min_accel: -1.0
+max_accel: 2.0
+min_brightness: 25
+
+# --- Performance ---
+parallel: -1
+preparer_num_workers: 16
+extract_buffer_multiplier: 3.0
+
+# --- Streaming Parameters ---
+# Initial bag groups to download before first extraction round (remote mode).
+# Each group ~3 bags (Heavy+Medium+Light). Lower = faster start, more rounds.
+# 3 groups = ~9 bags initial, aggressive fast-start with on-demand fetching.
+initial_bag_groups: 3
+
+# --- Air Suspension Filter ---
+# Skip frames where suspension is not in NORMAL gear (for vehicles with air suspension).
+# Reads /canbus/car_state channel from bags. Safe for vehicles without air suspension (no-op).
+filter_air_suspension: true
+
+# --- Cache Management ---
+# Delete cached trip data (bags, configs) after calibration completes.
+# Set to false to keep cached data for debugging or re-runs.
+cleanup_cache: false
+
+# --- Feishu Notification ---
+# Send calibration results to Feishu bot. Set to empty string to disable.
+# feishu_webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/35acb729-fb93-41a9-acd3-e3c5079a524f"
+feishu_webhook: ""
