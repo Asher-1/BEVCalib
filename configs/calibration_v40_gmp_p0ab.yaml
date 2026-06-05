@@ -1,0 +1,44 @@
+# V40 GMP P0ab best checkpoint — incremental streaming calibration (MEDW200)
+# Usage:
+#   python run_bag_calibration.py --config configs/calibration_v40_gmp_p0ab.yaml
+
+input_file: /mnt/drtraining/user/dahailu/data/bevcalib/bag_lists/test_v40.txt
+input_format: trips
+trips_base: /mnt/drtraining/user/dahailu/data/bevcalib/dummy_data
+
+ckpt_path: /mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data/model_small_5deg_v40_gmp_p0ab_5deg_main/all_training_data_scratch/checkpoint/ckpt_best_medw.pth
+
+output_dir: /mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v40_p0ab
+
+# MEDW200: aggregate 200 frames, stop streaming once reached
+max_frames: 200
+min_agg_frames: 50
+extract_buffer_multiplier: 1.2
+infer_cap_multiplier: 1.25
+incremental_extract: true
+initial_bag_groups: 3
+
+camera_name: traffic_2
+batch_size: 4
+img_h: 360
+img_w: 640
+projection_ratio: 0.05
+
+min_speed_kmh: 5.0
+max_speed_kmh: 120.0
+min_accel: -1.0
+max_accel: 2.0
+min_brightness: 25
+
+parallel: 0
+preparer_num_workers: 16
+filter_air_suspension: false
+cleanup_cache: false
+feishu_webhook: ""
+
+# True GT: auto-detect config_dir/lidars_bk.cfg when present
+# gt_lidars_cfg: /path/to/lidars_bk.cfg
+
+# Artificial bias on sensor_to_lidar orientation (xyz Euler, degrees).
+# Applied BEFORE T_init; each axis +2 deg → total geodesic ~3.5 deg vs lidars_bk.
+inject_lidar_rpy_deg: "2,2,2"

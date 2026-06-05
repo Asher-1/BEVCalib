@@ -1,0 +1,78 @@
+# V40 / V41 GMP 泛化评估配置
+#
+# 依赖 evaluate_checkpoint.py 从 ckpt args + state_dict 自动检测 GMP 架构
+# （geo_match_proj / match_head / projfusion_image_hw）
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v40_v41.yaml
+#   python run_generalization_eval.py --config configs/eval_generalization_v40_v41.yaml --parallel -1 --force
+#
+# 训练未完成时 pre-check 会报 ckpt missing；训练结束后重跑即可。
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data"
+output_dir: "logs/evaluations/generalization_v40_v41"
+eval_script: "evaluate_checkpoint.py"
+projfusion_root: "/mnt/drtraining/user/dahailu/code/ProjFusion"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.15
+  batch_size: 8
+  vis_interval: 200
+  timeout: 3600
+  shortcut_diag: false
+
+models:
+  # --- V40 GMP ---
+  - label: "v40-p0ab-medw"
+    dir_name: "model_small_5deg_v40_gmp_p0ab_5deg_main"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    gmp: true
+    rotation_only: 1
+    mode_desc: "V40 P0ab GMP geo"
+
+  - label: "v40-p1d-dual"
+    dir_name: "model_small_5deg_v40_gmp_p1d_dual_gate"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    gmp: true
+    rotation_only: 1
+    mode_desc: "V40 P1d match+corr+dual_gate"
+
+  # --- V41 GMP (训练完成后 dir_name 与 version 一致) ---
+  - label: "v41-a-jacloss"
+    dir_name: "model_small_5deg_v41_gmp_a_v32_baseline"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    gmp: true
+    rotation_only: 1
+    mode_desc: "V41-A V32+geo+jacloss"
+
+  - label: "v41-b-match"
+    dir_name: "model_small_5deg_v41_gmp_b_v32_jacloss"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    gmp: true
+    rotation_only: 1
+    mode_desc: "V41-B +match/corr (no diff_epnp)"
+
+  - label: "v41-c-epnp"
+    dir_name: "model_small_5deg_v41_gmp_c_v32_jacloss_match"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    gmp: true
+    rotation_only: 1
+    mode_desc: "V41-C +match+corr+diff_epnp"

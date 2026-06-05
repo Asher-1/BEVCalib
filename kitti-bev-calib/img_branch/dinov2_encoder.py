@@ -345,12 +345,13 @@ class DINOv2Encoder(nn.Module):
         state_dict = torch.load(local_path, map_location="cpu")
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         loaded = len(state_dict) - len(unexpected)
-        print(f"[DINOv2Encoder] Loaded {local_path}")
-        print(f"[DINOv2Encoder]   {loaded}/{len(state_dict)} keys loaded, "
-              f"{len(missing)} missing, {len(unexpected)} unexpected")
+        print(f"[DINOv2Encoder] ckpt={local_path}")
+        print(f"[DINOv2Encoder] loaded {loaded}/{len(state_dict)} keys, "
+              f"missing={len(missing)}, unexpected={unexpected}")
         if missing:
-            for k in missing[:5]:
-                print(f"[DINOv2Encoder]   missing: {k}")
+            raise RuntimeError(
+                f"[DINOv2Encoder] VERIFY FAIL: missing keys {missing[:5]}")
+        print(f"[DINOv2Encoder] VERIFY PASS")
 
         return model
 

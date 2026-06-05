@@ -1,0 +1,365 @@
+# V45 全变种泛化评估配置 (含 V44 基线 + Full 链路)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v45.yaml --parallel -1 --eval_max_frames_per_seq 400
+#   python run_generalization_eval.py --config configs/eval_generalization_v45.yaml --generalization_diag --parallel -1 --eval_max_frames_per_seq 400
+#
+# 评估内容:
+#   - V44-S1(baseline)
+#   - V45a S1/S2/S3 Quick (no IN, stronger aug+reg ablation)
+#   - V45b S1/S2/S3 Quick (S1 no IN, S2/S3 with IN)
+#   - V45c S1/S2/S3 Quick (V45b + cf_n_groups=256)
+#   - V45c S1 (non-quick, 150ep longer training)
+#   - V45 GIN S1/S2/S3 Quick (Gated Instance Norm)
+#   - V45 GIN S1/S2/S3 Full (long-training, 全局最优链路)
+#   - best_dual + best_val checkpoints
+#   - generalization_diag: zero-drift / inject / shortcut / GS_medw (MEDW多帧聚合)
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v45"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v45_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+  # ===== Baselines (V44-S1, already verified) =====
+  - label: "v44-S1-best-dual"
+    dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S1 baseline (no IN, MEDW=0.058°, bag=0.369°)"
+
+  - label: "v44-S1-best-val"
+    dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S1 best-val baseline"
+
+  # ===== V45a Quick: No IN, stronger aug+reg =====
+  - label: "v45a-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v45a_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45a S1 no-IN ablation (5° + stronger aug)"
+
+  - label: "v45a-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45a_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45a S1 no-IN best-val"
+
+  - label: "v45a-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v45a_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45a S2 no-IN (3° fine-tune)"
+
+  - label: "v45a-S2-quick-best-val"
+    dir_name: "model_small_3deg_v45a_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45a S2 no-IN best-val"
+
+  - label: "v45a-S3-quick-best-dual"
+    dir_name: "model_small_1deg_v45a_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45a S3 no-IN (1° precision)"
+
+  - label: "v45a-S3-quick-best-val"
+    dir_name: "model_small_1deg_v45a_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45a S3 no-IN best-val"
+
+  # ===== V45b Quick: S1 no-IN, S2/S3 with IN =====
+  - label: "v45b-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v45b_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S1 no-IN (shared with V45a S1)"
+
+  - label: "v45b-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45b_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S1 best-val"
+
+  - label: "v45b-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v45b_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S2 with-IN (3° fine-tune + IN divergence from V45a)"
+
+  - label: "v45b-S2-quick-best-val"
+    dir_name: "model_small_3deg_v45b_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S2 with-IN best-val"
+
+  - label: "v45b-S3-quick-best-dual"
+    dir_name: "model_small_1deg_v45b_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S3 with-IN (1° precision)"
+
+  - label: "v45b-S3-quick-best-val"
+    dir_name: "model_small_1deg_v45b_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S3 with-IN best-val"
+
+  # ===== V45c Quick: V45b + cf_n_groups=256 =====
+  - label: "v45c-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 (5° + double spatial res)"
+
+  - label: "v45c-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 best-val"
+
+  - label: "v45c-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S2 n_groups=256 + IN (3° fine-tune)"
+
+  - label: "v45c-S2-quick-best-val"
+    dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S2 n_groups=256 + IN best-val"
+
+  - label: "v45c-S3-quick-best-dual"
+    dir_name: "model_small_1deg_v45c_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S3 n_groups=256 + IN (1° precision)"
+
+  - label: "v45c-S3-quick-best-val"
+    dir_name: "model_small_1deg_v45c_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S3 n_groups=256 + IN best-val"
+
+  # ===== V45c S1 (non-quick, longer training) =====
+  - label: "v45c-S1-best-dual"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 (150ep, longer training)"
+
+  - label: "v45c-S1-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 (150ep) best-val"
+
+  # ===== V45 GIN Full: Long-training Gated Instance Norm =====
+  - label: "v45-gin-S1-full-best-dual"
+    dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S1 Full 400ep (MEDW=0.037°)"
+
+  - label: "v45-gin-S1-full-best-val"
+    dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S1 Full 400ep best-val"
+
+  - label: "v45-gin-S2-full-best-dual"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Full 200ep (MEDW=0.027°, 全局最优S2)"
+
+  - label: "v45-gin-S2-full-best-val"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Full 200ep best-val"
+
+  - label: "v45-gin-S3-full-best-dual"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full 150ep best-dual (MEDW=0.026°, Jac=0.987)"
+
+  - label: "v45-gin-S3-full-best-val"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full 150ep best-val (ValRot=0.10°)"
+
+  # ===== V45 GIN Quick: Gated Instance Norm =====
+  - label: "v45-gin-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S1 Quick dual-gate best (5° + GIN)"
+
+  - label: "v45-gin-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S1 Quick best-val"
+
+  - label: "v45-gin-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Quick dual-gate best (3° fine-tune + GIN)"
+
+  - label: "v45-gin-S2-quick-best-val"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Quick best-val"
+
+  - label: "v45-gin-S3-quick-best-dual"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Quick dual-gate best (1° precision + GIN)"
+
+  - label: "v45-gin-S3-quick-best-val"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Quick best-val"

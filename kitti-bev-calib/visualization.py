@@ -77,6 +77,9 @@ def compute_pose_errors(pred_T: np.ndarray, gt_T: np.ndarray) -> Dict[str, float
         'roll_error': abs(axis_angle_error[0]),               # 绕LiDAR X(前进) (deg)
         'pitch_error': abs(axis_angle_error[1]),              # 绕LiDAR Y(左)   (deg)
         'yaw_error': abs(axis_angle_error[2]),                # 绕LiDAR Z(上)   (deg)
+        'roll_signed': float(axis_angle_error[0]),            # 有符号 roll (deg)
+        'pitch_signed': float(axis_angle_error[1]),           # 有符号 pitch (deg)
+        'yaw_signed': float(axis_angle_error[2]),             # 有符号 yaw (deg)
     }
 
 

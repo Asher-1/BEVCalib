@@ -1,0 +1,198 @@
+# V40 P1d 强化Match路径学习
+#
+# === Correspondence 显式监督：如何启用 ===
+# 1) YAML（本文件 defaults 已开启）：
+#      use_match_head: 1
+#      correspondence_supervision: 1   # MatchHead 用 T_gt 生成 uv_gt
+#      correspondence_loss_weight: 5.0 # 写入 total_loss（见 geo_match_proj_calib.py）
+# 2) 实现链路：
+#      CorrespondenceHead → uv_pred vs uv_gt (SmoothL1)
+#      → HybridPoseHead meta['correspondence_loss']
+#      → GeoMatchProjCalib step_loss += weight * corr
+#      → DifferentiableEPnP(R_match) + RefineHead → PoseComposer
+# 3) 训练日志监控：corr=... match_fb=... epnp_grad=...
+# 4) 推理部署请用 ckpt_best_dual.pth（dual_gate 配置）而非 ckpt_best_medw.pth
+#
+# 基于P1c，针对MatchHead学习停滞问题的优化：
+# 1. ↑ correspondence_loss_weight: 1.0 → 5.0 (强化匹配监督)
+# 2. ↓ match_valid_ratio_min: 0.3 → 0.15 (减少fallback，强制学习)
+# 3. ↓ diff_epnp_warmup_epochs: 5 → 2 (快速启用梯度)
+#
+# 问题诊断：P1c训练中MatchHead回退率高达77%，几乎未学习
+# 解决方案：强化匹配损失权重，降低fallback阈值，加速warmup
+#
+# Wall-clock: ~14–16h (8×L20, f500, iter0)
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+    PROJFUSION_ROOT: /mnt/drtraining/user/dahailu/code/ProjFusion
+
+  params:
+    fusion_backend: geo_match_proj
+    pc_encoder_mode: pointgpt2bev
+
+    batch_size: 32
+    learning_rate: 4.6e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 10.0
+    jacobian_eval_batches: 1
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+
+    native_cross: 0
+    cam2bev_mode: query
+    backbone_type: dinov2
+    backbone_variant: dinov2-small
+    freeze_backbone: 1
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,2.5,1.0"
+    use_balanced_axis_loss: 1
+
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+
+    augment_mount_jitter_prob: 0.6
+    augment_mount_jitter_rot_sigma: 5.0
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.25
+    augment_pitch_flip_max_deg: 4.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.15
+    augment_intrinsic: 0.05
+    augment_intrinsic_cxcy: 0.03
+    
+    # P2b: FOV crop (simulate different mounting height / FOV overlap)
+    augment_fov_crop_prob: 0.3
+    augment_fov_crop_ratio_min: 0.80
+    augment_fov_crop_ratio_max: 0.95
+    
+    # P2b: LiDAR sparsification (simulate 16/32/64-line LiDAR)
+    augment_lidar_sparse_prob: 0.25
+    augment_lidar_sparse_lines: "16,32,64"
+    augment_lidar_vertical_fov: "-25,15"
+
+    native_cross_extend_ratio: 2.5
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 30
+    cosine_Tmult: 2
+    warmup_epochs: 6
+    backbone_lr_scale: 0.0
+
+    max_frames_per_seq: 500
+    save_ckpt_per_epoches: 15
+    eval_epoches: 15
+
+    # P1d recipe: 强化Match路径学习
+    iterative_refine: 0
+    projfusion_image_hw: [252, 448]
+    appearance_loss_weight: 0.1
+    depth_loss_weight: 0.05
+    geo_loss_start_epoch: 5
+    use_match_head: 1
+    use_local_correlation: 1
+    compose_mode: match_then_refine
+    num_correspondences: 64
+    correspondence_supervision: 1
+    
+    # 🔥 关键修改1: 大幅提升correspondence loss权重
+    correspondence_loss_weight: 5.0      # P1c=1.0 → P1d=5.0
+    
+    # 🔥 关键修改2: 降低fallback阈值，强制使用Match
+    match_valid_ratio_min: 0.15          # P1c=0.3 → P1d=0.15
+    
+    # 🔥 关键修改3: 缩短DiffEPnP warmup
+    differentiable_epnp: 1
+    diff_epnp_warmup_epochs: 2           # P1c=5 → P1d=2
+
+    native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+    native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+    native_cross_pointgpt_max_depth: 60.0
+
+    pose_aware_sampling: true
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    seed: 42
+
+    pretrain_ckpt: logs/all_training_data/model_small_10deg_v39_fast_exp1_wide_10deg/all_training_data_scratch/checkpoint/ckpt_best_medw.pth
+
+experiments:
+  - name: "v40_gmp_p1d_strong_match"
+    description: "P1d: 强化Match监督 (corr_w=5.0, fallback=0.15, warmup=2ep)"
+    dataset: "all"
+    version: "v40_gmp_p1d_strong_match"
+    params:
+      angle_range_deg: 10
+      trans_range: 0.0
+      num_epochs: 60
+      differentiable_epnp: 1
+
+  - name: "v40_gmp_p1d_match_only"
+    description: "P1d ablation: match_only强制模式"
+    dataset: "all"
+    version: "v40_gmp_p1d_match_only"
+    skip: true
+    skip_reason: "主实验优先，需要时手动开启"
+    params:
+      angle_range_deg: 10
+      trans_range: 0.0
+      num_epochs: 60
+      compose_mode: match_only              # 完全禁用fallback
+      correspondence_loss_weight: 3.0       # match_only模式可稍降权重
+      match_valid_ratio_min: 0.10           # 更激进
+
+  - name: "v40_gmp_p1d_from_scratch"
+    description: "P1d ablation: 从头训练（无pretrain）"
+    dataset: "all"
+    version: "v40_gmp_p1d_from_scratch"
+    skip: true
+    skip_reason: "需要更长时间（80ep），按需启用"
+    params:
+      angle_range_deg: 10
+      trans_range: 0.0
+      num_epochs: 80                        # 从头训练需要更多epoch
+      pretrain_ckpt: null                   # 不使用pretrain
+      warmup_epochs: 10                     # 延长warmup
+      diff_epnp_warmup_epochs: 3
+
+  - name: "v40_gmp_p1d_smoke"
+    description: "2ep 冒烟测试"
+    dataset: "all"
+    version: "v40_gmp_p1d_smoke"
+    skip: true
+    skip_reason: "调试用，手动开启"
+    params:
+      angle_range_deg: 10
+      trans_range: 0.0
+      num_epochs: 2
+      eval_epoches: 1
+      geo_loss_start_epoch: 0
+      diff_epnp_warmup_epochs: 0

@@ -1,0 +1,156 @@
+# V43 CF-BEV-R: Machine B — Start from V42-S1 quick ckpt
+# Purpose: Test V43 training strategy from S2 onwards
+#          (compare with Machine A which trains S1 from scratch)
+#
+# Usage:
+#   bash batch_train.sh configs/v43_cf_bev_r_quick_machineB.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.1
+
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 15.0
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    consistency_loss_weight: 0.5
+    consistency_loss_start_epoch: 10
+    zero_perturbation_prob: 0.0
+
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    max_frames_per_seq: 500
+    foreground: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_mount_jitter_prob: 0.0
+    augment_intrinsic: 0.0
+
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 20
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S2: ±3° from V42-S1-quick ckpt =====
+  # V43 strategy applied to V42 S1 foundation
+  - name: "v43_from_v42S1_S2_quick"
+    description: "V43-S2: from V42-S1-quick ckpt, zero-perturb + reduced AS"
+    dataset: "all"
+    version: "v43_from_v42S1_S2_quick"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 3
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 30
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v42_cf_bev_r_S1_quick/all_training_data_scratch/checkpoint/ckpt_best_medw.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      rocr_dropout: 0.2
+      rocr_center_bias: 0.2
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 5.0
+      zero_perturbation_prob: 0.08
+
+  # ===== S3: ±1° precision sprint =====
+  - name: "v43_from_v42S1_S3_quick"
+    description: "V43-S3: from above S2, minimal AS, 10% zero-perturb"
+    dataset: "all"
+    version: "v43_from_v42S1_S3_quick"
+    params:
+      angle_range_deg: 1
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 80
+      warmup_epochs: 2
+      learning_rate: 1e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 25
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_3deg_v43_from_v42S1_S2_quick/all_training_data_scratch/checkpoint/ckpt_best_medw.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      rocr_dropout: 0.1
+      rocr_center_bias: 0.0
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.7
+      continuous_noise_max_deg: 2.0
+      zero_perturbation_prob: 0.10
+      axis_weights: "1.5,2.5,2.0"

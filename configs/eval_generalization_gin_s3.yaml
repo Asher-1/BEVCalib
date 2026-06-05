@@ -1,0 +1,56 @@
+# GIN S3 Full 泛化评估 (独立配置, 快速评估 S3 Full 完成训练)
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v45_gin_s3"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+  - label: "v45-gin-S2-full-best-dual"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Full baseline (MEDW=0.027°)"
+
+  - label: "v45-gin-S3-full-best-dual"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full 150ep best-dual (MEDW=0.026°, Jac=0.987)"
+
+  - label: "v45-gin-S3-full-best-val"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full 150ep best-val (ValRot=0.10°)"
+
+  - label: "v45b-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v45b_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S1 Quick baseline (GS=0.342 reference)"

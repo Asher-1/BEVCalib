@@ -415,38 +415,67 @@ class StreamingTripDownloader(object):
         return n_new
 
     def _ensure_model_folder(self):
-        """Download model/lidars.cfg for IAE computation.
+        """Download model/lidars.cfg + model/cameras.cfg for IAE and GT comparison.
 
-        Only downloads lidars.cfg (the only file needed) to avoid failures from
-        corrupted/missing binary files (e.g. ground.bin returning 404).
-        Resolves configs_onboard LINK to get the true storage path first.
+        Both files are required by ``_try_load_gt_extrinsic``.  Only downloads
+        text cfg files to avoid failures from corrupted/missing binary files
+        (e.g. ground.bin returning 404).  Resolves configs_onboard LINK first.
         """
         model_dir = os.path.join(self.trip_dir, "model")
-        lidars_target = os.path.join(model_dir, "lidars.cfg")
-        if os.path.isfile(lidars_target) and os.path.getsize(lidars_target) > 10:
-            print("[stream] Model lidars.cfg already present for {}".format(self.trip_name))
+        needed = (
+            ("lidars.cfg", "lidars.cfg"),
+            ("cameras.cfg", "cameras.cfg"),
+        )
+        if all(os.path.isfile(os.path.join(model_dir, fname)) and
+               os.path.getsize(os.path.join(model_dir, fname)) > 10
+               for _, fname in needed):
+            print("[stream] Model lidars.cfg + cameras.cfg already present for {}".format(
+                self.trip_name))
             return
 
         os.makedirs(model_dir, exist_ok=True)
         target_ns, target_path = self._resolve_configs_onboard_link()
-        attempts = []
-        if target_ns and target_path:
-            attempts.append("{}:{}/sensors/model/lidars.cfg".format(target_ns, target_path))
-        attempts.append("trip:/{}/configs_onboard/sensors/model/lidars.cfg".format(self.trip_name))
-        attempts.append("trip:/{}/configs/sensors/model/lidars.cfg".format(self.trip_name))
+        rel_paths = [rel for rel, _ in needed]
 
-        for uri in attempts:
-            _drfile_download_quiet(self.drfile_bin, uri, model_dir)
-            if os.path.isfile(lidars_target) and os.path.getsize(lidars_target) > 10:
-                print("[stream] Model lidars.cfg ready for {} (from {})".format(
-                    self.trip_name, uri.split(":")[0]))
-                return
+        def _attempt_uris(rel_path):
+            uris = []
+            if target_ns and target_path:
+                uris.append("{}:{}/sensors/model/{}".format(
+                    target_ns, target_path, rel_path))
+            uris.append("trip:/{}/configs_onboard/sensors/model/{}".format(
+                self.trip_name, rel_path))
+            uris.append("trip:/{}/configs/sensors/model/{}".format(
+                self.trip_name, rel_path))
+            return uris
 
-        print("[stream] Model lidars.cfg not available for {} (tried {} paths, using IAE fallback)".format(
-            self.trip_name, len(attempts)))
+        for rel_path, fname in needed:
+            target = os.path.join(model_dir, fname)
+            if os.path.isfile(target) and os.path.getsize(target) > 10:
+                continue
+            for uri in _attempt_uris(rel_path):
+                _drfile_download_quiet(self.drfile_bin, uri, model_dir)
+                if os.path.isfile(target) and os.path.getsize(target) > 10:
+                    print("[stream] Model {} ready for {} (from {})".format(
+                        fname, self.trip_name, uri.split(":")[0]))
+                    break
+            else:
+                print("[stream] Model {} not available for {} (tried {} paths)".format(
+                    fname, self.trip_name, len(_attempt_uris(rel_path))))
+
+        have_lidars = os.path.isfile(os.path.join(model_dir, "lidars.cfg"))
+        have_cams = os.path.isfile(os.path.join(model_dir, "cameras.cfg"))
+        if not (have_lidars and have_cams):
+            print("[stream] Model folder incomplete for {} "
+                  "(lidars.cfg={}, cameras.cfg={}; IAE/GT may use fallback)".format(
+                      self.trip_name, have_lidars, have_cams))
 
     def _resolve_configs_onboard_link(self):
-        """Resolve configs_onboard LINK to its target namespace and path."""
+        """Resolve configs_onboard LINK to its target namespace and path.
+
+        drfile 2.38+ writes both the request log and response JSON to stdout,
+        so we must locate the *response* JSON (the one containing ``"target"``)
+        rather than naively taking the first ``{``.
+        """
         try:
             proc = subprocess.Popen(
                 [self.drfile_bin, "head", "--format", "json",
@@ -456,21 +485,33 @@ class StreamingTripDownloader(object):
             )
             stdout, _ = proc.communicate(timeout=15)
             if proc.returncode == 0 and '"target"' in stdout:
-                json_start = stdout.find("{")
-                if json_start >= 0:
-                    json_end = stdout.rfind("}") + 1
-                    if json_end > json_start:
-                        try:
-                            data = json.loads(stdout[json_start:json_end])
-                            if isinstance(data, list):
-                                data = data[0]
-                            target = data.get("target", {})
-                            ns = target.get("namespace")
-                            path = target.get("path")
-                            if ns and path:
-                                return ns, path
-                        except json.JSONDecodeError:
-                            pass
+                target_pos = stdout.find('"target"')
+                if target_pos < 0:
+                    return None, None
+                json_start = stdout.rfind("{", 0, target_pos)
+                brace_depth = 0
+                json_end = -1
+                for i in range(json_start, len(stdout)):
+                    if stdout[i] == "{":
+                        brace_depth += 1
+                    elif stdout[i] == "}":
+                        brace_depth -= 1
+                        if brace_depth == 0:
+                            json_end = i + 1
+                            break
+                if json_end > json_start:
+                    try:
+                        data = json.loads(stdout[json_start:json_end])
+                        if isinstance(data, list):
+                            data = data[0]
+                        target = data.get("target", {})
+                        ns = target.get("namespace")
+                        path = target.get("path")
+                        if ns and path:
+                            print("[stream] Resolved configs_onboard LINK -> {}:{}".format(ns, path))
+                            return ns, path
+                    except json.JSONDecodeError:
+                        pass
         except Exception:
             pass
         return None, None
@@ -479,7 +520,9 @@ class StreamingTripDownloader(object):
         """Sync step: download configs + list remote bags + verify cache completeness."""
         os.makedirs(self.trip_dir, exist_ok=True)
 
-        has_configs = os.path.isdir(self.config_dir)
+        has_configs = (os.path.isdir(self.config_dir)
+                       and (os.path.isfile(os.path.join(self.config_dir, "lidars.cfg"))
+                            or os.path.isfile(os.path.join(self.config_dir, "cameras.cfg"))))
         if not has_configs:
             _drfile_download_quiet(self.drfile_bin,
                                    "trip:/{}/configs".format(self.trip_name),
@@ -655,8 +698,9 @@ def download_remote_trip(trip_name, trips_base, max_bag_groups=20):
         downloader.wait_for_min_bags(min_count=4, timeout=300)
         _ACTIVE_DOWNLOADERS[trip_name] = downloader
     else:
-        # Cached trip — no active downloads, don't register as streaming
-        downloader._stop.set()
+        # Cached trip — use incremental local gate instead of full-bag extract
+        register_local_incremental_gate(trip_name, downloader.trip_dir,
+                                        initial_bag_groups=downloader.initial_bag_groups)
     return downloader.trip_dir
 
 
@@ -895,6 +939,107 @@ def subsample_bags_for_calibration(bag_paths, target_frames, fps_est=10.0, bag_d
     _LOGGER.info("Bag subsampling: %d/%d groups selected (%d/%d bags) for ~%d frames",
                  len(indices), n_groups, len(selected), len(bag_paths), target_frames)
     return selected
+
+
+def _build_bag_time_slots(bag_paths):
+    """Group bag paths by time slot (Heavy+Medium+Light per timestamp)."""
+    path_by_base = {}
+    for p in bag_paths:
+        path_by_base[os.path.basename(p)] = os.path.abspath(p)
+
+    time_groups = {}
+    for name, p in path_by_base.items():
+        stripped = name.split(".")[0] if "." in name else name
+        stripped = re.sub(r'_(Heavy|Light|Medium|Tiny)_Topic_Group$', '', stripped)
+        time_groups.setdefault(stripped, []).append(p)
+
+    return [time_groups[k] for k in sorted(time_groups.keys())]
+
+
+class LocalBagGate(object):
+    """Incremental local-bag gate: release time-slot groups on demand (no drfile).
+
+    Mimics ``StreamingTripDownloader`` interface for ``_streaming_calibrate_loop``.
+    Only symlinks the next N time-slot groups into staging when ``request_more_bags``
+    is called — avoids parsing the entire trip's bags upfront.
+    """
+
+    def __init__(self, bag_paths, initial_groups=3):
+        self._slots = _build_bag_time_slots(bag_paths)
+        self._released = 0
+        self._initial_groups = max(1, int(initial_groups))
+        self._stop = threading.Event()
+        self._download_lock = threading.Lock()
+        self._pending_paths = []
+        self._total_bags = sum(len(s) for s in self._slots)
+
+    @property
+    def downloaded_count(self):
+        with self._download_lock:
+            return self._released
+
+    @property
+    def has_unqueued_slots(self):
+        return self._released < len(self._slots)
+
+    @property
+    def all_downloaded(self):
+        return self._released >= len(self._slots)
+
+    def request_more_bags(self, n_groups=3):
+        with self._download_lock:
+            if self._released >= len(self._slots):
+                return 0
+            end = min(self._released + int(n_groups), len(self._slots))
+            new_paths = []
+            for i in range(self._released, end):
+                new_paths.extend(self._slots[i])
+            self._released = end
+            self._pending_paths.extend(new_paths)
+            n_new = len(new_paths)
+        if n_new > 0:
+            print("[stream] Local gate: released groups {}/{} (+{} bags)".format(
+                self._released, len(self._slots), n_new))
+        return n_new
+
+    def snapshot_new_bags(self, staging, seen_bags):
+        """Symlink newly released bags into flat staging (deduped by seen_bags)."""
+        os.makedirs(staging, exist_ok=True)
+        with self._download_lock:
+            pending = list(self._pending_paths)
+            self._pending_paths = []
+        newly = []
+        for full in pending:
+            if full in seen_bags:
+                continue
+            try:
+                if os.path.getsize(full) < 1000:
+                    continue
+            except OSError:
+                continue
+            name = os.path.basename(full)
+            link_dst = os.path.join(staging, name)
+            if not os.path.exists(link_dst):
+                os.symlink(full, link_dst)
+            seen_bags.add(full)
+            newly.append(name)
+        return newly
+
+    def stop(self):
+        self._stop.set()
+
+
+def register_local_incremental_gate(trip_name, trip_dir, initial_bag_groups=3):
+    """Register a LocalBagGate for cached local trips (incremental parse)."""
+    bag_paths = find_trip_bag_paths(trip_dir)
+    slots = _build_bag_time_slots(bag_paths)
+    gate = LocalBagGate(bag_paths, initial_groups=initial_bag_groups)
+    gate.request_more_bags(initial_bag_groups)
+    _ACTIVE_DOWNLOADERS[trip_name] = gate
+    print("[info] Local incremental gate: {}/{} time slots, {} bags total, "
+          "initial batch {} groups".format(
+              gate._released, len(slots), gate._total_bags, initial_bag_groups))
+    return gate
 
 
 def stage_bags_symlink(bag_paths, staging_dir):
@@ -1251,7 +1396,7 @@ def run_inference_batches(
             if batch is None:
                 continue
             imgs_t, pcs_t, init_T_t, post_T_t, K_t = batch
-            use_amp = device_str.startswith("cuda")
+            use_amp = device_str.startswith("cuda") and not getattr(wrapper, "disable_amp", False)
             if use_amp:
                 with torch_mod.cuda.amp.autocast():
                     pred = wrapper(imgs_t, pcs_t, init_T_t, post_T_t, K_t)
@@ -1261,6 +1406,181 @@ def run_inference_batches(
             for i in range(pred_np.shape[0]):
                 preds.append(pred_np[i])
     return preds
+
+
+def _perturb_T_rpy(T_init, rpy_deg):
+    """Apply xyz Euler perturbation (degrees) to T_init rotation."""
+    ScipyRot = _require_scipy_rot()
+    T_out = np.array(T_init, dtype=np.float64, copy=True)
+    R_delta = ScipyRot.from_euler("xyz", rpy_deg, degrees=True).as_matrix()
+    T_out[:3, :3] = R_delta @ T_out[:3, :3]
+    return T_out
+
+
+def _build_multi_init_candidates(T_init, sweep_deg, grid=False):
+    """Build T_init candidates for multi-init scan (axis-wise or full grid)."""
+    sweep = float(sweep_deg)
+    if sweep <= 0:
+        return [("base", np.array(T_init, copy=True))]
+
+    candidates = [("base", np.array(T_init, copy=True))]
+    if grid:
+        steps = [-sweep, -sweep * 0.5, 0.0, sweep * 0.5, sweep]
+        for r in steps:
+            for p in steps:
+                for y in steps:
+                    if abs(r) + abs(p) + abs(y) < 1e-9:
+                        continue
+                    label = "R{:+.1f}_P{:+.1f}_Y{:+.1f}".format(r, p, y)
+                    candidates.append((label, _perturb_T_rpy(T_init, (r, p, y))))
+        return candidates
+
+    for axis, tag in ((0, "R"), (1, "P"), (2, "Y")):
+        for sign in (+1.0, -1.0):
+            rpy = [0.0, 0.0, 0.0]
+            rpy[axis] = sign * sweep
+            label = "{}{:+.1f}".format(tag, rpy[axis])
+            candidates.append((label, _perturb_T_rpy(T_init, tuple(rpy))))
+    return candidates
+
+
+def _prepare_frames_for_reinfer(frame_meta, cv2, xbound, ybound, zbound, Wm, Hm):
+    """Load resized BGR + filtered PC + K from accepted frame meta."""
+    frames = []
+    for meta in frame_meta:
+        img_path = meta.get("img_path")
+        pc_path = meta.get("pc_path")
+        K = meta.get("K")
+        if not img_path or not pc_path or K is None:
+            continue
+        im = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if im is None:
+            continue
+        ih, iw = im.shape[:2]
+        sx = float(Wm) / float(iw)
+        sy = float(Hm) / float(ih)
+        Ks = np.array(K, copy=True)
+        Ks[0, 0] *= sx
+        Ks[0, 2] *= sx
+        Ks[1, 1] *= sy
+        Ks[1, 2] *= sy
+        im_r = cv2.resize(im, (Wm, Hm), interpolation=cv2.INTER_AREA)
+        pc_raw = load_raw_pointcloud(pc_path)
+        pc_f = filter_pointcloud_for_bev(pc_raw, xbound, ybound, zbound)
+        if pc_f.shape[0] < 10:
+            continue
+        frames.append({
+            "img_bgr": im_r,
+            "pc": pc_f[:, :3].astype(np.float32),
+            "K": Ks,
+            "meta": meta,
+        })
+    return frames
+
+
+def _aggregate_predictions(predictions, max_frames, min_agg_frames):
+    """Temporal aggregate with optional uniform subsample to max_frames."""
+    aggregator = TemporalCalibrationAggregator(
+        min_frames=min_agg_frames, max_frames=max_frames, method="axis_angle_median",
+    )
+    n = len(predictions)
+    if n > max_frames:
+        sel = sorted(set(int(round(i)) for i in np.linspace(0, n - 1, num=max_frames)))
+        for idx in sel:
+            aggregator.add(predictions[idx])
+    else:
+        for p in predictions:
+            aggregator.add(p)
+    return aggregator.aggregate(), aggregator.get_confidence(), aggregator.count
+
+
+def _multi_init_select_best(
+    T_init_base,
+    frame_meta,
+    base_predictions,
+    sweep_deg,
+    grid,
+    wrapper,
+    device,
+    batch_size,
+    img_shape,
+    max_frames,
+    min_agg_frames,
+    T_gt_ref,
+    cv2,
+    torch_mod,
+    xbound,
+    ybound,
+    zbound,
+):
+    """
+    Re-infer with perturbed T_init candidates; pick best by GT residual or confidence.
+
+    Returns:
+        (best_T_cal, best_T_init_used, best_conf, scan_rows)
+    """
+    Hm, Wm = int(img_shape[0]), int(img_shape[1])
+    frames = _prepare_frames_for_reinfer(
+        frame_meta, cv2, xbound, ybound, zbound, Wm, Hm)
+    if not frames:
+        raise RuntimeError("multi_init: no frames could be loaded for re-inference")
+
+    n_use = min(len(base_predictions), len(frames))
+    frame_meta = frame_meta[:n_use]
+    frames = frames[:n_use]
+    base_predictions = base_predictions[:n_use]
+
+    candidates = _build_multi_init_candidates(T_init_base, sweep_deg, grid=grid)
+    scan_rows = []
+    best = None
+
+    for label, T_cand in candidates:
+        if label == "base":
+            preds = base_predictions
+        else:
+            preds = run_inference_batches(
+                frames, T_cand, wrapper, device, img_shape, batch_size, torch_mod)
+        if len(preds) != n_use:
+            continue
+        T_cal, conf, n_acc = _aggregate_predictions(preds, max_frames, min_agg_frames)
+        row = {
+            "label": label,
+            "T_init": T_cand,
+            "T_cal": T_cal,
+            "conf": conf,
+            "n_acc": n_acc,
+            "init_cal_deg": T_to_calibration_metrics(T_cand, T_cal)["rot_geodesic_deg"],
+        }
+        if T_gt_ref is not None:
+            bm = _compute_bias_compensation_metrics(T_cand, T_cal, T_gt_ref)
+            row["residual_deg"] = bm["residual_bias_deg"]
+            row["recover_pct"] = bm["compensation_ratio_pct"]
+            row["shortcut"] = bm["shortcut_risk"]
+            score = row["residual_deg"]
+        else:
+            row["residual_deg"] = float("nan")
+            row["recover_pct"] = float("nan")
+            row["shortcut"] = ""
+            _cpct = conf.get("confidence_pct", 0) if conf else 0
+            score = -float(_cpct if _cpct is not None else 0) + row["init_cal_deg"] * 0.1
+        row["score"] = score
+        scan_rows.append(row)
+        if best is None or score < best["score"]:
+            best = row
+
+    print("[multi_init] sweep={}° grid={} candidates={} frames={}".format(
+        sweep_deg, grid, len(scan_rows), n_use))
+    for row in sorted(scan_rows, key=lambda r: r["score"]):
+        extra = ""
+        if T_gt_ref is not None:
+            extra = " residual={:.3f}° recover={:.0f}% {}".format(
+                row["residual_deg"], row["recover_pct"] if row["recover_pct"] == row["recover_pct"] else 0.0,
+                row["shortcut"])
+        print("[multi_init]   {} init->cal={:.3f}° score={:.4f}{}".format(
+            row["label"], row["init_cal_deg"], row["score"], extra))
+    print("[multi_init] selected: {} (residual={:.4f}°)".format(
+        best["label"], best.get("residual_deg", float("nan"))))
+    return best["T_cal"], best["T_init"], best["conf"], scan_rows
 
 
 # =============================================================================
@@ -1276,6 +1596,7 @@ def render_projection_comparison(
     render_fn,
     compute_err_fn,
     frame_label="",
+    banner_extra="",
 ):
     """
     Build side-by-side projection comparison (original vs calibrated extrinsic).
@@ -1305,10 +1626,12 @@ def render_projection_comparison(
     banner = np.zeros((banner_h, mosaic.shape[1], 3), dtype=np.uint8)
 
     cv2 = _require_cv2()
-    txt = "Original(L) vs Calibrated(R)"
+    txt = "Init(L) vs Calibrated(R)"
+    if banner_extra:
+        txt += "  |  {}".format(banner_extra)
     if frame_label:
         txt += "  |  {}".format(frame_label)
-    cv2.putText(banner, txt, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(banner, txt, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
     return np.vstack([banner, mosaic])
 
@@ -1346,6 +1669,106 @@ def _render_pts_on_image(image_bgr, pts_2d, depths, max_depth=80.0):
         c = tuple(int(v) for v in colors_bgr[i])
         cv2.circle(canvas, (x, y), 2, c, -1)
     return canvas
+
+
+def _parse_rpy_triplet(text):
+    """Parse ``roll,pitch,yaw`` degrees from CLI string."""
+    if not text:
+        return None
+    parts = [p.strip() for p in str(text).split(",")]
+    if len(parts) != 3:
+        raise ValueError(
+            "inject_lidar_rpy_deg expects 'roll,pitch,yaw' in degrees, got: {}".format(text))
+    return tuple(float(p) for p in parts)
+
+
+def _apply_lidar_rpy_offset(lidar_config, rpy_deg):
+    """Apply extra sensor_to_lidar rotation (degrees, xyz Euler) on top of config."""
+    ScipyRot = _require_scipy_rot()
+    out = dict(lidar_config)
+    R_extra = ScipyRot.from_euler("xyz", rpy_deg, degrees=True).as_matrix()
+    R_base = ScipyRot.from_quat(lidar_config["orientation"]).as_matrix()
+    out["orientation"] = ScipyRot.from_matrix(R_extra @ R_base).as_quat()
+    return out
+
+
+def _resolve_gt_lidars_cfg_path(gt_lidars_cfg, config_dir):
+    """Resolve explicit GT lidars cfg or auto-detect ``lidars_bk.cfg`` in config_dir."""
+    if gt_lidars_cfg:
+        path = os.path.abspath(gt_lidars_cfg)
+        if not os.path.isfile(path):
+            raise FileNotFoundError("gt_lidars_cfg not found: {}".format(path))
+        return path
+    if config_dir:
+        auto = os.path.join(config_dir, "lidars_bk.cfg")
+        if os.path.isfile(auto):
+            return auto
+    return None
+
+
+def _load_gt_T_from_lidars_cfg(gt_lidars_cfg_path, cam_cfg):
+    """Build T_lidar_to_cam ground truth from GT lidars cfg + camera cfg."""
+    gt_lidars = ConfigParser.parse_lidars_cfg(gt_lidars_cfg_path)
+    return compute_T_lidar_to_cam(cam_cfg, gt_lidars)
+
+
+def _compute_bias_compensation_metrics(T_init, T_cal, T_gt):
+    """
+    Quantify systematic-bias injection vs recovery relative to true GT extrinsic.
+
+    Returns dict used for shortcut / compensation reporting.
+    """
+    m_init_gt = T_to_calibration_metrics(T_gt, T_init)
+    m_cal_gt = T_to_calibration_metrics(T_gt, T_cal)
+    m_init_cal = T_to_calibration_metrics(T_init, T_cal)
+
+    injected = float(m_init_gt["rot_geodesic_deg"])
+    residual = float(m_cal_gt["rot_geodesic_deg"])
+    improvement = injected - residual
+    ratio = (improvement / injected * 100.0) if injected > 1e-6 else float("nan")
+    moved_toward_gt = improvement > 0.01
+
+    # Shortcut: tiny init->cal change while large injected bias, or poor recovery.
+    init_cal = float(m_init_cal["rot_geodesic_deg"])
+    if injected >= 0.5 and init_cal < 0.3 and ratio < 30.0:
+        shortcut_risk = "HIGH"
+        shortcut_note = (
+            "Model barely moved init ({:.3f} deg) despite {:.3f} deg injected bias — "
+            "likely init-locked / shortcut behaviour".format(init_cal, injected))
+    elif injected >= 0.5 and ratio < 30.0:
+        shortcut_risk = "HIGH"
+        shortcut_note = (
+            "Poor bias recovery: {:.1f}% compensated ({:.3f}/{:.3f} deg)".format(
+                ratio if ratio == ratio else 0.0, improvement, injected))
+    elif injected >= 0.5 and ratio < 60.0:
+        shortcut_risk = "MEDIUM"
+        shortcut_note = "Partial recovery ({:.1f}% of {:.3f} deg bias)".format(
+            ratio if ratio == ratio else 0.0, injected)
+    elif injected >= 0.5 and moved_toward_gt:
+        shortcut_risk = "LOW"
+        shortcut_note = "Good bias recovery ({:.1f}% of {:.3f} deg)".format(
+            ratio if ratio == ratio else 0.0, injected)
+    else:
+        shortcut_risk = "N/A"
+        shortcut_note = "Injected bias {:.3f} deg — increase --inject_lidar_rpy_deg for stress test".format(
+            injected)
+
+    return {
+        "injected_bias_deg": injected,
+        "residual_bias_deg": residual,
+        "compensation_deg": improvement,
+        "compensation_ratio_pct": ratio,
+        "init_cal_delta_deg": init_cal,
+        "moved_toward_gt": moved_toward_gt,
+        "shortcut_risk": shortcut_risk,
+        "shortcut_note": shortcut_note,
+        "init_vs_gt_roll_deg": m_init_gt["roll_delta_deg"],
+        "init_vs_gt_pitch_deg": m_init_gt["pitch_delta_deg"],
+        "init_vs_gt_yaw_deg": m_init_gt["yaw_delta_deg"],
+        "cal_vs_gt_roll_deg": m_cal_gt["roll_delta_deg"],
+        "cal_vs_gt_pitch_deg": m_cal_gt["pitch_delta_deg"],
+        "cal_vs_gt_yaw_deg": m_cal_gt["yaw_delta_deg"],
+    }
 
 
 def _check_install_angle_error_is_gt(cam_iae, lidar_iae, threshold=2.5):
@@ -1486,15 +1909,19 @@ def summarize_confidence(conf_dict):
     if not conf_dict:
         return "(no confidence — insufficient frames)"
     parts = []
+    def _nan_safe(v):
+        if v is None:
+            return float("nan")
+        return v
     parts.append(
         "roll_std={:.4f} deg  pitch_std={:.4f} deg  yaw_std={:.4f} deg".format(
-            conf_dict.get("roll_std", float("nan")),
-            conf_dict.get("pitch_std", float("nan")),
-            conf_dict.get("yaw_std", float("nan")),
+            _nan_safe(conf_dict.get("roll_std")),
+            _nan_safe(conf_dict.get("pitch_std")),
+            _nan_safe(conf_dict.get("yaw_std")),
         )
     )
     parts.append("total_std={:.4f} deg  n_frames={}".format(
-        conf_dict.get("total_std", float("nan")),
+        _nan_safe(conf_dict.get("total_std")),
         conf_dict.get("n_frames", -1),
     ))
     return "\n".join(parts)
@@ -1507,9 +1934,9 @@ def _compute_confidence_pct(r):
       - frame_factor: min(1.0, n_frames / 200) — saturates at 200 frames
       - stability_factor: max(0, 1 - total_std / 0.15) — 0.15 deg = zero confidence
     """
-    n = r.get("frames", 0)
-    std = r.get("total_std", float("nan"))
-    if std != std:
+    n = r.get("frames") or 0
+    std = r.get("total_std")
+    if std is None or not isinstance(std, (int, float)) or (isinstance(std, float) and std != std):
         std = 0.15
     frame_f = min(1.0, n / 200.0) if n > 0 else 0
     stab_f = max(0.0, 1.0 - std / 0.15)
@@ -1540,10 +1967,13 @@ def _detect_anomalous_trips(ok_rows):
     for r in ok_rows:
         e = _best_medw(r)
         if e:
-            medw_vals.append(e.get("rot", float("nan")))
-            roll_vals.append(abs(e.get("roll", 0)))
-            pitch_vals.append(abs(e.get("pitch", 0)))
-            yaw_vals.append(abs(e.get("yaw", 0)))
+            def _ev(k, default=0):
+                v = e.get(k)
+                return float(v) if v is not None else default
+            medw_vals.append(_ev("rot", float("nan")))
+            roll_vals.append(abs(_ev("roll", 0)))
+            pitch_vals.append(abs(_ev("pitch", 0)))
+            yaw_vals.append(abs(_ev("yaw", 0)))
 
     if len(medw_vals) < 2:
         return []
@@ -1590,8 +2020,10 @@ def _detect_anomalous_trips(ok_rows):
 
         detail_parts = []
         detail_parts.append("- **Anomaly**: " + "; ".join(diags))
+        _ts_val = r.get("total_std")
+        _ts_display = float(_ts_val) if _ts_val is not None else 0.0
         detail_parts.append("- **Confidence**: {:.0f}% (total_std={:.4f} deg)".format(
-            conf_pct, r.get("total_std", 0)))
+            conf_pct, _ts_display))
         detail_parts.append("- **Original IAE magnitude**: {:.4f} deg (roll={:.3f}, pitch={:.3f}, yaw={:.3f})".format(
             iae_total, orig_iae.get("roll", 0), orig_iae.get("pitch", 0), orig_iae.get("yaw", 0)))
 
@@ -1628,7 +2060,9 @@ def build_markdown_summary(rows, global_stats):
     lines.append("| Orig IAE Roll/Pitch/Yaw | Install Angle Error of the **original trip** extrinsic vs factory standard |")
     lines.append("| Cal IAE Roll/Pitch/Yaw | Install Angle Error of the **calibrated** extrinsic vs factory standard |")
     lines.append("| total_std (deg) | L2 norm of per-axis RPY prediction std across inferred frames. Lower = more consistent |")
-    lines.append("| MEDW (e.g. MEDW50) | Mean Error over Decaying Window of size N: average rotation error in the best N-frame sliding window vs GT extrinsic |")
+    lines.append("| MEDW (e.g. MEDW50) | Mean Error over Decaying Window vs reference extrinsic (true GT with --gt_lidars_cfg) |")
+    lines.append("| Injected / Residual / Compensation | Systematic bias vs true GT before/after calibration; ratio = recovery % |")
+    lines.append("| Shortcut | HIGH = model stays near init despite large injected bias (init-locked shortcut) |")
     lines.append("| Cross-Vehicle Consistency | Groups trips by vehicle platform, computes MEDW mean/std per group, then overall CV (coefficient of variation). CV < 10% = strong generalization |")
     lines.append("| IAE Improvement | Compares total IAE magnitude (L2 of RPY) before and after calibration. IMPROVED = closer to factory; SHIFTED = farther |")
     lines.append("")
@@ -1638,12 +2072,15 @@ def build_markdown_summary(rows, global_stats):
     def _fmt_iae_compact(iae_dict):
         if not iae_dict:
             return "-"
-        return "{:.3f}/{:.3f}/{:.3f}".format(
-            iae_dict.get("roll", 0), iae_dict.get("pitch", 0), iae_dict.get("yaw", 0))
+        def _v(k):
+            val = iae_dict.get(k, 0)
+            return float(val) if val is not None else 0.0
+        return "{:.3f}/{:.3f}/{:.3f}".format(_v("roll"), _v("pitch"), _v("yaw"))
 
     header_cols = [
         "Trip", "Status", "Frames", "Conf%",
-        "Calib Δ (deg)", "Roll Δ", "Pitch Δ", "Yaw Δ",
+        "Calib Δ (deg)", "Injected", "Residual", "Recover%",
+        "Shortcut", "Roll Δ", "Pitch Δ", "Yaw Δ",
         "Orig IAE (R/P/Y)", "Cal IAE (R/P/Y)",
         "total_std", "Time (s)",
     ]
@@ -1663,12 +2100,20 @@ def build_markdown_summary(rows, global_stats):
             except (ValueError, TypeError):
                 return str(val)
 
+        bc = r.get("bias_compensation") or {}
+        rec = bc.get("compensation_ratio_pct", r.get("compensation_ratio_pct"))
+        rec_s = "{:.0f}%".format(rec) if rec is not None and rec == rec else "-"
+
         cols = [
             r.get("trip", ""),
             status_str,
             str(r.get("frames", "")),
             "{:.0f}%".format(conf_pct),
             _safe_fmt(r.get("rot_delta")),
+            _safe_fmt(r.get("injected_bias_deg", bc.get("injected_bias_deg"))),
+            _safe_fmt(r.get("residual_bias_deg", bc.get("residual_bias_deg"))),
+            rec_s,
+            str(r.get("shortcut_risk", bc.get("shortcut_risk", "-"))),
             _safe_fmt(r.get("roll_delta")),
             _safe_fmt(r.get("pitch_delta")),
             _safe_fmt(r.get("yaw_delta")),
@@ -1687,10 +2132,14 @@ def build_markdown_summary(rows, global_stats):
         def _fmt_medw_cell(e):
             if not e:
                 return "-"
-            rot = e.get("rot", float("nan"))
-            r_ = e.get("roll", 0)
-            p_ = e.get("pitch", 0)
-            y_ = e.get("yaw", 0)
+            def _nv(v):
+                if v is None:
+                    return float("nan")
+                return float(v)
+            rot = _nv(e.get("rot"))
+            r_ = _nv(e.get("roll"))
+            p_ = _nv(e.get("pitch"))
+            y_ = _nv(e.get("yaw"))
             if rot != rot:
                 return "-"
             return "{:.4f} (R{:.4f} P{:.4f} Y{:.4f})".format(rot, r_, p_, y_)
@@ -1735,10 +2184,13 @@ def build_markdown_summary(rows, global_stats):
                 raw_mwe = r.get("multi_window_errors", {})
                 mwe = {int(k): v for k, v in raw_mwe.items()} if raw_mwe else {}
                 for ws in (50, 100, 200):
-                    if ws in mwe:
-                        medws.append(mwe[ws].get("rot", float("nan")))
+                    if ws in mwe and mwe[ws]:
+                        _rv = mwe[ws].get("rot")
+                        medws.append(float(_rv) if _rv is not None else float("nan"))
                         break
-                rd = r.get("rot_delta", float("nan"))
+                rd = r.get("rot_delta")
+                if rd is None:
+                    rd = float("nan")
                 if rd == rd:
                     rots.append(rd)
 
@@ -1815,9 +2267,9 @@ def build_markdown_summary(rows, global_stats):
                          "but the calibration itself (MEDW) is still accurate. The factory standard may not be the true optimum.")
         if _no_model_trips:
             lines.append("")
-            lines.append("> Warning: {} trip(s) missing model/ directory: {}. "
+            lines.append("> Warning: {} trip(s) missing complete model/ directory (need lidars.cfg + cameras.cfg): {}. "
                          "IAE values were computed using fallback from original config install_angle_error, "
-                         "making Orig IAE and Cal IAE identical. Ensure model/ is downloaded from remote for accurate IAE comparison.".format(
+                         "making Orig IAE and Cal IAE less reliable. Ensure model/ is downloaded from remote for accurate IAE comparison.".format(
                              len(_no_model_trips), ", ".join(_no_model_trips)))
         lines.append("")
 
@@ -1873,13 +2325,16 @@ def generate_summary_rpy_charts(results, output_dir):
 
     trip_names = [r.get("trip", "?") for r in ok_results]
     short_names = [n[:20] if len(n) > 20 else n for n in trip_names]
-    rolls = [r.get("roll_delta", 0.0) for r in ok_results]
-    pitches = [r.get("pitch_delta", 0.0) for r in ok_results]
-    yaws = [r.get("yaw_delta", 0.0) for r in ok_results]
-    totals = [r.get("rot_delta", 0.0) for r in ok_results]
-    roll_stds = [r.get("roll_std", 0.0) for r in ok_results]
-    pitch_stds = [r.get("pitch_std", 0.0) for r in ok_results]
-    yaw_stds = [r.get("yaw_std", 0.0) for r in ok_results]
+    def _f(v):
+        return v if isinstance(v, (int, float)) else 0.0
+
+    rolls = [_f(r.get("roll_delta")) for r in ok_results]
+    pitches = [_f(r.get("pitch_delta")) for r in ok_results]
+    yaws = [_f(r.get("yaw_delta")) for r in ok_results]
+    totals = [_f(r.get("rot_delta")) for r in ok_results]
+    roll_stds = [_f(r.get("roll_std")) for r in ok_results]
+    pitch_stds = [_f(r.get("pitch_std")) for r in ok_results]
+    yaw_stds = [_f(r.get("yaw_std")) for r in ok_results]
 
     charts = []
 
@@ -2388,6 +2843,7 @@ def _streaming_calibrate_loop(
     min_speed_kmh, max_speed_kmh, min_accel, max_accel, min_brightness,
     cv2, torch,
     filter_air_suspension=False,
+    infer_cap_multiplier=1.25,
 ):
     """Async-pipelined streaming calibration: download | extract | infer run concurrently.
 
@@ -2429,7 +2885,7 @@ def _streaming_calibrate_loop(
     t_infer_total = 0.0
     round_num = 0
     max_rounds = 50
-    max_infer_cap = max_frames * 3
+    max_infer_cap = max(max_frames + 1, int(max_frames * infer_cap_multiplier))
 
     _extract_lock = threading.Lock()
     _extract_done_event = threading.Event()
@@ -2437,6 +2893,8 @@ def _streaming_calibrate_loop(
     _bg_extract_running = [False]
 
     def _snapshot_new_bags():
+        if isinstance(downloader, LocalBagGate):
+            return downloader.snapshot_new_bags(staging, seen_bags)
         bags_dir = os.path.join(trip_dir, "bags")
         newly = []
         if os.path.isdir(bags_dir):
@@ -2523,20 +2981,26 @@ def _streaming_calibrate_loop(
         return "ok", (im_r, pc_f[:, :3].astype(np.float32), Ks, img_path, pc_path,
                        local_sx, local_sy)
 
-    print("[stream] Waiting for initial Heavy+Medium bags to arrive...")
-    t_wait = time.time()
-    while not _has_heavy_and_medium():
-        elapsed = time.time() - t_wait
-        if elapsed > 90:
-            print("[stream] WARNING: timeout waiting for Heavy+Medium bags ({:.0f}s)".format(elapsed))
-            break
-        if downloader._stop.is_set():
-            break
+    if isinstance(downloader, LocalBagGate):
         _snapshot_new_bags()
-        time.sleep(0.5)
-    _snapshot_new_bags()
-    n_initial = len([f for f in os.listdir(staging) if f.endswith(".bag")]) if os.path.isdir(staging) else 0
-    print("[stream] Initial bags ready: {} in staging".format(n_initial))
+        n_initial = len([f for f in os.listdir(staging) if f.endswith(".bag")]) if os.path.isdir(staging) else 0
+        print("[stream] Local incremental gate: {} bags in first batch ({} slots total)".format(
+            n_initial, len(downloader._slots)))
+    else:
+        print("[stream] Waiting for initial Heavy+Medium bags to arrive...")
+        t_wait = time.time()
+        while not _has_heavy_and_medium():
+            elapsed = time.time() - t_wait
+            if elapsed > 90:
+                print("[stream] WARNING: timeout waiting for Heavy+Medium bags ({:.0f}s)".format(elapsed))
+                break
+            if downloader._stop.is_set():
+                break
+            _snapshot_new_bags()
+            time.sleep(0.5)
+        _snapshot_new_bags()
+        n_initial = len([f for f in os.listdir(staging) if f.endswith(".bag")]) if os.path.isdir(staging) else 0
+        print("[stream] Initial bags ready: {} in staging".format(n_initial))
 
     if downloader.has_unqueued_slots:
         downloader.request_more_bags(3)
@@ -2564,7 +3028,8 @@ def _streaming_calibrate_loop(
             continue
 
         t_ext_start = time.time()
-        remaining_cap = max(100, int(max_frames * extract_buffer_multiplier) - len(processed_stems))
+        buf = min(float(extract_buffer_multiplier), 1.3)
+        remaining_cap = max(30, int(max_frames * buf) - len(processed_stems))
 
         _extract_done_event.clear()
         _extract_error[0] = None
@@ -2692,7 +3157,7 @@ def _streaming_calibrate_loop(
                 )
                 if batch is not None:
                     imgs_t, pcs_t, init_T_t, post_T_t, K_t = batch
-                    if device.startswith("cuda"):
+                    if device.startswith("cuda") and not getattr(wrapper, "disable_amp", False):
                         with torch.cuda.amp.autocast():
                             preds_t = wrapper(imgs_t, pcs_t, init_T_t, post_T_t, K_t)
                     else:
@@ -2818,6 +3283,12 @@ def calibrate_trip(
     filter_air_suspension=False,
     input_format=None,
     initial_bag_groups=3,
+    gt_lidars_cfg=None,
+    inject_lidar_rpy_deg=None,
+    incremental_extract=True,
+    infer_cap_multiplier=1.25,
+    multi_init_sweep_deg=0.0,
+    multi_init_grid=False,
 ):
     """
     Streaming calibration pipeline for one trip.
@@ -2884,9 +3355,31 @@ def calibrate_trip(
                     camera_name, list(cameras.keys())))
 
             cam_cfg = cameras[camera_name]
-            T_init = compute_T_lidar_to_cam(cam_cfg, lidars)
 
-            extract_cap = int(max(1, max_frames * extract_buffer_multiplier))
+            gt_lidars_path = _resolve_gt_lidars_cfg_path(gt_lidars_cfg, config_dir)
+            T_gt_ref = None
+            if gt_lidars_path:
+                T_gt_ref = _load_gt_T_from_lidars_cfg(gt_lidars_path, cam_cfg)
+                print("[info] True GT from {} (geodesic ref for MEDW / shortcut)".format(
+                    gt_lidars_path))
+
+            if inject_lidar_rpy_deg:
+                rpy_off = (_parse_rpy_triplet(inject_lidar_rpy_deg)
+                           if isinstance(inject_lidar_rpy_deg, str)
+                           else tuple(inject_lidar_rpy_deg))
+                lidars = _apply_lidar_rpy_offset(lidars, rpy_off)
+                print("[info] Applied inject_lidar_rpy_deg=({:+.3f}, {:+.3f}, {:+.3f}) on sensor_to_lidar".format(
+                    *rpy_off))
+
+            T_init = compute_T_lidar_to_cam(cam_cfg, lidars)
+            if T_gt_ref is not None:
+                inj = T_to_calibration_metrics(T_gt_ref, T_init)
+                print("[info] Injected bias vs true GT: {:.4f} deg "
+                      "(R{:+.3f} P{:+.3f} Y{:+.3f})".format(
+                          inj["rot_geodesic_deg"],
+                          inj["roll_delta_deg"], inj["pitch_delta_deg"], inj["yaw_delta_deg"]))
+
+            extract_cap = int(max(1, max_frames * min(extract_buffer_multiplier, 1.3)))
 
             if trip_name not in _ACTIVE_DOWNLOADERS and input_format == "remote" and trip_dir:
                 bag_staging = os.path.join(trip_dir, "bags", "important")
@@ -2902,6 +3395,11 @@ def calibrate_trip(
                     _ACTIVE_DOWNLOADERS[trip_name] = dl
                     print("[info] Subprocess created streaming downloader for {}".format(trip_name))
 
+            if (trip_name not in _ACTIVE_DOWNLOADERS and trip_dir
+                    and incremental_extract and input_format in ("trips", "remote")):
+                register_local_incremental_gate(
+                    trip_name, trip_dir, initial_bag_groups=initial_bag_groups)
+
             _is_streaming = trip_name in _ACTIVE_DOWNLOADERS
 
             xbound, ybound, zbound = _lazy_bev_bounds()
@@ -2909,10 +3407,6 @@ def calibrate_trip(
 
             wrapper, epoch = load_bevcalib_inference(ckpt_path, device=device, img_shape=(Hm, Wm))
             print("[info] Loaded checkpoint epoch={} device={}".format(epoch, device))
-
-            aggregator = TemporalCalibrationAggregator(
-                min_frames=min_agg_frames, max_frames=max_frames, method="axis_angle_median",
-            )
 
             min_speed_ms = min_speed_kmh / 3.6
             max_speed_ms = max_speed_kmh / 3.6
@@ -2922,7 +3416,7 @@ def calibrate_trip(
 
             inferred_predictions = []
             inferred_frame_meta = []
-            max_infer_cap = max_frames * 3
+            max_infer_cap = max(max_frames + 1, int(max_frames * infer_cap_multiplier))
             infer_device = torch.device(device)
             K_full = None
 
@@ -2944,6 +3438,7 @@ def calibrate_trip(
                         min_speed_kmh, max_speed_kmh, min_accel, max_accel, min_brightness,
                         cv2, torch,
                         filter_air_suspension=filter_air_suspension,
+                        infer_cap_multiplier=infer_cap_multiplier,
                     )
                 n_inferred = len(inferred_predictions)
                 print("[info] Data extraction took {:.1f}s".format(t_extract_sec))
@@ -3085,7 +3580,7 @@ def calibrate_trip(
                         )
                         if batch is not None:
                             imgs_t, pcs_t, init_T_t, post_T_t, K_t = batch
-                            if device.startswith("cuda"):
+                            if device.startswith("cuda") and not getattr(wrapper, "disable_amp", False):
                                 with torch.cuda.amp.autocast():
                                     preds_t = wrapper(imgs_t, pcs_t, init_T_t, post_T_t, K_t)
                             else:
@@ -3169,31 +3664,52 @@ def calibrate_trip(
             if n_inferred == 0:
                 raise RuntimeError("No frames accepted after quality filtering.")
 
-            accepted_frame_meta = []
+            sel_indices = None
             if n_inferred > max_frames:
                 sel_indices = sorted(set(
                     int(round(i)) for i in np.linspace(0, n_inferred - 1, num=max_frames)
                 ))
                 print("[info] Uniform sampling: {} inferred -> {} for aggregation".format(
                     n_inferred, len(sel_indices)))
-                for idx in sel_indices:
-                    aggregator.add(inferred_predictions[idx])
-                    accepted_frame_meta.append(inferred_frame_meta[idx])
+                sampled_preds = [inferred_predictions[idx] for idx in sel_indices]
+                accepted_frame_meta = [inferred_frame_meta[idx] for idx in sel_indices]
             else:
                 print("[info] Using all {} inferred frames for aggregation".format(n_inferred))
-                for i in range(n_inferred):
-                    aggregator.add(inferred_predictions[i])
-                    accepted_frame_meta.append(inferred_frame_meta[i])
+                sampled_preds = list(inferred_predictions)
+                accepted_frame_meta = list(inferred_frame_meta)
 
-            n_accepted = aggregator.count
-            insufficient_frames = n_accepted < min_agg_frames
-            if insufficient_frames:
-                print("[warn] Only {} frames for aggregation (minimum recommended: {}). "
-                      "Confidence will be lower.".format(n_accepted, min_agg_frames))
+            multi_init_rows = None
+            T_init_used = T_init
+            if multi_init_sweep_deg and float(multi_init_sweep_deg) > 0:
+                print("[info] Multi-init scan: sweep={}° grid={}".format(
+                    multi_init_sweep_deg, multi_init_grid))
+                calibrated_T, T_init_used, conf, multi_init_rows = _multi_init_select_best(
+                    T_init, accepted_frame_meta, sampled_preds,
+                    float(multi_init_sweep_deg), bool(multi_init_grid),
+                    wrapper, device, batch_size, img_shape,
+                    max_frames, min_agg_frames, T_gt_ref,
+                    cv2, torch, xbound, ybound, zbound,
+                )
+                n_accepted = min(len(sampled_preds), max_frames)
+                insufficient_frames = n_accepted < min_agg_frames
+                if insufficient_frames:
+                    print("[warn] Only {} frames for aggregation (minimum recommended: {}). "
+                          "Confidence will be lower.".format(n_accepted, min_agg_frames))
+            else:
+                aggregator = TemporalCalibrationAggregator(
+                    min_frames=min_agg_frames, max_frames=max_frames, method="axis_angle_median",
+                )
+                for p in sampled_preds:
+                    aggregator.add(p)
+                n_accepted = aggregator.count
+                insufficient_frames = n_accepted < min_agg_frames
+                if insufficient_frames:
+                    print("[warn] Only {} frames for aggregation (minimum recommended: {}). "
+                          "Confidence will be lower.".format(n_accepted, min_agg_frames))
+                calibrated_T = aggregator.aggregate()
+                conf = aggregator.get_confidence()
 
-            calibrated_T = aggregator.aggregate()
-            conf = aggregator.get_confidence()
-            metrics = T_to_calibration_metrics(T_init, calibrated_T)
+            metrics = T_to_calibration_metrics(T_init_used, calibrated_T)
 
             save_matrix_txt(os.path.join(trip_out, "calibrated_extrinsic.txt"), calibrated_T)
             save_matrix_txt(os.path.join(trip_out, "original_extrinsic.txt"), T_init)
@@ -3213,6 +3729,15 @@ def calibrate_trip(
             proj_max_w = 1280
             proj_files_for_report = []
             proj_meta_for_report = []
+
+            proj_banner_extra = "Init->Cal={:.3f} deg".format(metrics["rot_geodesic_deg"])
+            if T_gt_ref is not None:
+                bm = _compute_bias_compensation_metrics(T_init, calibrated_T, T_gt_ref)
+                proj_banner_extra = (
+                    "Init->Cal={:.3f} | Init->GT={:.3f} Cal->GT={:.3f} | recover {:.0f}%".format(
+                        bm["init_cal_delta_deg"], bm["injected_bias_deg"],
+                        bm["residual_bias_deg"],
+                        bm["compensation_ratio_pct"] if bm["compensation_ratio_pct"] == bm["compensation_ratio_pct"] else 0.0))
 
             def _gen_one_projection(pidx):
                 meta = accepted_frame_meta[pidx]
@@ -3236,6 +3761,7 @@ def calibrate_trip(
                             T_init, calibrated_T, meta["K"],
                             project_fn, render_fn, err_fn,
                             frame_label=frame_label,
+                            banner_extra=proj_banner_extra,
                         )
                     else:
                         mosaic = _fallback_projection(
@@ -3279,18 +3805,43 @@ def calibrate_trip(
             print("[info] Generated {} projection images (ratio={}, workers={})".format(
                 proj_count, projection_ratio, proj_workers))
 
-            gt_T = _try_load_gt_extrinsic(trip_dir, trip_out)
+            gt_T = T_gt_ref if T_gt_ref is not None else _try_load_gt_extrinsic(trip_dir, trip_out)
             gt_metrics = None
+            bias_metrics = None
             if gt_T is not None:
                 gt_metrics = T_to_calibration_metrics(gt_T, calibrated_T)
-                print("[info] GT comparison: rot_err={:.4f} deg".format(
-                    gt_metrics["rot_geodesic_deg"]))
+                bias_metrics = _compute_bias_compensation_metrics(T_init, calibrated_T, gt_T)
+                save_matrix_txt(os.path.join(trip_out, "gt_extrinsic.txt"), gt_T)
+                print("[info] GT comparison (cal vs true GT): rot_err={:.4f} deg, "
+                      "compensation={:.4f} deg ({:.1f}%) shortcut={}".format(
+                          gt_metrics["rot_geodesic_deg"],
+                          bias_metrics["compensation_deg"],
+                          bias_metrics["compensation_ratio_pct"]
+                          if bias_metrics["compensation_ratio_pct"] == bias_metrics["compensation_ratio_pct"]
+                          else 0.0,
+                          bias_metrics["shortcut_risk"]))
+                print("[info] Shortcut: {}".format(bias_metrics["shortcut_note"]))
 
             cam_iae = cam_cfg.get("install_angle_error")
             lidar_iae = lidars.get("install_angle_error")
             is_gt, gt_reason = _check_install_angle_error_is_gt(cam_iae, lidar_iae)
             multi_window_errors = {}
-            if is_gt:
+            multi_window_errors_init = {}
+            medw_ref = None
+            if T_gt_ref is not None:
+                medw_ref = T_gt_ref
+                print("[info] MEDW reference: true GT ({})".format(gt_lidars_path))
+                multi_window_errors = _compute_multi_window_errors(
+                    inferred_predictions, T_gt_ref, window_sizes=(50, 100, 200, 400))
+                multi_window_errors_init = _compute_multi_window_errors(
+                    inferred_predictions, T_init, window_sizes=(50, 100, 200, 400))
+                for ws, errs in sorted(multi_window_errors.items()):
+                    e_init = multi_window_errors_init.get(ws, {})
+                    print("[info] MEDW{} vs GT: rot={:.4f} | vs Init (shortcut): rot={:.4f}".format(
+                        ws, errs["rot"], e_init.get("rot", float("nan"))))
+                result["gt_source"] = "gt_lidars_cfg"
+            elif is_gt:
+                medw_ref = T_init
                 print("[info] GT condition satisfied: {}".format(gt_reason))
                 multi_window_errors = _compute_multi_window_errors(
                     inferred_predictions, T_init, window_sizes=(50, 100, 200, 400))
@@ -3324,8 +3875,12 @@ def calibrate_trip(
             iae_cfg_path = os.path.join(trip_out, "configs", "lidars_calibrated.cfg")
             result["iae"] = _read_iae_from_cfg(iae_cfg_path)
             result["orig_iae"] = _read_iae_from_cfg(lidars_cfg)
-            model_dir_check = os.path.join(trip_dir, "model", "lidars.cfg") if trip_dir else None
-            result["has_model"] = bool(model_dir_check and os.path.isfile(model_dir_check))
+            model_dir_check = os.path.join(trip_dir, "model") if trip_dir else None
+            result["has_model"] = bool(
+                model_dir_check
+                and os.path.isfile(os.path.join(model_dir_check, "lidars.cfg"))
+                and os.path.isfile(os.path.join(model_dir_check, "cameras.cfg"))
+            )
 
             report_path = os.path.join(trip_out, "calibration_report.md")
             _write_trip_report_md(
@@ -3334,6 +3889,9 @@ def calibrate_trip(
                 gt_metrics, proj_files_for_report, proj_meta_for_report,
                 is_gt=is_gt, gt_reason=gt_reason,
                 multi_window_errors=multi_window_errors,
+                multi_window_errors_init=multi_window_errors_init,
+                bias_metrics=bias_metrics,
+                gt_lidars_path=gt_lidars_path,
                 cam_iae=cam_iae, lidar_iae=lidar_iae,
                 insufficient_frames=insufficient_frames,
                 min_agg_frames=min_agg_frames,
@@ -3354,15 +3912,29 @@ def calibrate_trip(
             result["qf_skip_dark"] = qf_stats["skip_dark"]
             result["qf_skip_air_susp"] = qf_stats.get("skip_air_susp", 0)
             if conf:
-                result["roll_std"] = conf.get("roll_std", float("nan"))
-                result["pitch_std"] = conf.get("pitch_std", float("nan"))
-                result["yaw_std"] = conf.get("yaw_std", float("nan"))
-                result["total_std"] = conf.get("total_std", float("nan"))
+                def _std_safe(v):
+                    if v is None:
+                        return float("nan")
+                    return float(v)
+                result["roll_std"] = _std_safe(conf.get("roll_std"))
+                result["pitch_std"] = _std_safe(conf.get("pitch_std"))
+                result["yaw_std"] = _std_safe(conf.get("yaw_std"))
+                result["total_std"] = _std_safe(conf.get("total_std"))
             result["is_gt"] = is_gt
             result["gt_reason"] = gt_reason
             result["insufficient_frames"] = insufficient_frames
             if multi_window_errors:
                 result["multi_window_errors"] = multi_window_errors
+            if multi_window_errors_init:
+                result["multi_window_errors_init"] = multi_window_errors_init
+            if gt_metrics:
+                result["gt_rot_error"] = gt_metrics["rot_geodesic_deg"]
+            if bias_metrics:
+                result["bias_compensation"] = bias_metrics
+                result["injected_bias_deg"] = bias_metrics["injected_bias_deg"]
+                result["residual_bias_deg"] = bias_metrics["residual_bias_deg"]
+                result["compensation_ratio_pct"] = bias_metrics["compensation_ratio_pct"]
+                result["shortcut_risk"] = bias_metrics["shortcut_risk"]
 
     except Exception as exc:
         result["status"] = "failed"
@@ -3620,6 +4192,8 @@ def _write_trip_report_md(
     T_init, calibrated_T, metrics, qf_stats, conf,
     gt_metrics, proj_files, proj_meta=None,
     is_gt=False, gt_reason="", multi_window_errors=None,
+    multi_window_errors_init=None,
+    bias_metrics=None, gt_lidars_path=None,
     cam_iae=None, lidar_iae=None,
     insufficient_frames=False, min_agg_frames=50,
 ):
@@ -3648,8 +4222,11 @@ def _write_trip_report_md(
     lines.append("| Calib Delta / Rot Delta (deg) | Geodesic rotation angle between original and calibrated extrinsic (how much the calibration adjusted) |")
     lines.append("| Roll/Pitch/Yaw Delta (deg) | Per-axis rotation difference between original and calibrated extrinsic |")
     lines.append("| IAE (Install Angle Error) | RPY angular difference between an extrinsic and the factory standard (model/ dir). Orig IAE = original trip extrinsic vs factory; Cal IAE = calibrated extrinsic vs factory |")
-    lines.append("| MEDW (Mean Error over Decaying Windows) | Calibration accuracy metric: mean rotation error computed over sliding windows of different sizes (e.g., MEDW50=best-50-frames window). Uses GT extrinsic as reference |")
-    lines.append("| GT Status | Whether GT extrinsic comparison is valid: YES if both camera and LiDAR install_angle_error are within +/-2.5 deg |")
+    lines.append("| MEDW (Mean Error over Decaying Windows) | Aggregation error vs reference extrinsic (true GT when --gt_lidars_cfg set, else init config) |")
+    lines.append("| Injected bias | Geodesic rotation between init T_lidar_to_cam and true GT (systematic offset under test) |")
+    lines.append("| Compensation ratio | `(injected - residual) / injected` — fraction of injected bias recovered toward true GT |")
+    lines.append("| Shortcut risk | HIGH if model stays near init despite large injected bias, or recovery < 30% |")
+    lines.append("| GT Status | Whether install_angle_error fields are within +/-2.5 deg (legacy MEDW gate when no gt_lidars_cfg) |")
     lines.append("")
 
     lines.append("## Overview")
@@ -3737,12 +4314,18 @@ def _write_trip_report_md(
     if conf:
         lines.append("| Metric | Value |")
         lines.append("| --- | --- |")
-        lines.append("| roll_std | {:.4f} deg |".format(conf.get("roll_std", float("nan"))))
-        lines.append("| pitch_std | {:.4f} deg |".format(conf.get("pitch_std", float("nan"))))
-        lines.append("| yaw_std | {:.4f} deg |".format(conf.get("yaw_std", float("nan"))))
-        lines.append("| total_std | {:.4f} deg |".format(conf.get("total_std", float("nan"))))
+        def _safe_std(v):
+            if v is None or (isinstance(v, float) and v != v):
+                return float("nan")
+            return float(v)
+        lines.append("| roll_std | {:.4f} deg |".format(_safe_std(conf.get("roll_std"))))
+        lines.append("| pitch_std | {:.4f} deg |".format(_safe_std(conf.get("pitch_std"))))
+        lines.append("| yaw_std | {:.4f} deg |".format(_safe_std(conf.get("yaw_std"))))
+        lines.append("| total_std | {:.4f} deg |".format(_safe_std(conf.get("total_std"))))
         lines.append("| n_frames | {} |".format(conf.get("n_frames", n_frames)))
-        ts = conf.get("total_std", 999.0)
+        ts = _safe_std(conf.get("total_std"))
+        if ts != ts:
+            ts = 999.0
         frame_f = min(1.0, n_frames / 200.0) if n_frames > 0 else 0
         stab_f = max(0.0, 1.0 - ts / 0.15)
         conf_pct = round(frame_f * stab_f * 100, 1)
@@ -3783,8 +4366,48 @@ def _write_trip_report_md(
     lines.append("- **GT Status**: {} ({})".format("YES" if is_gt else "NO", gt_reason))
     lines.append("")
 
-    if is_gt and multi_window_errors:
-        lines.append("## Calibration Accuracy (vs GT initial extrinsic)")
+    if bias_metrics:
+        lines.append("## Systematic Bias & Shortcut Analysis")
+        lines.append("")
+        if gt_lidars_path:
+            lines.append("True GT source: `{}`".format(gt_lidars_path))
+            lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("| --- | --- |")
+        lines.append("| Injected bias (Init vs true GT) | {:.4f} deg |".format(
+            bias_metrics["injected_bias_deg"]))
+        lines.append("| Residual bias (Cal vs true GT) | {:.4f} deg |".format(
+            bias_metrics["residual_bias_deg"]))
+        lines.append("| Compensation (improvement) | {:.4f} deg |".format(
+            bias_metrics["compensation_deg"]))
+        cr = bias_metrics["compensation_ratio_pct"]
+        lines.append("| Compensation ratio | {} |".format(
+            "{:.1f}%".format(cr) if cr == cr else "N/A"))
+        lines.append("| Init→Cal adjustment | {:.4f} deg |".format(
+            bias_metrics["init_cal_delta_deg"]))
+        lines.append("| Moved toward true GT | {} |".format(
+            "YES" if bias_metrics["moved_toward_gt"] else "NO"))
+        lines.append("| **Shortcut risk** | **{}** |".format(bias_metrics["shortcut_risk"]))
+        lines.append("")
+        lines.append("> {}".format(bias_metrics["shortcut_note"]))
+        lines.append("")
+        lines.append("Per-axis vs true GT (deg):")
+        lines.append("")
+        lines.append("| Stage | Roll | Pitch | Yaw |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        lines.append("| Init vs GT | {:+.4f} | {:+.4f} | {:+.4f} |".format(
+            bias_metrics["init_vs_gt_roll_deg"],
+            bias_metrics["init_vs_gt_pitch_deg"],
+            bias_metrics["init_vs_gt_yaw_deg"]))
+        lines.append("| Cal vs GT | {:+.4f} | {:+.4f} | {:+.4f} |".format(
+            bias_metrics["cal_vs_gt_roll_deg"],
+            bias_metrics["cal_vs_gt_pitch_deg"],
+            bias_metrics["cal_vs_gt_yaw_deg"]))
+        lines.append("")
+
+    if multi_window_errors:
+        ref_label = "true GT" if gt_lidars_path else "init extrinsic"
+        lines.append("## Calibration Accuracy (MEDW vs {})".format(ref_label))
         lines.append("")
         lines.append("| Window | Total Rot (deg) | Roll (deg) | Pitch (deg) | Yaw (deg) |")
         lines.append("| --- | ---: | ---: | ---: | ---: |")
@@ -3793,11 +4416,23 @@ def _write_trip_report_md(
             lines.append("| MEDW{} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |".format(
                 ws, e["rot"], e["roll"], e["pitch"], e["yaw"]))
         lines.append("")
+        if multi_window_errors_init:
+            lines.append("### MEDW vs Init (shortcut indicator — should be higher if model tracks init)")
+            lines.append("")
+            lines.append("| Window | Total Rot (deg) | Roll | Pitch | Yaw |")
+            lines.append("| --- | ---: | ---: | ---: | ---: |")
+            for ws in sorted(multi_window_errors_init.keys()):
+                e = multi_window_errors_init[ws]
+                lines.append("| MEDW{} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |".format(
+                    ws, e["rot"], e["roll"], e["pitch"], e["yaw"]))
+            lines.append("")
 
     lines.append("## Output Files")
     lines.append("")
     lines.append("- [calibrated_extrinsic.txt](calibrated_extrinsic.txt)")
     lines.append("- [original_extrinsic.txt](original_extrinsic.txt)")
+    if gt_lidars_path:
+        lines.append("- [gt_extrinsic.txt](gt_extrinsic.txt)")
     lines.append("- [calibration.log](calibration.log)")
     lines.append("- [projections/](projections/) ({} images)".format(len(proj_files)))
     lines.append("")
@@ -4038,6 +4673,20 @@ def build_arg_parser():
         default=None,
         help="Explicit directory with cameras.cfg + lidars.cfg (required for bag_list mode).",
     )
+    p.add_argument(
+        "--gt_lidars_cfg",
+        type=str,
+        default=None,
+        help="Path to true-GT lidars.cfg for bias/shortcut metrics and MEDW reference. "
+             "If omitted, auto-detects lidars_bk.cfg in config_dir when present.",
+    )
+    p.add_argument(
+        "--inject_lidar_rpy_deg",
+        type=str,
+        default=None,
+        help="Extra sensor_to_lidar rotation injected on top of configs/lidars.cfg before "
+             "inference, format 'roll,pitch,yaw' in degrees (e.g. '-0.7,0.35,0' or '2,0,0' for stress test).",
+    )
     p.add_argument("--ckpt_path", type=str, default=None)
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--max_frames", type=int, default=400, help="Aggregator max frames window.")
@@ -4083,7 +4732,32 @@ def build_arg_parser():
         type=float,
         default=1.5,
         help="Extractor pulls up to max_frames * multiplier raw frames before sampling. "
-             "Float allowed for fine-tuning (e.g. 1.5).",
+             "Capped at 1.3x in streaming mode. Default 1.5.",
+    )
+    p.add_argument(
+        "--infer_cap_multiplier",
+        type=float,
+        default=1.25,
+        help="Stop inferring after max_frames * this multiplier (streaming). Default 1.25 (~250 for MEDW200).",
+    )
+    p.add_argument(
+        "--multi_init_sweep_deg",
+        type=float,
+        default=0.0,
+        help="Multi-init workaround: sweep ±deg on each RPY axis (0=off). "
+             "Re-infers with perturbed T_init and picks best vs GT or confidence.",
+    )
+    p.add_argument(
+        "--multi_init_grid",
+        action="store_true",
+        default=False,
+        help="Use coarse RPY grid instead of axis-only sweep (slower, 124 candidates).",
+    )
+    p.add_argument(
+        "--incremental_extract",
+        type=lambda s: str(s).lower() in ("1", "true", "yes", "on"),
+        default=True,
+        help="Release local bags time-slot-by-time-slot (default true). Set false to stage all bags at once.",
     )
     p.add_argument(
         "--trip_timeout_sec",
@@ -4114,7 +4788,188 @@ def build_arg_parser():
         default=None,
         help=argparse.SUPPRESS,
     )
+    p.add_argument(
+        "--analyze_dir",
+        type=str,
+        default=None,
+        help="Skip calibration; read all model subdirs under this path and "
+             "generate a cross-model generalization ranking report.",
+    )
     return p
+
+
+def _generate_cross_model_report(analyze_dir):
+    """Scan all model subdirs, read result_sidecar.json, produce ranking report."""
+    model_data = {}
+    for model_dir_name in sorted(os.listdir(analyze_dir)):
+        model_path = os.path.join(analyze_dir, model_dir_name)
+        if not os.path.isdir(model_path) or model_dir_name.startswith(("_", ".")):
+            continue
+        trips = {}
+        for trip_name in sorted(os.listdir(model_path)):
+            sidecar = os.path.join(model_path, trip_name, "result_sidecar.json")
+            if not os.path.isfile(sidecar):
+                continue
+            try:
+                with io.open(sidecar, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                trips[trip_name] = data
+            except Exception:
+                continue
+        if trips:
+            model_data[model_dir_name] = trips
+
+    if not model_data:
+        print("[warn] No model data found in {}".format(analyze_dir))
+        return
+
+    all_trips = sorted(set(t for trips in model_data.values() for t in trips))
+    trip_short = {t: t.split("_")[0] for t in all_trips}
+
+    lines = []
+    lines.append("# BAG 泛化评估跨模型汇总报告\n")
+    lines.append("评估目录: `{}`\n".format(analyze_dir))
+    lines.append("模型数: {}  行程数: {}\n".format(len(model_data), len(all_trips)))
+    lines.append("行程: {}\n".format(", ".join(trip_short[t] for t in all_trips)))
+
+    def _medw200(data):
+        v = data.get("multi_window_errors", {}).get("200", {}).get("rot")
+        return float(v) if v is not None else float("nan")
+
+    def _medw200_rpy(data):
+        w = data.get("multi_window_errors", {}).get("200", {})
+        def _s(k):
+            v = w.get(k)
+            return float(v) if v is not None else float("nan")
+        return _s("roll"), _s("pitch"), _s("yaw")
+
+    # Overall MEDW200 ranking
+    model_avg_medw = []
+    for model, trips in model_data.items():
+        medws = [_medw200(d) for d in trips.values() if _medw200(d) == _medw200(d)]
+        if medws:
+            model_avg_medw.append((model, float(np.mean(medws)), float(np.std(medws)),
+                                   float(np.min(medws)), float(np.max(medws)), len(medws)))
+    model_avg_medw.sort(key=lambda x: x[1])
+
+    lines.append("\n## 一、MEDW200 总排名 (跨行程均值, 越低越好)\n")
+    header = "| 排名 | 模型 | Avg MEDW200 | Std | Min | Max | #Trips |"
+    lines.append(header)
+    lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+    for rank, (model, avg, std, mn, mx, n) in enumerate(model_avg_medw, 1):
+        lines.append("| {} | {} | {:.4f}° | {:.4f} | {:.4f} | {:.4f} | {} |".format(
+            rank, model, avg, std, mn, mx, n))
+
+    # Per-trip MEDW200 comparison
+    lines.append("\n## 二、Per-Trip MEDW200 对比\n")
+    trip_headers = " | ".join(trip_short[t] for t in all_trips)
+    lines.append("| 模型 | {} | Avg |".format(trip_headers))
+    lines.append("| --- | {} | ---: |".format(" | ".join(["---:"] * len(all_trips))))
+    for model, avg, _, _, _, _ in model_avg_medw:
+        trips = model_data[model]
+        cells = []
+        for t in all_trips:
+            if t in trips:
+                m = _medw200(trips[t])
+                gs = trips[t].get("gt_source", "?")
+                flag = "*" if gs == "install_angle_error" else ""
+                cells.append("{:.4f}{}".format(m, flag) if m == m else "N/A")
+            else:
+                cells.append("-")
+        lines.append("| {} | {} | {:.4f} |".format(model, " | ".join(cells), avg))
+    lines.append("\n> \\* = MEDW参考基准为init外参(非GT), 指标不可靠\n")
+
+    # Per-trip RPY breakdown
+    lines.append("\n## 三、Per-Trip RPY 分量 (MEDW200)\n")
+    for t in all_trips:
+        lines.append("\n### {}\n".format(t))
+        lines.append("| 模型 | MEDW200 | Roll | Pitch | Yaw | GT源 | Conf% |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- | ---: |")
+        trip_models = []
+        for model, avg, _, _, _, _ in model_avg_medw:
+            if t in model_data[model]:
+                d = model_data[model][t]
+                trip_models.append((model, d))
+        trip_models.sort(key=lambda x: _medw200(x[1]))
+        for model, d in trip_models:
+            m = _medw200(d)
+            r, p, y = _medw200_rpy(d)
+            gs = d.get("gt_source", "?")[:10]
+            conf = d.get("total_std")
+            if conf is None or (isinstance(conf, float) and conf != conf):
+                conf_pct = "?"
+            else:
+                _fr = d.get("frames") or 0
+                conf_pct = "{}%".format(int(min(1, _fr / 200) *
+                                            max(0, 1 - conf / 0.15) * 100))
+            lines.append("| {} | {:.4f}° | {:.4f} | {:.4f} | {:.4f} | {} | {} |".format(
+                model, m, r, p, y, gs, conf_pct))
+
+    # Scenario comparison (baseline vs shortcut vs inject)
+    scenario_suffixes = [("_inject_small", "inject_small"),
+                         ("_shortcut", "shortcut"),
+                         ("_baseline", "baseline")]
+    scenarios = {}
+    for model in model_data:
+        for suffix, scenario in scenario_suffixes:
+            if model.endswith(suffix):
+                base_model = model[:-len(suffix)]
+                scenarios.setdefault(base_model, {})[scenario] = model
+                break
+
+    if scenarios:
+        lines.append("\n## 四、场景对比 (baseline vs shortcut vs inject_small)\n")
+        lines.append("| 模型 | Baseline | Shortcut | Inject Small | Recovery% | Shortcut Risk |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
+        for base_model in sorted(scenarios.keys()):
+            sc = scenarios[base_model]
+            bl_medw = inj_medw = sc_medw = float("nan")
+            recovery = shortcut_risk = "N/A"
+
+            for scenario, full_name in sc.items():
+                trips = model_data[full_name]
+                medws = [_medw200(d) for d in trips.values() if _medw200(d) == _medw200(d)]
+                avg = float(np.mean(medws)) if medws else float("nan")
+                if scenario == "baseline":
+                    bl_medw = avg
+                elif scenario == "shortcut":
+                    sc_medw = avg
+                    risks = [d.get("shortcut_risk") for d in trips.values()
+                             if d.get("shortcut_risk")]
+                    shortcut_risk = "/".join(sorted(set(risks))) if risks else "N/A"
+                elif scenario == "inject_small":
+                    inj_medw = avg
+                    recs = []
+                    for d in trips.values():
+                        cr = d.get("compensation_ratio_pct")
+                        if cr is not None and isinstance(cr, (int, float)) and cr == cr:
+                            recs.append(float(cr))
+                    if recs:
+                        recovery = "{:.1f}%".format(np.mean(recs))
+
+            bl_s = "{:.4f}°".format(bl_medw) if bl_medw == bl_medw else "-"
+            sc_s = "{:.4f}°".format(sc_medw) if sc_medw == sc_medw else "-"
+            inj_s = "{:.4f}°".format(inj_medw) if inj_medw == inj_medw else "-"
+            lines.append("| {} | {} | {} | {} | {} | {} |".format(
+                base_model, bl_s, sc_s, inj_s, recovery, shortcut_risk))
+
+    # Cross-vehicle consistency
+    lines.append("\n## 五、跨车型一致性\n")
+    for model, avg, std, mn, mx, n in model_avg_medw[:10]:
+        if n < 2:
+            continue
+        cv = std / avg * 100 if avg > 0 else 0
+        verdict = "优秀" if cv < 10 else ("良好" if cv < 20 else "需改进")
+        lines.append("- **{}**: Avg={:.4f}° Std={:.4f} CV={:.1f}% → {}".format(
+            model, avg, std, cv, verdict))
+
+    report_path = os.path.join(analyze_dir, "CROSS_MODEL_REPORT.md")
+    with io.open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print("[info] Cross-model report: {}".format(report_path))
+    print("[info] Top 5 models by MEDW200:")
+    for rank, (model, avg, _, _, _, _) in enumerate(model_avg_medw[:5], 1):
+        print("  {}. {} = {:.4f}°".format(rank, model, avg))
 
 
 def _sanitize_for_json(obj):
@@ -4160,10 +5015,11 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     has_config_flag = "--config" in sys.argv
+    has_analyze_flag = "--analyze_dir" in sys.argv
     cli_explicit = _cli_explicit_args(sys.argv[1:])
 
     parser = build_arg_parser()
-    if has_config_flag:
+    if has_config_flag or has_analyze_flag:
         for action in parser._actions:
             if action.dest in ("input_file", "ckpt_path", "output_dir"):
                 action.required = False
@@ -4177,6 +5033,11 @@ def main():
             k_attr = k.replace("-", "_")
             if k_attr not in cli_explicit:
                 setattr(args, k_attr, v)
+
+    analyze_dir = getattr(args, "analyze_dir", None)
+    if analyze_dir:
+        _generate_cross_model_report(analyze_dir)
+        return
 
     if args.from_job_json:
         with io.open(args.from_job_json, "r", encoding="utf-8") as handle:
@@ -4266,6 +5127,12 @@ def main():
         "filter_air_suspension": bool(getattr(args, "filter_air_suspension", False)),
         "input_format": args.input_format,
         "initial_bag_groups": int(getattr(args, "initial_bag_groups", 3)),
+        "gt_lidars_cfg": getattr(args, "gt_lidars_cfg", None),
+        "inject_lidar_rpy_deg": getattr(args, "inject_lidar_rpy_deg", None),
+        "incremental_extract": getattr(args, "incremental_extract", True),
+        "infer_cap_multiplier": float(getattr(args, "infer_cap_multiplier", 1.25)),
+        "multi_init_sweep_deg": float(getattr(args, "multi_init_sweep_deg", 0.0)),
+        "multi_init_grid": bool(getattr(args, "multi_init_grid", False)),
     }
 
     if torch.cuda.is_available():
@@ -4303,7 +5170,8 @@ def main():
     for r in results:
         if r.get("status") != "ok":
             continue
-        rd = float(r.get("rot_delta", float("nan")))
+        _rd_raw = r.get("rot_delta")
+        rd = float(_rd_raw) if _rd_raw is not None else float("nan")
         if rd == rd:
             rot_ok.append(rd)
     total_extract = sum(r.get("extract_sec", 0) or 0 for r in results if r.get("status") == "ok")

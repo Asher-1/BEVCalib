@@ -153,6 +153,36 @@
 
 set -e
 
+# Quote CLI values that start with '-' (e.g. augment_lidar_vertical_fov=-25,15)
+_quote_cli_val() {
+    case "$1" in
+        -*|*[[:space:],]*)
+            printf '%q' "$1"
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
+# argparse/shell: 负值或 P2b 列表参数必须用 --flag=value
+_opt_flag_append() {
+    local flag="$1"
+    local val="$2"
+    case "$flag" in
+        --augment_lidar_sparse_lines|--augment_lidar_vertical_fov)
+            OPTIM_ARGS="$OPTIM_ARGS ${flag}=${val}"
+            ;;
+        *)
+            if [[ "$val" == -* ]]; then
+                OPTIM_ARGS="$OPTIM_ARGS ${flag}=${val}"
+            else
+                OPTIM_ARGS="$OPTIM_ARGS ${flag} $(_quote_cli_val "$val")"
+            fi
+            ;;
+    esac
+}
+
 # ============================================================================
 # 工具函数
 # ============================================================================
@@ -245,6 +275,7 @@ ENABLE_AXIS_LOSS=""
 WEIGHT_AXIS_ROTATION=""
 LR_SCHEDULE=""
 WARMUP_EPOCHS=""
+STEP_SIZE=""
 BACKBONE_LR_SCALE=""
 COSINE_T0=""
 COSINE_TMULT=""
@@ -287,6 +318,7 @@ MASTER_ADDR_AUTO=0
 MASTER_PORT=""
 MASTER_PORT_AUTO=0
 RDZV_TIMEOUT=""
+PASSTHROUGH_ARGS=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -339,6 +371,8 @@ while [[ $# -gt 0 ]]; do
             LR_SCHEDULE="$2"; shift 2 ;;
         --warmup_epochs)
             WARMUP_EPOCHS="$2"; shift 2 ;;
+        --step_size)
+            STEP_SIZE="$2"; shift 2 ;;
         --backbone_lr_scale)
             BACKBONE_LR_SCALE="$2"; shift 2 ;;
         --cosine_T0)
@@ -357,6 +391,8 @@ while [[ $# -gt 0 ]]; do
             PER_AXIS_WEIGHTS="$2"; shift 2 ;;
         --axis_weights)
             AXIS_WEIGHTS="$2"; shift 2 ;;
+        --axis_weights=*)
+            AXIS_WEIGHTS="${1#*=}"; shift ;;
         --augment_pc_jitter)
             AUGMENT_PC_JITTER="$2"; shift 2 ;;
         --augment_pc_dropout)
@@ -487,6 +523,32 @@ while [[ $# -gt 0 ]]; do
             VALIDATE_DATA="$2"; shift 2 ;;
         --enable_ckpt_eval)
             ENABLE_CKPT_EVAL="$2"; shift 2 ;;
+        --enable_medw_eval)
+            ENABLE_MEDW_EVAL="$2"; shift 2 ;;
+        --enable_jacobian_eval)
+            ENABLE_JACOBIAN_EVAL="$2"; shift 2 ;;
+        --jacobian_eval_angle_deg)
+            JACOBIAN_EVAL_ANGLE_DEG="$2"; shift 2 ;;
+        --jacobian_eval_batches)
+            JACOBIAN_EVAL_BATCHES="$2"; shift 2 ;;
+        --jacobian_eval_n_probes)
+            JACOBIAN_EVAL_N_PROBES="$2"; shift 2 ;;
+        --jacobian_loss_weight)
+            JACOBIAN_LOSS_WEIGHT="$2"; shift 2 ;;
+        --jacobian_loss_start_epoch)
+            JACOBIAN_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --jacobian_loss_probe_deg)
+            JACOBIAN_LOSS_PROBE_DEG="$2"; shift 2 ;;
+        --jacobian_loss_interval)
+            JACOBIAN_LOSS_INTERVAL="$2"; shift 2 ;;
+        --medw_eval_max_frames)
+            MEDW_EVAL_MAX_FRAMES="$2"; shift 2 ;;
+        --enable_dual_gate_ckpt)
+            ENABLE_DUAL_GATE_CKPT="$2"; shift 2 ;;
+        --dual_gate_jacobian_min)
+            DUAL_GATE_JACOBIAN_MIN="$2"; shift 2 ;;
+        --dual_gate_medw_max)
+            DUAL_GATE_MEDW_MAX="$2"; shift 2 ;;
         --vis_samples)
             VIS_SAMPLES="$2"; shift 2 ;;
         --vis_points)
@@ -513,6 +575,141 @@ while [[ $# -gt 0 ]]; do
             TARGET_WIDTH="$2"; shift 2 ;;
         --target_height)
             TARGET_HEIGHT="$2"; shift 2 ;;
+        --tinit_dropout_prob)
+            TINIT_DROPOUT_PROB="$2"; shift 2 ;;
+        --consistency_loss_weight)
+            CONSISTENCY_LOSS_WEIGHT="$2"; shift 2 ;;
+        --consistency_loss_start_epoch)
+            CONSISTENCY_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --progressive_angle_start)
+            PROGRESSIVE_ANGLE_START="$2"; shift 2 ;;
+        --progressive_angle_end)
+            PROGRESSIVE_ANGLE_END="$2"; shift 2 ;;
+        --progressive_warmup_epochs)
+            PROGRESSIVE_WARMUP_EPOCHS="$2"; shift 2 ;;
+        --ema_consistency)
+            EMA_CONSISTENCY="$2"; shift 2 ;;
+        --ema_decay)
+            EMA_DECAY="$2"; shift 2 ;;
+        --continuous_tinit_noise)
+            CONTINUOUS_TINIT_NOISE="$2"; shift 2 ;;
+        --continuous_noise_max_deg)
+            CONTINUOUS_NOISE_MAX_DEG="$2"; shift 2 ;;
+        --zero_perturbation_prob)
+            ZERO_PERTURBATION_PROB="$2"; shift 2 ;;
+        --use_gated_instance_norm)
+            USE_GATED_INSTANCE_NORM="$2"; shift 2 ;;
+        --gin_init_gate)
+            GIN_INIT_GATE="$2"; shift 2 ;;
+        --correlation_fusion)
+            CORRELATION_FUSION="$2"; shift 2 ;;
+        --cross_correlation_fusion)
+            CROSS_CORRELATION_FUSION="$2"; shift 2 ;;
+        --explicit_tinit)
+            EXPLICIT_TINIT="$2"; shift 2 ;;
+        --tinit_sensitivity_weight)
+            TINIT_SENSITIVITY_WEIGHT="$2"; shift 2 ;;
+        --iterative_refine)
+            ITERATIVE_REFINE="$2"; shift 2 ;;
+        --native_cross)
+            NATIVE_CROSS="$2"; shift 2 ;;
+        --native_cross_pc_groups)
+            NATIVE_CROSS_PC_GROUPS="$2"; shift 2 ;;
+        --native_cross_n_harmonic)
+            NATIVE_CROSS_N_HARMONIC="$2"; shift 2 ;;
+        --native_cross_n_layers)
+            NATIVE_CROSS_N_LAYERS="$2"; shift 2 ;;
+        --native_cross_dual_branch)
+            NATIVE_CROSS_DUAL_BRANCH="$2"; shift 2 ;;
+        --native_cross_knn)
+            NATIVE_CROSS_KNN="$2"; shift 2 ;;
+        --native_cross_use_fps)
+            NATIVE_CROSS_USE_FPS="$2"; shift 2 ;;
+        --native_cross_use_pointgpt)
+            NATIVE_CROSS_USE_POINTGPT="$2"; shift 2 ;;
+        --native_cross_pointgpt_ckpt)
+            NATIVE_CROSS_POINTGPT_CKPT="$2"; shift 2 ;;
+        --native_cross_pointgpt_config)
+            NATIVE_CROSS_POINTGPT_CONFIG="$2"; shift 2 ;;
+        --native_cross_pointgpt_max_depth)
+            NATIVE_CROSS_POINTGPT_MAX_DEPTH="$2"; shift 2 ;;
+        --native_cross_extend_ratio)
+            NATIVE_CROSS_EXTEND_RATIO="$2"; shift 2 ;;
+        --fusion_backend)
+            FUSION_BACKEND="$2"; shift 2 ;;
+        --pc_encoder_mode)
+            PC_ENCODER_MODE="$2"; shift 2 ;;
+        --fusion_variant)
+            FUSION_VARIANT="$2"; shift 2 ;;
+        --deep_supervision_weight)
+            DEEP_SUPERVISION_WEIGHT="$2"; shift 2 ;;
+        --gate_entropy_weight)
+            GATE_ENTROPY_WEIGHT="$2"; shift 2 ;;
+        --appearance_loss_weight)
+            APPEARANCE_LOSS_WEIGHT="$2"; shift 2 ;;
+        --depth_loss_weight)
+            DEPTH_LOSS_WEIGHT="$2"; shift 2 ;;
+        --geo_loss_start_epoch)
+            GEO_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --use_match_head)
+            USE_MATCH_HEAD="$2"; shift 2 ;;
+        --use_local_correlation)
+            USE_LOCAL_CORRELATION="$2"; shift 2 ;;
+        --correspondence_loss_weight)
+            CORRESPONDENCE_LOSS_WEIGHT="$2"; shift 2 ;;
+        --correspondence_loss_start_epoch)
+            CORRESPONDENCE_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --correspondence_loss_warmup_epochs)
+            CORRESPONDENCE_LOSS_WARMUP_EPOCHS="$2"; shift 2 ;;
+        --match_disable_fallback)
+            MATCH_DISABLE_FALLBACK="$2"; shift 2 ;;
+        --match_gate_use_init_ratio)
+            MATCH_GATE_USE_INIT_RATIO="$2"; shift 2 ;;
+        --match_confidence_threshold)
+            MATCH_CONFIDENCE_THRESHOLD="$2"; shift 2 ;;
+        --match_corr_validity_mode)
+            MATCH_CORR_VALIDITY_MODE="$2"; shift 2 ;;
+        --match_epnp_min_points)
+            MATCH_EPNP_MIN_POINTS="$2"; shift 2 ;;
+        --match_phase_noise_max_deg)
+            MATCH_PHASE_NOISE_MAX_DEG="$2"; shift 2 ;;
+        --compose_mode)
+            COMPOSE_MODE="$2"; shift 2 ;;
+        --num_correspondences)
+            NUM_CORRESPONDENCES="$2"; shift 2 ;;
+        --match_valid_ratio_min)
+            MATCH_VALID_RATIO_MIN="$2"; shift 2 ;;
+        --correspondence_supervision)
+            CORRESPONDENCE_SUPERVISION="$2"; shift 2 ;;
+        --differentiable_epnp)
+            DIFFERENTIABLE_EPNP="$2"; shift 2 ;;
+        --diff_epnp_warmup_epochs)
+            DIFF_EPNP_WARMUP_EPOCHS="$2"; shift 2 ;;
+        --bev_branch_lr_scale)
+            BEV_BRANCH_LR_SCALE="$2"; shift 2 ;;
+        --projfusion_image_hw)
+            if [[ $# -ge 3 ]]; then
+                PROJFUSION_IMAGE_HW="$2 $3"; shift 3
+            else
+                echo "❌ Error: --projfusion_image_hw requires 2 values (H W)"
+                exit 1
+            fi ;;
+        --augment_fov_crop_prob)
+            AUGMENT_FOV_CROP_PROB="$2"; shift 2 ;;
+        --augment_fov_crop_ratio_min)
+            AUGMENT_FOV_CROP_RATIO_MIN="$2"; shift 2 ;;
+        --augment_fov_crop_ratio_max)
+            AUGMENT_FOV_CROP_RATIO_MAX="$2"; shift 2 ;;
+        --augment_lidar_sparse_prob)
+            AUGMENT_LIDAR_SPARSE_PROB="$2"; shift 2 ;;
+        --augment_lidar_sparse_lines)
+            AUGMENT_LIDAR_SPARSE_LINES="$2"; shift 2 ;;
+        --augment_lidar_sparse_lines=*)
+            AUGMENT_LIDAR_SPARSE_LINES="${1#*=}"; shift ;;
+        --augment_lidar_vertical_fov)
+            AUGMENT_LIDAR_VERTICAL_FOV="$2"; shift 2 ;;
+        --augment_lidar_vertical_fov=*)
+            AUGMENT_LIDAR_VERTICAL_FOV="${1#*=}"; shift ;;
         --force)
             export FORCE_RERUN=1
             shift
@@ -574,16 +771,21 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         *)
-            echo "Unknown option: $1"
-            echo ""
-            echo "可用选项: --ddp [N], --fg, --compile, --rotation_only, --enable_axis_loss, --weight_axis_rotation W,"
-            echo "          --angle DEG, --trans M, --bs N, --lr LR, --no-tb, --tb_port PORT,"
-            echo "          --nnodes [N], --node_rank [R], --master_addr [ADDR], --master_port [PORT],"
-            echo "          --rdzv_timeout SECONDS, --use_geodesic_loss 0/1, --use_mlp_head 0/1,"
-            echo "          --use_deformable 0/1, --bev_pool_factor N, --use_foundation_depth 0/1,"
-            echo "          --backbone_warmup_epochs N, --layer_wise_lr_decay F,"
-            echo "          --use_pitch_branch 0/1, --pitch_aux_weight W"
-            exit 1
+            if [[ "$1" == --* ]]; then
+                if [[ $# -ge 2 && "$2" != --* ]]; then
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1 $2"
+                    shift 2
+                elif [[ "$1" == *=* ]]; then
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    shift
+                else
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    shift
+                fi
+            else
+                echo "Unknown option: $1"
+                exit 1
+            fi
             ;;
     esac
 done
@@ -986,15 +1188,25 @@ if [ "$USE_DDP" -eq 1 ]; then
     DDP_LOG_DIR="./logs/${DATASET_NAME}/model_${LOG_SUFFIX}"
     
     # 检查实验是否已完成（基于 checkpoint 文件判断，兼容多机 DDP）
+    # resume_ckpt 非空时视为断点续训，不因已有 ckpt 跳过
     # Worker 节点永远不跳过 — 必须加入 DDP 集群
     if [ "${FORCE_RERUN:-0}" != "1" ] && [ "${NODE_RANK:-0}" = "0" ]; then
         _CKPT_DIR="$DDP_LOG_DIR/checkpoint"
-        if [ -d "$_CKPT_DIR" ] && [ "$(find "$_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ]; then
+        _WANTS_RESUME=0
+        if [ -n "${RESUME_CKPT:-}" ] && [ "${RESUME_CKPT}" != "null" ]; then
+            _WANTS_RESUME=1
+        fi
+        if [ -d "$_CKPT_DIR" ] && [ "$(find "$_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ] && [ "$_WANTS_RESUME" -eq 0 ]; then
             _N_CKPT=$(find "$_CKPT_DIR" -name '*.pth' -type f | wc -l)
             echo "⏭️  跳过训练: 检测到已有 checkpoint 文件 (${_N_CKPT}个)"
             echo "  路径: $_CKPT_DIR"
-            echo "  如需重新训练，请删除该目录或使用 --force 参数"
+            echo "  如需断点续训，请传入 --resume_ckpt auto"
+            echo "  如需从头重训，请删除该目录或使用 --force 参数"
             exit 0
+        fi
+        if [ -d "$_CKPT_DIR" ] && [ "$_WANTS_RESUME" -eq 1 ]; then
+            _N_CKPT=$(find "$_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)
+            echo "  断点续训: resume_ckpt=$RESUME_CKPT (${_N_CKPT}个 ckpt @ $_CKPT_DIR)"
         fi
     fi
     
@@ -1042,6 +1254,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     OPTIM_ARGS=""
     [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
     [ -n "$WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --warmup_epochs $WARMUP_EPOCHS"
+    [ -n "$STEP_SIZE" ] && OPTIM_ARGS="$OPTIM_ARGS --step_size $STEP_SIZE"
     [ -n "$BACKBONE_LR_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_lr_scale $BACKBONE_LR_SCALE"
     [ -n "$COSINE_T0" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_T0 $COSINE_T0"
     [ -n "$COSINE_TMULT" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_Tmult $COSINE_TMULT"
@@ -1100,6 +1313,19 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$MIN_POINT_UTILIZATION" ] && OPTIM_ARGS="$OPTIM_ARGS --min_point_utilization $MIN_POINT_UTILIZATION"
     [ -n "$MIN_VALID_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --min_valid_ratio $MIN_VALID_RATIO"
     [ -n "$ENABLE_CKPT_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_ckpt_eval $ENABLE_CKPT_EVAL"
+    [ -n "$ENABLE_MEDW_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_medw_eval $ENABLE_MEDW_EVAL"
+    [ -n "$ENABLE_JACOBIAN_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_jacobian_eval $ENABLE_JACOBIAN_EVAL"
+    [ -n "$JACOBIAN_EVAL_ANGLE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_eval_angle_deg $JACOBIAN_EVAL_ANGLE_DEG"
+    [ -n "$JACOBIAN_EVAL_BATCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_eval_batches $JACOBIAN_EVAL_BATCHES"
+    [ -n "$JACOBIAN_EVAL_N_PROBES" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_eval_n_probes $JACOBIAN_EVAL_N_PROBES"
+    [ -n "$JACOBIAN_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_weight $JACOBIAN_LOSS_WEIGHT"
+    [ -n "$JACOBIAN_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_start_epoch $JACOBIAN_LOSS_START_EPOCH"
+    [ -n "$JACOBIAN_LOSS_PROBE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_probe_deg $JACOBIAN_LOSS_PROBE_DEG"
+    [ -n "$JACOBIAN_LOSS_INTERVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_interval $JACOBIAN_LOSS_INTERVAL"
+    [ -n "$MEDW_EVAL_MAX_FRAMES" ] && OPTIM_ARGS="$OPTIM_ARGS --medw_eval_max_frames $MEDW_EVAL_MAX_FRAMES"
+    [ -n "$ENABLE_DUAL_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_dual_gate_ckpt $ENABLE_DUAL_GATE_CKPT"
+    [ -n "$DUAL_GATE_JACOBIAN_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_jacobian_min $DUAL_GATE_JACOBIAN_MIN"
+    [ -n "$DUAL_GATE_MEDW_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_medw_max $DUAL_GATE_MEDW_MAX"
     [ -n "$DDP_AUTO_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_auto_scale $DDP_AUTO_SCALE"
     [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
     [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
@@ -1126,6 +1352,69 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$FREEZE_BACKBONE" ] && OPTIM_ARGS="$OPTIM_ARGS --freeze_backbone $FREEZE_BACKBONE"
     [ -n "$BACKBONE_FREEZE_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_freeze_layers $BACKBONE_FREEZE_LAYERS"
     [ -n "$BACKBONE_WEIGHTS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_weights $BACKBONE_WEIGHTS"
+    [ -n "$TINIT_DROPOUT_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_dropout_prob $TINIT_DROPOUT_PROB"
+    [ -n "$CONSISTENCY_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --consistency_loss_weight $CONSISTENCY_LOSS_WEIGHT"
+    [ -n "$CONSISTENCY_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --consistency_loss_start_epoch $CONSISTENCY_LOSS_START_EPOCH"
+    [ -n "$PROGRESSIVE_ANGLE_START" ] && OPTIM_ARGS="$OPTIM_ARGS --progressive_angle_start $PROGRESSIVE_ANGLE_START"
+    [ -n "$PROGRESSIVE_ANGLE_END" ] && OPTIM_ARGS="$OPTIM_ARGS --progressive_angle_end $PROGRESSIVE_ANGLE_END"
+    [ -n "$PROGRESSIVE_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --progressive_warmup_epochs $PROGRESSIVE_WARMUP_EPOCHS"
+    [ -n "$EMA_CONSISTENCY" ] && OPTIM_ARGS="$OPTIM_ARGS --ema_consistency $EMA_CONSISTENCY"
+    [ -n "$EMA_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --ema_decay $EMA_DECAY"
+    [ -n "$CONTINUOUS_TINIT_NOISE" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_tinit_noise $CONTINUOUS_TINIT_NOISE"
+    [ -n "$CONTINUOUS_NOISE_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_noise_max_deg $CONTINUOUS_NOISE_MAX_DEG"
+    [ -n "$ZERO_PERTURBATION_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_perturbation_prob $ZERO_PERTURBATION_PROB"
+    [ -n "$USE_GATED_INSTANCE_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --use_gated_instance_norm $USE_GATED_INSTANCE_NORM"
+    [ -n "$GIN_INIT_GATE" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_init_gate $GIN_INIT_GATE"
+    [ -n "$CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --correlation_fusion $CORRELATION_FUSION"
+    [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
+    [ -n "$EXPLICIT_TINIT" ] && OPTIM_ARGS="$OPTIM_ARGS --explicit_tinit $EXPLICIT_TINIT"
+    [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
+    [ -n "$ITERATIVE_REFINE" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine $ITERATIVE_REFINE"
+    [ -n "$NATIVE_CROSS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross $NATIVE_CROSS"
+    [ -n "$NATIVE_CROSS_PC_GROUPS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pc_groups $NATIVE_CROSS_PC_GROUPS"
+    [ -n "$NATIVE_CROSS_N_HARMONIC" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_n_harmonic $NATIVE_CROSS_N_HARMONIC"
+    [ -n "$NATIVE_CROSS_N_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_n_layers $NATIVE_CROSS_N_LAYERS"
+    [ -n "$NATIVE_CROSS_DUAL_BRANCH" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_dual_branch $NATIVE_CROSS_DUAL_BRANCH"
+    [ -n "$NATIVE_CROSS_KNN" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_knn $NATIVE_CROSS_KNN"
+    [ -n "$NATIVE_CROSS_USE_FPS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_use_fps $NATIVE_CROSS_USE_FPS"
+    [ -n "$NATIVE_CROSS_USE_POINTGPT" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_use_pointgpt $NATIVE_CROSS_USE_POINTGPT"
+    [ -n "$NATIVE_CROSS_POINTGPT_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_ckpt $NATIVE_CROSS_POINTGPT_CKPT"
+    [ -n "$NATIVE_CROSS_POINTGPT_CONFIG" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_config $NATIVE_CROSS_POINTGPT_CONFIG"
+    [ -n "$NATIVE_CROSS_POINTGPT_MAX_DEPTH" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_max_depth $NATIVE_CROSS_POINTGPT_MAX_DEPTH"
+    [ -n "$NATIVE_CROSS_EXTEND_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_extend_ratio $NATIVE_CROSS_EXTEND_RATIO"
+    [ -n "$FUSION_BACKEND" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_backend $FUSION_BACKEND"
+    [ -n "$PC_ENCODER_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --pc_encoder_mode $PC_ENCODER_MODE"
+    [ -n "$FUSION_VARIANT" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_variant $FUSION_VARIANT"
+    [ -n "$DEEP_SUPERVISION_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --deep_supervision_weight $DEEP_SUPERVISION_WEIGHT"
+    [ -n "$GATE_ENTROPY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --gate_entropy_weight $GATE_ENTROPY_WEIGHT"
+    [ -n "$APPEARANCE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --appearance_loss_weight $APPEARANCE_LOSS_WEIGHT"
+    [ -n "$DEPTH_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_loss_weight $DEPTH_LOSS_WEIGHT"
+    [ -n "$GEO_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --geo_loss_start_epoch $GEO_LOSS_START_EPOCH"
+    [ -n "$USE_MATCH_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_match_head $USE_MATCH_HEAD"
+    [ -n "$USE_LOCAL_CORRELATION" ] && OPTIM_ARGS="$OPTIM_ARGS --use_local_correlation $USE_LOCAL_CORRELATION"
+    [ -n "$CORRESPONDENCE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_loss_weight $CORRESPONDENCE_LOSS_WEIGHT"
+    [ -n "$CORRESPONDENCE_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_loss_start_epoch $CORRESPONDENCE_LOSS_START_EPOCH"
+    [ -n "$CORRESPONDENCE_LOSS_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_loss_warmup_epochs $CORRESPONDENCE_LOSS_WARMUP_EPOCHS"
+    [ -n "$MATCH_DISABLE_FALLBACK" ] && OPTIM_ARGS="$OPTIM_ARGS --match_disable_fallback $MATCH_DISABLE_FALLBACK"
+    [ -n "$MATCH_GATE_USE_INIT_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --match_gate_use_init_ratio $MATCH_GATE_USE_INIT_RATIO"
+    [ -n "$MATCH_CONFIDENCE_THRESHOLD" ] && OPTIM_ARGS="$OPTIM_ARGS --match_confidence_threshold $MATCH_CONFIDENCE_THRESHOLD"
+    [ -n "$MATCH_CORR_VALIDITY_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --match_corr_validity_mode $MATCH_CORR_VALIDITY_MODE"
+    [ -n "$MATCH_EPNP_MIN_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --match_epnp_min_points $MATCH_EPNP_MIN_POINTS"
+    [ -n "$MATCH_PHASE_NOISE_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --match_phase_noise_max_deg $MATCH_PHASE_NOISE_MAX_DEG"
+    [ -n "$COMPOSE_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --compose_mode $COMPOSE_MODE"
+    [ -n "$NUM_CORRESPONDENCES" ] && OPTIM_ARGS="$OPTIM_ARGS --num_correspondences $NUM_CORRESPONDENCES"
+    [ -n "$MATCH_VALID_RATIO_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --match_valid_ratio_min $MATCH_VALID_RATIO_MIN"
+    [ -n "$CORRESPONDENCE_SUPERVISION" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_supervision $CORRESPONDENCE_SUPERVISION"
+    [ -n "$DIFFERENTIABLE_EPNP" ] && OPTIM_ARGS="$OPTIM_ARGS --differentiable_epnp $DIFFERENTIABLE_EPNP"
+    [ -n "$DIFF_EPNP_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --diff_epnp_warmup_epochs $DIFF_EPNP_WARMUP_EPOCHS"
+    [ -n "$BEV_BRANCH_LR_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_branch_lr_scale $BEV_BRANCH_LR_SCALE"
+    [ -n "$PROJFUSION_IMAGE_HW" ] && OPTIM_ARGS="$OPTIM_ARGS --projfusion_image_hw $PROJFUSION_IMAGE_HW"
+    [ -n "$AUGMENT_FOV_CROP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_fov_crop_prob $(_quote_cli_val "$AUGMENT_FOV_CROP_PROB")"
+    [ -n "$AUGMENT_FOV_CROP_RATIO_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_fov_crop_ratio_min $(_quote_cli_val "$AUGMENT_FOV_CROP_RATIO_MIN")"
+    [ -n "$AUGMENT_FOV_CROP_RATIO_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_fov_crop_ratio_max $(_quote_cli_val "$AUGMENT_FOV_CROP_RATIO_MAX")"
+    [ -n "$AUGMENT_LIDAR_SPARSE_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_lidar_sparse_prob $(_quote_cli_val "$AUGMENT_LIDAR_SPARSE_PROB")"
+    [ -n "$AUGMENT_LIDAR_SPARSE_LINES" ] && _opt_flag_append "--augment_lidar_sparse_lines" "$AUGMENT_LIDAR_SPARSE_LINES"
+    [ -n "$AUGMENT_LIDAR_VERTICAL_FOV" ] && _opt_flag_append "--augment_lidar_vertical_fov" "$AUGMENT_LIDAR_VERTICAL_FOV"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
@@ -1145,14 +1434,14 @@ if [ "$USE_DDP" -eq 1 ]; then
         $AXIS_LOSS_ARGS \
         $LR_ARG \
         $TB_PORT_ARG \
-        $OPTIM_ARGS"
+        $OPTIM_ARGS $PASSTHROUGH_ARGS"
 
     if [ "$FOREGROUND" -eq 1 ]; then
         echo "  日志: $DDP_LOG_DIR/train.log (+ 终端输出)"
         echo ""
         eval $TRAIN_CMD
     else
-        nohup bash -c "$TRAIN_CMD" > /dev/null 2>&1 &
+        nohup bash -c "$TRAIN_CMD" >> "$DDP_LOG_DIR/train.log" 2>> "$DDP_LOG_DIR/train.stderr.log" &
         PID1=$!
         echo "  PID: $PID1"
         echo "  日志: $DDP_LOG_DIR/train.log"
@@ -1189,13 +1478,18 @@ else
     _GPU0_CKPT_DIR="$GPU0_LOG_DIR/checkpoint"
     _GPU1_CKPT_DIR="$GPU1_LOG_DIR/checkpoint"
     _GPU0_HAS_CKPT=0; _GPU1_HAS_CKPT=0
+    _WANTS_RESUME=0
+    if [ -n "${RESUME_CKPT:-}" ] && [ "${RESUME_CKPT}" != "null" ]; then
+        _WANTS_RESUME=1
+    fi
     [ -d "$_GPU0_CKPT_DIR" ] && [ "$(find "$_GPU0_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ] && _GPU0_HAS_CKPT=1
     [ -d "$_GPU1_CKPT_DIR" ] && [ "$(find "$_GPU1_CKPT_DIR" -name '*.pth' -type f 2>/dev/null | wc -l)" -gt 0 ] && _GPU1_HAS_CKPT=1
-    if [ "${FORCE_RERUN:-0}" != "1" ] && [ "$_GPU0_HAS_CKPT" -eq 1 ] && [ "$_GPU1_HAS_CKPT" -eq 1 ]; then
+    if [ "${FORCE_RERUN:-0}" != "1" ] && [ "$_GPU0_HAS_CKPT" -eq 1 ] && [ "$_GPU1_HAS_CKPT" -eq 1 ] && [ "$_WANTS_RESUME" -eq 0 ]; then
         echo "⏭️  跳过训练: 两组实验均已有 checkpoint 文件"
         echo "  GPU0: $_GPU0_CKPT_DIR"
         echo "  GPU1: $_GPU1_CKPT_DIR"
-        echo "  如需重新训练，请删除对应目录或使用 --force 参数"
+        echo "  如需断点续训，请传入 --resume_ckpt auto"
+        echo "  如需从头重训，请删除对应目录或使用 --force 参数"
         exit 0
     fi
     
@@ -1212,6 +1506,7 @@ else
     OPTIM_ARGS=""
     [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
     [ -n "$WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --warmup_epochs $WARMUP_EPOCHS"
+    [ -n "$STEP_SIZE" ] && OPTIM_ARGS="$OPTIM_ARGS --step_size $STEP_SIZE"
     [ -n "$BACKBONE_LR_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_lr_scale $BACKBONE_LR_SCALE"
     [ -n "$COSINE_T0" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_T0 $COSINE_T0"
     [ -n "$COSINE_TMULT" ] && OPTIM_ARGS="$OPTIM_ARGS --cosine_Tmult $COSINE_TMULT"
@@ -1270,6 +1565,19 @@ else
     [ -n "$MIN_POINT_UTILIZATION" ] && OPTIM_ARGS="$OPTIM_ARGS --min_point_utilization $MIN_POINT_UTILIZATION"
     [ -n "$MIN_VALID_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --min_valid_ratio $MIN_VALID_RATIO"
     [ -n "$ENABLE_CKPT_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_ckpt_eval $ENABLE_CKPT_EVAL"
+    [ -n "$ENABLE_MEDW_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_medw_eval $ENABLE_MEDW_EVAL"
+    [ -n "$ENABLE_JACOBIAN_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_jacobian_eval $ENABLE_JACOBIAN_EVAL"
+    [ -n "$JACOBIAN_EVAL_ANGLE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_eval_angle_deg $JACOBIAN_EVAL_ANGLE_DEG"
+    [ -n "$JACOBIAN_EVAL_BATCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_eval_batches $JACOBIAN_EVAL_BATCHES"
+    [ -n "$JACOBIAN_EVAL_N_PROBES" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_eval_n_probes $JACOBIAN_EVAL_N_PROBES"
+    [ -n "$JACOBIAN_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_weight $JACOBIAN_LOSS_WEIGHT"
+    [ -n "$JACOBIAN_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_start_epoch $JACOBIAN_LOSS_START_EPOCH"
+    [ -n "$JACOBIAN_LOSS_PROBE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_probe_deg $JACOBIAN_LOSS_PROBE_DEG"
+    [ -n "$JACOBIAN_LOSS_INTERVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_loss_interval $JACOBIAN_LOSS_INTERVAL"
+    [ -n "$MEDW_EVAL_MAX_FRAMES" ] && OPTIM_ARGS="$OPTIM_ARGS --medw_eval_max_frames $MEDW_EVAL_MAX_FRAMES"
+    [ -n "$ENABLE_DUAL_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_dual_gate_ckpt $ENABLE_DUAL_GATE_CKPT"
+    [ -n "$DUAL_GATE_JACOBIAN_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_jacobian_min $DUAL_GATE_JACOBIAN_MIN"
+    [ -n "$DUAL_GATE_MEDW_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_medw_max $DUAL_GATE_MEDW_MAX"
     [ -n "$DDP_AUTO_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_auto_scale $DDP_AUTO_SCALE"
     [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
     [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
@@ -1296,6 +1604,63 @@ else
     [ -n "$FREEZE_BACKBONE" ] && OPTIM_ARGS="$OPTIM_ARGS --freeze_backbone $FREEZE_BACKBONE"
     [ -n "$BACKBONE_FREEZE_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_freeze_layers $BACKBONE_FREEZE_LAYERS"
     [ -n "$BACKBONE_WEIGHTS" ] && OPTIM_ARGS="$OPTIM_ARGS --backbone_weights $BACKBONE_WEIGHTS"
+    [ -n "$TINIT_DROPOUT_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_dropout_prob $TINIT_DROPOUT_PROB"
+    [ -n "$CONSISTENCY_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --consistency_loss_weight $CONSISTENCY_LOSS_WEIGHT"
+    [ -n "$CONSISTENCY_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --consistency_loss_start_epoch $CONSISTENCY_LOSS_START_EPOCH"
+    [ -n "$PROGRESSIVE_ANGLE_START" ] && OPTIM_ARGS="$OPTIM_ARGS --progressive_angle_start $PROGRESSIVE_ANGLE_START"
+    [ -n "$PROGRESSIVE_ANGLE_END" ] && OPTIM_ARGS="$OPTIM_ARGS --progressive_angle_end $PROGRESSIVE_ANGLE_END"
+    [ -n "$PROGRESSIVE_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --progressive_warmup_epochs $PROGRESSIVE_WARMUP_EPOCHS"
+    [ -n "$EMA_CONSISTENCY" ] && OPTIM_ARGS="$OPTIM_ARGS --ema_consistency $EMA_CONSISTENCY"
+    [ -n "$EMA_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --ema_decay $EMA_DECAY"
+    [ -n "$CONTINUOUS_TINIT_NOISE" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_tinit_noise $CONTINUOUS_TINIT_NOISE"
+    [ -n "$CONTINUOUS_NOISE_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_noise_max_deg $CONTINUOUS_NOISE_MAX_DEG"
+    [ -n "$ZERO_PERTURBATION_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_perturbation_prob $ZERO_PERTURBATION_PROB"
+    [ -n "$USE_GATED_INSTANCE_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --use_gated_instance_norm $USE_GATED_INSTANCE_NORM"
+    [ -n "$GIN_INIT_GATE" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_init_gate $GIN_INIT_GATE"
+    [ -n "$CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --correlation_fusion $CORRELATION_FUSION"
+    [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
+    [ -n "$EXPLICIT_TINIT" ] && OPTIM_ARGS="$OPTIM_ARGS --explicit_tinit $EXPLICIT_TINIT"
+    [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
+    [ -n "$ITERATIVE_REFINE" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine $ITERATIVE_REFINE"
+    [ -n "$NATIVE_CROSS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross $NATIVE_CROSS"
+    [ -n "$NATIVE_CROSS_PC_GROUPS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pc_groups $NATIVE_CROSS_PC_GROUPS"
+    [ -n "$NATIVE_CROSS_N_HARMONIC" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_n_harmonic $NATIVE_CROSS_N_HARMONIC"
+    [ -n "$NATIVE_CROSS_N_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_n_layers $NATIVE_CROSS_N_LAYERS"
+    [ -n "$NATIVE_CROSS_DUAL_BRANCH" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_dual_branch $NATIVE_CROSS_DUAL_BRANCH"
+    [ -n "$NATIVE_CROSS_KNN" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_knn $NATIVE_CROSS_KNN"
+    [ -n "$NATIVE_CROSS_USE_FPS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_use_fps $NATIVE_CROSS_USE_FPS"
+    [ -n "$NATIVE_CROSS_USE_POINTGPT" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_use_pointgpt $NATIVE_CROSS_USE_POINTGPT"
+    [ -n "$NATIVE_CROSS_POINTGPT_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_ckpt $NATIVE_CROSS_POINTGPT_CKPT"
+    [ -n "$NATIVE_CROSS_POINTGPT_CONFIG" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_config $NATIVE_CROSS_POINTGPT_CONFIG"
+    [ -n "$NATIVE_CROSS_POINTGPT_MAX_DEPTH" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_max_depth $NATIVE_CROSS_POINTGPT_MAX_DEPTH"
+    [ -n "$NATIVE_CROSS_EXTEND_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_extend_ratio $NATIVE_CROSS_EXTEND_RATIO"
+    [ -n "$FUSION_BACKEND" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_backend $FUSION_BACKEND"
+    [ -n "$PC_ENCODER_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --pc_encoder_mode $PC_ENCODER_MODE"
+    [ -n "$FUSION_VARIANT" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_variant $FUSION_VARIANT"
+    [ -n "$DEEP_SUPERVISION_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --deep_supervision_weight $DEEP_SUPERVISION_WEIGHT"
+    [ -n "$GATE_ENTROPY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --gate_entropy_weight $GATE_ENTROPY_WEIGHT"
+    [ -n "$APPEARANCE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --appearance_loss_weight $APPEARANCE_LOSS_WEIGHT"
+    [ -n "$DEPTH_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_loss_weight $DEPTH_LOSS_WEIGHT"
+    [ -n "$GEO_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --geo_loss_start_epoch $GEO_LOSS_START_EPOCH"
+    [ -n "$USE_MATCH_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_match_head $USE_MATCH_HEAD"
+    [ -n "$USE_LOCAL_CORRELATION" ] && OPTIM_ARGS="$OPTIM_ARGS --use_local_correlation $USE_LOCAL_CORRELATION"
+    [ -n "$CORRESPONDENCE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_loss_weight $CORRESPONDENCE_LOSS_WEIGHT"
+    [ -n "$CORRESPONDENCE_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_loss_start_epoch $CORRESPONDENCE_LOSS_START_EPOCH"
+    [ -n "$CORRESPONDENCE_LOSS_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_loss_warmup_epochs $CORRESPONDENCE_LOSS_WARMUP_EPOCHS"
+    [ -n "$MATCH_DISABLE_FALLBACK" ] && OPTIM_ARGS="$OPTIM_ARGS --match_disable_fallback $MATCH_DISABLE_FALLBACK"
+    [ -n "$MATCH_GATE_USE_INIT_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --match_gate_use_init_ratio $MATCH_GATE_USE_INIT_RATIO"
+    [ -n "$MATCH_CONFIDENCE_THRESHOLD" ] && OPTIM_ARGS="$OPTIM_ARGS --match_confidence_threshold $MATCH_CONFIDENCE_THRESHOLD"
+    [ -n "$MATCH_CORR_VALIDITY_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --match_corr_validity_mode $MATCH_CORR_VALIDITY_MODE"
+    [ -n "$MATCH_EPNP_MIN_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --match_epnp_min_points $MATCH_EPNP_MIN_POINTS"
+    [ -n "$MATCH_PHASE_NOISE_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --match_phase_noise_max_deg $MATCH_PHASE_NOISE_MAX_DEG"
+    [ -n "$COMPOSE_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --compose_mode $COMPOSE_MODE"
+    [ -n "$NUM_CORRESPONDENCES" ] && OPTIM_ARGS="$OPTIM_ARGS --num_correspondences $NUM_CORRESPONDENCES"
+    [ -n "$MATCH_VALID_RATIO_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --match_valid_ratio_min $MATCH_VALID_RATIO_MIN"
+    [ -n "$CORRESPONDENCE_SUPERVISION" ] && OPTIM_ARGS="$OPTIM_ARGS --correspondence_supervision $CORRESPONDENCE_SUPERVISION"
+    [ -n "$DIFFERENTIABLE_EPNP" ] && OPTIM_ARGS="$OPTIM_ARGS --differentiable_epnp $DIFFERENTIABLE_EPNP"
+    [ -n "$DIFF_EPNP_WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --diff_epnp_warmup_epochs $DIFF_EPNP_WARMUP_EPOCHS"
+    [ -n "$BEV_BRANCH_LR_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --bev_branch_lr_scale $BEV_BRANCH_LR_SCALE"
+    [ -n "$PROJFUSION_IMAGE_HW" ] && OPTIM_ARGS="$OPTIM_ARGS --projfusion_image_hw $PROJFUSION_IMAGE_HW"
 
     TB_PORT_ARG=""
     [ -n "$TB_PORT" ] && TB_PORT_ARG="--tensorboard_port $TB_PORT"
@@ -1318,7 +1683,7 @@ else
         $AXIS_LOSS_ARGS \
         $LR_ARG \
         $TB_PORT_ARG \
-        $OPTIM_ARGS"
+        $OPTIM_ARGS $PASSTHROUGH_ARGS"
 
     TRAIN_CMD_1="bash train_universal.sh scratch \
         --dataset_root $DATASET_ROOT \
@@ -1333,7 +1698,7 @@ else
         $AXIS_LOSS_ARGS \
         $LR_ARG \
         $TB_PORT_ARG \
-        $OPTIM_ARGS"
+        $OPTIM_ARGS $PASSTHROUGH_ARGS"
 
     if [ "$FOREGROUND" -eq 1 ]; then
         echo "[前台模式] 两个GPU训练并行执行, Ctrl+C 同时停止两个任务"

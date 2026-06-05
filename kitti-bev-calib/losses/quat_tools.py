@@ -68,12 +68,14 @@ def quaternion_distance(q, r, device):
     Returns:
         torch.Tensor: shape=[N]
     """
-    q_norm = q.norm(dim=1, keepdim=True)
-    r_norm = r.norm(dim=1, keepdim=True)
+    _eps = 1e-8
+    q_norm = q.norm(dim=1, keepdim=True).clamp(min=_eps)
+    r_norm = r.norm(dim=1, keepdim=True).clamp(min=_eps)
     q = q / q_norm
     r = r / r_norm
     t = quatmultiply(q, quatinv(r), device)
-    return 2 * torch.atan2(torch.norm(t[:, 1:], dim=1), torch.abs(t[:, 0]))
+    vec_norm = torch.norm(t[:, 1:], dim=1).clamp(min=_eps)
+    return 2 * torch.atan2(vec_norm, torch.abs(t[:, 0]).clamp(min=_eps))
 
 def quaternion_from_matrix(matrix):
     """
@@ -84,6 +86,7 @@ def quaternion_from_matrix(matrix):
     Returns:
         torch.Tensor: shape [4], normalized quaternion
     """
+    _eps = 1e-8
     if matrix.shape == (4, 4):
         R = matrix[:-1, :-1]
     elif matrix.shape == (3, 3):
@@ -91,32 +94,32 @@ def quaternion_from_matrix(matrix):
     else:
         raise TypeError("Not a valid rotation matrix")
     tr = R[0, 0] + R[1, 1] + R[2, 2]
-    q = torch.zeros(4, device=matrix.device)
+    q = torch.zeros(4, device=matrix.device, dtype=matrix.dtype)
     if tr > 0.:
-        S = (tr+1.0).sqrt() * 2
+        S = (tr+1.0).clamp(min=_eps).sqrt() * 2
         q[0] = 0.25 * S
-        q[1] = (R[2, 1] - R[1, 2]) / S
-        q[2] = (R[0, 2] - R[2, 0]) / S
-        q[3] = (R[1, 0] - R[0, 1]) / S
+        q[1] = (R[2, 1] - R[1, 2]) / S.clamp(min=_eps)
+        q[2] = (R[0, 2] - R[2, 0]) / S.clamp(min=_eps)
+        q[3] = (R[1, 0] - R[0, 1]) / S.clamp(min=_eps)
     elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-        S = (1.0 + R[0, 0] - R[1, 1] - R[2, 2]).sqrt() * 2
-        q[0] = (R[2, 1] - R[1, 2]) / S
+        S = (1.0 + R[0, 0] - R[1, 1] - R[2, 2]).clamp(min=_eps).sqrt() * 2
+        q[0] = (R[2, 1] - R[1, 2]) / S.clamp(min=_eps)
         q[1] = 0.25 * S
-        q[2] = (R[0, 1] + R[1, 0]) / S
-        q[3] = (R[0, 2] + R[2, 0]) / S
+        q[2] = (R[0, 1] + R[1, 0]) / S.clamp(min=_eps)
+        q[3] = (R[0, 2] + R[2, 0]) / S.clamp(min=_eps)
     elif R[1, 1] > R[2, 2]:
-        S = (1.0 + R[1, 1] - R[0, 0] - R[2, 2]).sqrt() * 2
-        q[0] = (R[0, 2] - R[2, 0]) / S
-        q[1] = (R[0, 1] + R[1, 0]) / S
+        S = (1.0 + R[1, 1] - R[0, 0] - R[2, 2]).clamp(min=_eps).sqrt() * 2
+        q[0] = (R[0, 2] - R[2, 0]) / S.clamp(min=_eps)
+        q[1] = (R[0, 1] + R[1, 0]) / S.clamp(min=_eps)
         q[2] = 0.25 * S
-        q[3] = (R[1, 2] + R[2, 1]) / S
+        q[3] = (R[1, 2] + R[2, 1]) / S.clamp(min=_eps)
     else:
-        S = (1.0 + R[2, 2] - R[0, 0] - R[1, 1]).sqrt() * 2
-        q[0] = (R[1, 0] - R[0, 1]) / S
-        q[1] = (R[0, 2] + R[2, 0]) / S
-        q[2] = (R[1, 2] + R[2, 1]) / S
+        S = (1.0 + R[2, 2] - R[0, 0] - R[1, 1]).clamp(min=_eps).sqrt() * 2
+        q[0] = (R[1, 0] - R[0, 1]) / S.clamp(min=_eps)
+        q[1] = (R[0, 2] + R[2, 0]) / S.clamp(min=_eps)
+        q[2] = (R[1, 2] + R[2, 1]) / S.clamp(min=_eps)
         q[3] = 0.25 * S
-    return q / q.norm()
+    return q / q.norm().clamp(min=_eps)
 
 def quat2mat(q):
     """
@@ -172,7 +175,7 @@ def batch_quat2mat(q):
     """
     assert q.shape[-1] == 4, "Last dimension must be 4 for quaternion"
     
-    q = q / torch.norm(q, dim=-1, keepdim=True)
+    q = q / torch.norm(q, dim=-1, keepdim=True).clamp(min=1e-8)
 
     q0, q1, q2, q3 = q[..., 0:1], q[..., 1:2], q[..., 2:3], q[..., 3:4]
     z = torch.zeros_like(q0)

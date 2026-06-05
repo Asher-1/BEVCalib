@@ -67,6 +67,36 @@
 
 set -e  # Exit on error
 
+# Quote CLI values that start with '-' (e.g. augment_lidar_vertical_fov=-25,15)
+_quote_cli_val() {
+    case "$1" in
+        -*|*[[:space:],]*)
+            printf '%q' "$1"
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
+# argparse/shell: 负值或 P2b 列表参数必须用 --flag=value
+_opt_flag_append() {
+    local flag="$1"
+    local val="$2"
+    case "$flag" in
+        --augment_lidar_sparse_lines|--augment_lidar_vertical_fov)
+            OPTIM_FLAGS="$OPTIM_FLAGS ${flag}=${val}"
+            ;;
+        *)
+            if [[ "$val" == -* ]]; then
+                OPTIM_FLAGS="$OPTIM_FLAGS ${flag}=${val}"
+            else
+                OPTIM_FLAGS="$OPTIM_FLAGS ${flag} $(_quote_cli_val "$val")"
+            fi
+            ;;
+    esac
+}
+
 # Activate conda environment if needed
 if ! python -c "import torch" &> /dev/null; then
     echo "⚠️  PyTorch not found in current environment"
@@ -123,6 +153,7 @@ ENABLE_AXIS_LOSS=0
 WEIGHT_AXIS_ROTATION=""
 LR_SCHEDULE=""
 WARMUP_EPOCHS=""
+STEP_SIZE=""
 BACKBONE_LR_SCALE=""
 COSINE_T0=""
 COSINE_TMULT=""
@@ -147,6 +178,7 @@ NODE_RANK="0"
 MASTER_ADDR=""
 MASTER_PORT="29500"
 RDZV_TIMEOUT="600"
+PASSTHROUGH_ARGS=""
 
 # Parse optional arguments
 while [[ $# -gt 0 ]]; do
@@ -273,12 +305,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --axis_weights)
             AXIS_WEIGHTS="$2"; shift 2 ;;
+        --axis_weights=*)
+            AXIS_WEIGHTS="${1#*=}"; shift ;;
         --wd)
             WEIGHT_DECAY="$2"; shift 2 ;;
         --lr_schedule)
             LR_SCHEDULE="$2"; shift 2 ;;
         --warmup_epochs)
             WARMUP_EPOCHS="$2"; shift 2 ;;
+        --step_size)
+            STEP_SIZE="$2"; shift 2 ;;
         --backbone_lr_scale)
             BACKBONE_LR_SCALE="$2"; shift 2 ;;
         --backbone_warmup_epochs)
@@ -421,6 +457,32 @@ while [[ $# -gt 0 ]]; do
             VALIDATE_DATA="$2"; shift 2 ;;
         --enable_ckpt_eval)
             ENABLE_CKPT_EVAL="$2"; shift 2 ;;
+        --enable_medw_eval)
+            ENABLE_MEDW_EVAL="$2"; shift 2 ;;
+        --enable_jacobian_eval)
+            ENABLE_JACOBIAN_EVAL="$2"; shift 2 ;;
+        --jacobian_eval_angle_deg)
+            JACOBIAN_EVAL_ANGLE_DEG="$2"; shift 2 ;;
+        --jacobian_eval_batches)
+            JACOBIAN_EVAL_BATCHES="$2"; shift 2 ;;
+        --jacobian_eval_n_probes)
+            JACOBIAN_EVAL_N_PROBES="$2"; shift 2 ;;
+        --jacobian_loss_weight)
+            JACOBIAN_LOSS_WEIGHT="$2"; shift 2 ;;
+        --jacobian_loss_start_epoch)
+            JACOBIAN_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --jacobian_loss_probe_deg)
+            JACOBIAN_LOSS_PROBE_DEG="$2"; shift 2 ;;
+        --jacobian_loss_interval)
+            JACOBIAN_LOSS_INTERVAL="$2"; shift 2 ;;
+        --medw_eval_max_frames)
+            MEDW_EVAL_MAX_FRAMES="$2"; shift 2 ;;
+        --enable_dual_gate_ckpt)
+            ENABLE_DUAL_GATE_CKPT="$2"; shift 2 ;;
+        --dual_gate_jacobian_min)
+            DUAL_GATE_JACOBIAN_MIN="$2"; shift 2 ;;
+        --dual_gate_medw_max)
+            DUAL_GATE_MEDW_MAX="$2"; shift 2 ;;
         --vis_samples)
             VIS_SAMPLES="$2"; shift 2 ;;
         --vis_points)
@@ -445,9 +507,157 @@ while [[ $# -gt 0 ]]; do
             TARGET_WIDTH="$2"; shift 2 ;;
         --target_height)
             TARGET_HEIGHT="$2"; shift 2 ;;
+        --tinit_dropout_prob)
+            TINIT_DROPOUT_PROB="$2"; shift 2 ;;
+        --consistency_loss_weight)
+            CONSISTENCY_LOSS_WEIGHT="$2"; shift 2 ;;
+        --consistency_loss_start_epoch)
+            CONSISTENCY_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --progressive_angle_start)
+            PROGRESSIVE_ANGLE_START="$2"; shift 2 ;;
+        --progressive_angle_end)
+            PROGRESSIVE_ANGLE_END="$2"; shift 2 ;;
+        --progressive_warmup_epochs)
+            PROGRESSIVE_WARMUP_EPOCHS="$2"; shift 2 ;;
+        --ema_consistency)
+            EMA_CONSISTENCY="$2"; shift 2 ;;
+        --ema_decay)
+            EMA_DECAY="$2"; shift 2 ;;
+        --continuous_tinit_noise)
+            CONTINUOUS_TINIT_NOISE="$2"; shift 2 ;;
+        --continuous_noise_max_deg)
+            CONTINUOUS_NOISE_MAX_DEG="$2"; shift 2 ;;
+        --zero_perturbation_prob)
+            ZERO_PERTURBATION_PROB="$2"; shift 2 ;;
+        --use_gated_instance_norm)
+            USE_GATED_INSTANCE_NORM="$2"; shift 2 ;;
+        --gin_init_gate)
+            GIN_INIT_GATE="$2"; shift 2 ;;
+        --correlation_fusion)
+            CORRELATION_FUSION="$2"; shift 2 ;;
+        --cross_correlation_fusion)
+            CROSS_CORRELATION_FUSION="$2"; shift 2 ;;
+        --explicit_tinit)
+            EXPLICIT_TINIT="$2"; shift 2 ;;
+        --tinit_sensitivity_weight)
+            TINIT_SENSITIVITY_WEIGHT="$2"; shift 2 ;;
+        --iterative_refine)
+            ITERATIVE_REFINE="$2"; shift 2 ;;
+        --native_cross)
+            NATIVE_CROSS="$2"; shift 2 ;;
+        --native_cross_pc_groups)
+            NATIVE_CROSS_PC_GROUPS="$2"; shift 2 ;;
+        --native_cross_n_harmonic)
+            NATIVE_CROSS_N_HARMONIC="$2"; shift 2 ;;
+        --native_cross_n_layers)
+            NATIVE_CROSS_N_LAYERS="$2"; shift 2 ;;
+        --native_cross_dual_branch)
+            NATIVE_CROSS_DUAL_BRANCH="$2"; shift 2 ;;
+        --native_cross_knn)
+            NATIVE_CROSS_KNN="$2"; shift 2 ;;
+        --native_cross_use_fps)
+            NATIVE_CROSS_USE_FPS="$2"; shift 2 ;;
+        --native_cross_use_pointgpt)
+            NATIVE_CROSS_USE_POINTGPT="$2"; shift 2 ;;
+        --native_cross_pointgpt_ckpt)
+            NATIVE_CROSS_POINTGPT_CKPT="$2"; shift 2 ;;
+        --native_cross_pointgpt_config)
+            NATIVE_CROSS_POINTGPT_CONFIG="$2"; shift 2 ;;
+        --native_cross_pointgpt_max_depth)
+            NATIVE_CROSS_POINTGPT_MAX_DEPTH="$2"; shift 2 ;;
+        --native_cross_extend_ratio)
+            NATIVE_CROSS_EXTEND_RATIO="$2"; shift 2 ;;
+        --fusion_backend)
+            FUSION_BACKEND="$2"; shift 2 ;;
+        --pc_encoder_mode)
+            PC_ENCODER_MODE="$2"; shift 2 ;;
+        --fusion_variant)
+            FUSION_VARIANT="$2"; shift 2 ;;
+        --deep_supervision_weight)
+            DEEP_SUPERVISION_WEIGHT="$2"; shift 2 ;;
+        --gate_entropy_weight)
+            GATE_ENTROPY_WEIGHT="$2"; shift 2 ;;
+        --appearance_loss_weight)
+            APPEARANCE_LOSS_WEIGHT="$2"; shift 2 ;;
+        --depth_loss_weight)
+            DEPTH_LOSS_WEIGHT="$2"; shift 2 ;;
+        --geo_loss_start_epoch)
+            GEO_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --use_match_head)
+            USE_MATCH_HEAD="$2"; shift 2 ;;
+        --use_local_correlation)
+            USE_LOCAL_CORRELATION="$2"; shift 2 ;;
+        --correspondence_loss_weight)
+            CORRESPONDENCE_LOSS_WEIGHT="$2"; shift 2 ;;
+        --correspondence_loss_start_epoch)
+            CORRESPONDENCE_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --correspondence_loss_warmup_epochs)
+            CORRESPONDENCE_LOSS_WARMUP_EPOCHS="$2"; shift 2 ;;
+        --match_disable_fallback)
+            MATCH_DISABLE_FALLBACK="$2"; shift 2 ;;
+        --match_gate_use_init_ratio)
+            MATCH_GATE_USE_INIT_RATIO="$2"; shift 2 ;;
+        --match_confidence_threshold)
+            MATCH_CONFIDENCE_THRESHOLD="$2"; shift 2 ;;
+        --match_corr_validity_mode)
+            MATCH_CORR_VALIDITY_MODE="$2"; shift 2 ;;
+        --match_epnp_min_points)
+            MATCH_EPNP_MIN_POINTS="$2"; shift 2 ;;
+        --match_phase_noise_max_deg)
+            MATCH_PHASE_NOISE_MAX_DEG="$2"; shift 2 ;;
+        --compose_mode)
+            COMPOSE_MODE="$2"; shift 2 ;;
+        --num_correspondences)
+            NUM_CORRESPONDENCES="$2"; shift 2 ;;
+        --match_valid_ratio_min)
+            MATCH_VALID_RATIO_MIN="$2"; shift 2 ;;
+        --correspondence_supervision)
+            CORRESPONDENCE_SUPERVISION="$2"; shift 2 ;;
+        --differentiable_epnp)
+            DIFFERENTIABLE_EPNP="$2"; shift 2 ;;
+        --diff_epnp_warmup_epochs)
+            DIFF_EPNP_WARMUP_EPOCHS="$2"; shift 2 ;;
+        --bev_branch_lr_scale)
+            BEV_BRANCH_LR_SCALE="$2"; shift 2 ;;
+        --projfusion_image_hw)
+            if [[ $# -ge 3 ]]; then
+                PROJFUSION_IMAGE_HW="$2 $3"; shift 3
+            else
+                echo "❌ Error: --projfusion_image_hw requires 2 values (H W)"
+                exit 1
+            fi ;;
+        --augment_fov_crop_prob)
+            AUGMENT_FOV_CROP_PROB="$2"; shift 2 ;;
+        --augment_fov_crop_ratio_min)
+            AUGMENT_FOV_CROP_RATIO_MIN="$2"; shift 2 ;;
+        --augment_fov_crop_ratio_max)
+            AUGMENT_FOV_CROP_RATIO_MAX="$2"; shift 2 ;;
+        --augment_lidar_sparse_prob)
+            AUGMENT_LIDAR_SPARSE_PROB="$2"; shift 2 ;;
+        --augment_lidar_sparse_lines)
+            AUGMENT_LIDAR_SPARSE_LINES="$2"; shift 2 ;;
+        --augment_lidar_sparse_lines=*)
+            AUGMENT_LIDAR_SPARSE_LINES="${1#*=}"; shift ;;
+        --augment_lidar_vertical_fov)
+            AUGMENT_LIDAR_VERTICAL_FOV="$2"; shift 2 ;;
+        --augment_lidar_vertical_fov=*)
+            AUGMENT_LIDAR_VERTICAL_FOV="${1#*=}"; shift ;;
         *)
-            echo "❌ Unknown option: $1"
-            exit 1
+            if [[ "$1" == --* ]]; then
+                if [[ $# -ge 2 && "$2" != --* ]]; then
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1 $2"
+                    shift 2
+                elif [[ "$1" == *=* ]]; then
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    shift
+                else
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    shift
+                fi
+            else
+                echo "❌ Unknown option: $1"
+                exit 1
+            fi
             ;;
     esac
 done
@@ -672,7 +882,7 @@ if [ -n "$LR_SCHEDULE" ]; then
 fi
 if [ -z "$LR_SCHEDULE" ] || [ "$LR_SCHEDULE" = "step" ]; then
     [ "$_HAS_LR_SECTION" -eq 0 ] && { _maybe_sep; _HAS_LR_SECTION=1; }
-    _print_row "LR Step Size:"  "$_MODE_STEP_SIZE epochs"
+    _print_row "LR Step Size:"  "$_EFFECTIVE_STEP_SIZE epochs"
 fi
 [ -n "$WARMUP_EPOCHS" ] && {
     [ "$_HAS_LR_SECTION" -eq 0 ] && { _maybe_sep; _HAS_LR_SECTION=1; }
@@ -750,7 +960,7 @@ _section_end
 
 _maybe_sep
 _print_row "Num Epochs:"    "$_MODE_EPOCHS"
-_print_row "Save Ckpt:"     "every ${_MODE_SAVE_CKPT} epochs"
+_print_row "Save Ckpt:"     "every ${SAVE_CKPT_PER_EPOCHES:-${_MODE_SAVE_CKPT}} epochs"
 _print_row "Seed:"          "${SEED:-42}"
 [ -n "$PRETRAIN_CKPT" ] && \
 _print_row "Pretrain Ckpt:" "$PRETRAIN_CKPT"
@@ -923,6 +1133,7 @@ case $MODE in
     resume)   _MODE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-100}; _MODE_STEP_SIZE=20; _MODE_SAVE_CKPT=10 ;;
     *)        _MODE_EPOCHS=${NUM_EPOCHS_OVERRIDE:-400}; _MODE_STEP_SIZE=80; _MODE_SAVE_CKPT=40 ;;
 esac
+_EFFECTIVE_STEP_SIZE=${STEP_SIZE:-$_MODE_STEP_SIZE}
 
 _CONFIG_OUTPUT=$(_print_config_box 2>&1)
 echo "$_CONFIG_OUTPUT"
@@ -1086,6 +1297,19 @@ OPTIM_FLAGS=""
 [ -n "$VIS_FREQ" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_freq $VIS_FREQ"
 [ -n "$VALIDATE_DATA" ] && OPTIM_FLAGS="$OPTIM_FLAGS --validate_data $VALIDATE_DATA"
 [ -n "$ENABLE_CKPT_EVAL" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_ckpt_eval $ENABLE_CKPT_EVAL"
+[ -n "$ENABLE_MEDW_EVAL" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_medw_eval $ENABLE_MEDW_EVAL"
+[ -n "$ENABLE_JACOBIAN_EVAL" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_jacobian_eval $ENABLE_JACOBIAN_EVAL"
+[ -n "$JACOBIAN_EVAL_ANGLE_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --jacobian_eval_angle_deg $JACOBIAN_EVAL_ANGLE_DEG"
+[ -n "$JACOBIAN_EVAL_BATCHES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --jacobian_eval_batches $JACOBIAN_EVAL_BATCHES"
+[ -n "$JACOBIAN_EVAL_N_PROBES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --jacobian_eval_n_probes $JACOBIAN_EVAL_N_PROBES"
+[ -n "$JACOBIAN_LOSS_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --jacobian_loss_weight $JACOBIAN_LOSS_WEIGHT"
+[ -n "$JACOBIAN_LOSS_START_EPOCH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --jacobian_loss_start_epoch $JACOBIAN_LOSS_START_EPOCH"
+[ -n "$JACOBIAN_LOSS_PROBE_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --jacobian_loss_probe_deg $JACOBIAN_LOSS_PROBE_DEG"
+[ -n "$JACOBIAN_LOSS_INTERVAL" ] && OPTIM_FLAGS="$OPTIM_FLAGS --jacobian_loss_interval $JACOBIAN_LOSS_INTERVAL"
+[ -n "$MEDW_EVAL_MAX_FRAMES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --medw_eval_max_frames $MEDW_EVAL_MAX_FRAMES"
+[ -n "$ENABLE_DUAL_GATE_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_dual_gate_ckpt $ENABLE_DUAL_GATE_CKPT"
+[ -n "$DUAL_GATE_JACOBIAN_MIN" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_jacobian_min $DUAL_GATE_JACOBIAN_MIN"
+[ -n "$DUAL_GATE_MEDW_MAX" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_medw_max $DUAL_GATE_MEDW_MAX"
 [ -n "$VIS_SAMPLES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_samples $VIS_SAMPLES"
 [ -n "$VIS_POINTS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_points $VIS_POINTS"
 [ -n "$VIS_POINT_RADIUS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_point_radius $VIS_POINT_RADIUS"
@@ -1099,6 +1323,69 @@ OPTIM_FLAGS=""
 [ -n "$WEIGHT_DECAY" ] && OPTIM_FLAGS="$OPTIM_FLAGS --wd $WEIGHT_DECAY"
 [ -n "$TARGET_WIDTH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --target_width $TARGET_WIDTH"
 [ -n "$TARGET_HEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --target_height $TARGET_HEIGHT"
+[ -n "$TINIT_DROPOUT_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --tinit_dropout_prob $TINIT_DROPOUT_PROB"
+[ -n "$CONSISTENCY_LOSS_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --consistency_loss_weight $CONSISTENCY_LOSS_WEIGHT"
+[ -n "$CONSISTENCY_LOSS_START_EPOCH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --consistency_loss_start_epoch $CONSISTENCY_LOSS_START_EPOCH"
+[ -n "$PROGRESSIVE_ANGLE_START" ] && OPTIM_FLAGS="$OPTIM_FLAGS --progressive_angle_start $PROGRESSIVE_ANGLE_START"
+[ -n "$PROGRESSIVE_ANGLE_END" ] && OPTIM_FLAGS="$OPTIM_FLAGS --progressive_angle_end $PROGRESSIVE_ANGLE_END"
+[ -n "$PROGRESSIVE_WARMUP_EPOCHS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --progressive_warmup_epochs $PROGRESSIVE_WARMUP_EPOCHS"
+[ -n "$EMA_CONSISTENCY" ] && OPTIM_FLAGS="$OPTIM_FLAGS --ema_consistency $EMA_CONSISTENCY"
+[ -n "$EMA_DECAY" ] && OPTIM_FLAGS="$OPTIM_FLAGS --ema_decay $EMA_DECAY"
+[ -n "$CONTINUOUS_TINIT_NOISE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --continuous_tinit_noise $CONTINUOUS_TINIT_NOISE"
+[ -n "$CONTINUOUS_NOISE_MAX_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --continuous_noise_max_deg $CONTINUOUS_NOISE_MAX_DEG"
+[ -n "$ZERO_PERTURBATION_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --zero_perturbation_prob $ZERO_PERTURBATION_PROB"
+[ -n "$USE_GATED_INSTANCE_NORM" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_gated_instance_norm $USE_GATED_INSTANCE_NORM"
+[ -n "$GIN_INIT_GATE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --gin_init_gate $GIN_INIT_GATE"
+[ -n "$CORRELATION_FUSION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --correlation_fusion $CORRELATION_FUSION"
+[ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
+[ -n "$EXPLICIT_TINIT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --explicit_tinit $EXPLICIT_TINIT"
+[ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
+[ -n "$ITERATIVE_REFINE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --iterative_refine $ITERATIVE_REFINE"
+[ -n "$NATIVE_CROSS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross $NATIVE_CROSS"
+[ -n "$NATIVE_CROSS_PC_GROUPS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_pc_groups $NATIVE_CROSS_PC_GROUPS"
+[ -n "$NATIVE_CROSS_N_HARMONIC" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_n_harmonic $NATIVE_CROSS_N_HARMONIC"
+[ -n "$NATIVE_CROSS_N_LAYERS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_n_layers $NATIVE_CROSS_N_LAYERS"
+[ -n "$NATIVE_CROSS_DUAL_BRANCH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_dual_branch $NATIVE_CROSS_DUAL_BRANCH"
+[ -n "$NATIVE_CROSS_KNN" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_knn $NATIVE_CROSS_KNN"
+[ -n "$NATIVE_CROSS_USE_FPS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_use_fps $NATIVE_CROSS_USE_FPS"
+[ -n "$NATIVE_CROSS_USE_POINTGPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_use_pointgpt $NATIVE_CROSS_USE_POINTGPT"
+[ -n "$NATIVE_CROSS_POINTGPT_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_pointgpt_ckpt $NATIVE_CROSS_POINTGPT_CKPT"
+[ -n "$NATIVE_CROSS_POINTGPT_CONFIG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_pointgpt_config $NATIVE_CROSS_POINTGPT_CONFIG"
+[ -n "$NATIVE_CROSS_POINTGPT_MAX_DEPTH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_pointgpt_max_depth $NATIVE_CROSS_POINTGPT_MAX_DEPTH"
+[ -n "$NATIVE_CROSS_EXTEND_RATIO" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_extend_ratio $NATIVE_CROSS_EXTEND_RATIO"
+[ -n "$FUSION_BACKEND" ] && OPTIM_FLAGS="$OPTIM_FLAGS --fusion_backend $FUSION_BACKEND"
+[ -n "$PC_ENCODER_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --pc_encoder_mode $PC_ENCODER_MODE"
+[ -n "$FUSION_VARIANT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --fusion_variant $FUSION_VARIANT"
+[ -n "$DEEP_SUPERVISION_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --deep_supervision_weight $DEEP_SUPERVISION_WEIGHT"
+[ -n "$GATE_ENTROPY_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --gate_entropy_weight $GATE_ENTROPY_WEIGHT"
+[ -n "$APPEARANCE_LOSS_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --appearance_loss_weight $APPEARANCE_LOSS_WEIGHT"
+[ -n "$DEPTH_LOSS_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --depth_loss_weight $DEPTH_LOSS_WEIGHT"
+[ -n "$GEO_LOSS_START_EPOCH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --geo_loss_start_epoch $GEO_LOSS_START_EPOCH"
+[ -n "$USE_MATCH_HEAD" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_match_head $USE_MATCH_HEAD"
+[ -n "$USE_LOCAL_CORRELATION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_local_correlation $USE_LOCAL_CORRELATION"
+[ -n "$CORRESPONDENCE_LOSS_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --correspondence_loss_weight $CORRESPONDENCE_LOSS_WEIGHT"
+[ -n "$CORRESPONDENCE_LOSS_START_EPOCH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --correspondence_loss_start_epoch $CORRESPONDENCE_LOSS_START_EPOCH"
+[ -n "$CORRESPONDENCE_LOSS_WARMUP_EPOCHS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --correspondence_loss_warmup_epochs $CORRESPONDENCE_LOSS_WARMUP_EPOCHS"
+[ -n "$MATCH_DISABLE_FALLBACK" ] && OPTIM_FLAGS="$OPTIM_FLAGS --match_disable_fallback $MATCH_DISABLE_FALLBACK"
+[ -n "$MATCH_GATE_USE_INIT_RATIO" ] && OPTIM_FLAGS="$OPTIM_FLAGS --match_gate_use_init_ratio $MATCH_GATE_USE_INIT_RATIO"
+[ -n "$MATCH_CONFIDENCE_THRESHOLD" ] && OPTIM_FLAGS="$OPTIM_FLAGS --match_confidence_threshold $MATCH_CONFIDENCE_THRESHOLD"
+[ -n "$MATCH_CORR_VALIDITY_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --match_corr_validity_mode $MATCH_CORR_VALIDITY_MODE"
+[ -n "$MATCH_EPNP_MIN_POINTS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --match_epnp_min_points $MATCH_EPNP_MIN_POINTS"
+[ -n "$MATCH_PHASE_NOISE_MAX_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --match_phase_noise_max_deg $MATCH_PHASE_NOISE_MAX_DEG"
+[ -n "$COMPOSE_MODE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --compose_mode $COMPOSE_MODE"
+[ -n "$NUM_CORRESPONDENCES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --num_correspondences $NUM_CORRESPONDENCES"
+[ -n "$MATCH_VALID_RATIO_MIN" ] && OPTIM_FLAGS="$OPTIM_FLAGS --match_valid_ratio_min $MATCH_VALID_RATIO_MIN"
+[ -n "$CORRESPONDENCE_SUPERVISION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --correspondence_supervision $CORRESPONDENCE_SUPERVISION"
+[ -n "$DIFFERENTIABLE_EPNP" ] && OPTIM_FLAGS="$OPTIM_FLAGS --differentiable_epnp $DIFFERENTIABLE_EPNP"
+[ -n "$DIFF_EPNP_WARMUP_EPOCHS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --diff_epnp_warmup_epochs $DIFF_EPNP_WARMUP_EPOCHS"
+[ -n "$BEV_BRANCH_LR_SCALE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --bev_branch_lr_scale $BEV_BRANCH_LR_SCALE"
+[ -n "$PROJFUSION_IMAGE_HW" ] && OPTIM_FLAGS="$OPTIM_FLAGS --projfusion_image_hw $PROJFUSION_IMAGE_HW"
+[ -n "$AUGMENT_FOV_CROP_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_fov_crop_prob $(_quote_cli_val "$AUGMENT_FOV_CROP_PROB")"
+[ -n "$AUGMENT_FOV_CROP_RATIO_MIN" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_fov_crop_ratio_min $(_quote_cli_val "$AUGMENT_FOV_CROP_RATIO_MIN")"
+[ -n "$AUGMENT_FOV_CROP_RATIO_MAX" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_fov_crop_ratio_max $(_quote_cli_val "$AUGMENT_FOV_CROP_RATIO_MAX")"
+[ -n "$AUGMENT_LIDAR_SPARSE_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --augment_lidar_sparse_prob $(_quote_cli_val "$AUGMENT_LIDAR_SPARSE_PROB")"
+[ -n "$AUGMENT_LIDAR_SPARSE_LINES" ] && _opt_flag_append "--augment_lidar_sparse_lines" "$AUGMENT_LIDAR_SPARSE_LINES"
+[ -n "$AUGMENT_LIDAR_VERTICAL_FOV" ] && _opt_flag_append "--augment_lidar_vertical_fov" "$AUGMENT_LIDAR_VERTICAL_FOV"
 
 DEFORMABLE_VAL=${USE_DEFORMABLE:-0}
 [ -n "$BEV_POOL_FACTOR" ] && OPTIM_FLAGS="$OPTIM_FLAGS --bev_pool_factor $BEV_POOL_FACTOR"
@@ -1210,7 +1497,11 @@ fi
 
 case $MODE in
     scratch)
-        echo "Training from scratch..."
+        if [ -n "${RESUME_CKPT:-}" ] && [ "${RESUME_CKPT}" != "null" ]; then
+            echo "Starting scratch-mode training (resume_ckpt=${RESUME_CKPT}; Auto-resume 日志见 train.log)..."
+        else
+            echo "Training from scratch (no resume_ckpt)..."
+        fi
         LR_SCRATCH=${LEARNING_RATE:-1e-4}
         $LAUNCHER kitti-bev-calib/train_kitti.py \
             --log_dir "$LOG_DIR" \
@@ -1226,13 +1517,13 @@ case $MODE in
             --xyz_only 1 \
             --scheduler 1 \
             --lr $LR_SCRATCH \
-            --step_size 80 \
+            --step_size $_EFFECTIVE_STEP_SIZE \
             --use_custom_dataset 1 \
             $COMPILE_FLAG \
             $ROTATION_ONLY_FLAG \
             $AXIS_LOSS_FLAG \
             $WEIGHT_AXIS_FLAG \
-            $OPTIM_FLAGS
+            $OPTIM_FLAGS $PASSTHROUGH_ARGS
         ;;
     
     finetune)
@@ -1264,7 +1555,7 @@ case $MODE in
             --trans_range $TRANS_RANGE \
             --lr $LR_FINETUNE \
             --scheduler 1 \
-            --step_size 20 \
+            --step_size $_EFFECTIVE_STEP_SIZE \
             --deformable $DEFORMABLE_VAL \
             --bev_encoder 1 \
             --xyz_only 1 \
@@ -1273,7 +1564,7 @@ case $MODE in
             $ROTATION_ONLY_FLAG \
             $AXIS_LOSS_FLAG \
             $WEIGHT_AXIS_FLAG \
-            $OPTIM_FLAGS
+            $OPTIM_FLAGS $PASSTHROUGH_ARGS
         ;;
     
     resume)
@@ -1308,13 +1599,13 @@ case $MODE in
             --xyz_only 1 \
             --scheduler 1 \
             --lr $LR_RESUME \
-            --step_size 20 \
+            --step_size $_EFFECTIVE_STEP_SIZE \
             --use_custom_dataset 1 \
             $COMPILE_FLAG \
             $ROTATION_ONLY_FLAG \
             $AXIS_LOSS_FLAG \
             $WEIGHT_AXIS_FLAG \
-            $OPTIM_FLAGS
+            $OPTIM_FLAGS $PASSTHROUGH_ARGS
         ;;
     
     *)

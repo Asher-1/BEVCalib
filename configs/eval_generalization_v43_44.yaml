@@ -1,0 +1,165 @@
+# V43 + V44 泛化评估配置 (含 from_v42S1 变体 + best_val/best_medw)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v43_44.yaml --parallel -1 --eval_max_frames_per_seq 400
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v43_44"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+
+models:
+  # ===== V43 pipeline: scratch S1 → S2 → S3 =====
+  - label: "v43-S1-best-dual"
+    dir_name: "model_small_5deg_v43_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 S1 dual-gate best (5° training, MEDW=0.074°)"
+
+  - label: "v43-S1-best-val"
+    dir_name: "model_small_5deg_v43_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 S1 best-val (5° training, val_rot=0.22°)"
+
+  - label: "v43-S2-best-dual"
+    dir_name: "model_small_3deg_v43_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 S2 dual-gate best (3° fine-tune, MEDW=0.048°)"
+
+  - label: "v43-S2-best-val"
+    dir_name: "model_small_3deg_v43_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 S2 best-val (3° fine-tune, val_rot=0.17°)"
+
+  - label: "v43-S3-best-dual"
+    dir_name: "model_small_1deg_v43_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 S3 dual-gate best (1° precision, MEDW=0.041°)"
+
+  - label: "v43-S3-best-val"
+    dir_name: "model_small_1deg_v43_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 S3 best-val (1° precision, val_rot=0.20°)"
+
+  # ===== V43 from V42-S1: V42-S1 → V43-S2 → V43-S3 =====
+  - label: "v43-from-v42S1-S2-best-dual"
+    dir_name: "model_small_3deg_v43_from_v42S1_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 from V42-S1 S2 dual-gate best (MEDW=0.045°)"
+
+  - label: "v43-from-v42S1-S3-best-dual"
+    dir_name: "model_small_1deg_v43_from_v42S1_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V43 from V42-S1 S3 dual-gate best (MEDW=0.039°)"
+
+  # ===== V44 pipeline: DLA + PitchFusion + DomainAug =====
+  - label: "v44-S1-best-dual"
+    dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S1 dual-gate best (5° + DLA/PitchFusion, MEDW=0.089°)"
+
+  - label: "v44-S1-best-val"
+    dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S1 best-val (5° + DLA/PitchFusion, val_rot=0.26°)"
+
+  - label: "v44-S1-best-medw"
+    dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_medw.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S1 best-medw (5° + DLA/PitchFusion, MEDW=0.089°)"
+
+  - label: "v44-S2-best-dual"
+    dir_name: "model_small_3deg_v44_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S2 dual-gate best (3° + InstanceNorm, MEDW=0.043°)"
+
+  - label: "v44-S2-best-val"
+    dir_name: "model_small_3deg_v44_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S2 best-val (3° + InstanceNorm, val_rot=0.20°)"
+
+  - label: "v44-S3-best-dual"
+    dir_name: "model_small_1deg_v44_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S3 dual-gate best (1° + InstanceNorm, MEDW=0.044°)"
+
+  - label: "v44-S3-best-val"
+    dir_name: "model_small_1deg_v44_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V44 S3 best-val (1° + InstanceNorm, val_rot=0.27°)"

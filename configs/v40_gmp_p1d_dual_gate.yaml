@@ -1,0 +1,149 @@
+# V40 P1d + Dual Gate — Match/Corr 强化 + MEDW∧Jacobian 联合选点
+#
+# 训练目标：
+#   ckpt_best_dual.pth 仅在 MEDW200 < 0.30° 且 Jacobian@±10° > 0.85 时更新
+#   ckpt_best_medw.pth 仍按 MEDW 单独更新（对照/ablation）
+#
+# Correspondence 显式监督（已在 defaults 启用，见下方注释）
+#
+# Usage:
+#   bash train_universal.sh configs/v40_gmp_p1d_dual_gate.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+    PROJFUSION_ROOT: /mnt/drtraining/user/dahailu/code/ProjFusion
+
+  params:
+    fusion_backend: geo_match_proj
+    pc_encoder_mode: pointgpt2bev
+
+    batch_size: 32
+    learning_rate: 4.6e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 10.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+
+    # --- Dual Gate checkpoint selection ---
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.30
+
+    native_cross: 0
+    cam2bev_mode: query
+    backbone_type: dinov2
+    backbone_variant: dinov2-small
+    freeze_backbone: 1
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,2.5,1.0"
+    use_balanced_axis_loss: 1
+
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+
+    augment_mount_jitter_prob: 0.6
+    augment_mount_jitter_rot_sigma: 5.0
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.25
+    augment_pitch_flip_max_deg: 4.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.15
+    augment_intrinsic: 0.05
+    augment_intrinsic_cxcy: 0.03
+
+    native_cross_extend_ratio: 2.5
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 30
+    cosine_Tmult: 2
+    warmup_epochs: 6
+    backbone_lr_scale: 0.0
+
+    max_frames_per_seq: 500
+    save_ckpt_per_epoches: 15
+    eval_epoches: 15
+
+    iterative_refine: 0
+    projfusion_image_hw: [252, 448]
+    appearance_loss_weight: 0.1
+    depth_loss_weight: 0.05
+    geo_loss_start_epoch: 5
+
+    # --- Correspondence 显式监督 (P1b/P1d) ---
+    use_match_head: 1
+    use_local_correlation: 1
+    compose_mode: match_then_refine
+    num_correspondences: 64
+    correspondence_supervision: 1
+    correspondence_loss_weight: 5.0
+    match_valid_ratio_min: 0.15
+    differentiable_epnp: 1
+    diff_epnp_warmup_epochs: 2
+
+    angle_range_deg: 10
+    progressive_angle_start: 10
+    progressive_angle_end: 3
+    progressive_warmup_epochs: 50
+    eval_angle_range_deg: 3
+
+    native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+    native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+    native_cross_pointgpt_max_depth: 60.0
+
+    pose_aware_sampling: true
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    seed: 42
+
+    pretrain_ckpt: logs/all_training_data/model_small_10deg_v39_fast_exp1_wide_10deg/all_training_data_scratch/checkpoint/ckpt_best_medw.pth
+
+experiments:
+  - name: "v40_gmp_p1d_dual_gate"
+    description: "P1d strong match + dual gate ckpt (MEDW<0.3 & Jac>0.85)"
+    dataset: "all"
+    version: "v40_gmp_p1d_dual_gate"
+    params:
+      trans_range: 0.0
+      num_epochs: 60
+
+  - name: "v40_gmp_p1d_dual_gate_smoke"
+    description: "2ep smoke for dual gate + correspondence"
+    dataset: "all"
+    version: "v40_gmp_p1d_dual_gate_smoke"
+    skip: true
+    skip_reason: "手动调试"
+    params:
+      trans_range: 0.0
+      num_epochs: 2
+      eval_epoches: 1
+      geo_loss_start_epoch: 0
+      diff_epnp_warmup_epochs: 0

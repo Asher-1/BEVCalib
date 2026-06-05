@@ -1,0 +1,117 @@
+# V39 精细训练：从0.26°优化到0.1°
+#
+# 当前状态：
+#   - Epoch 121: Roll=0.135° Pitch=0.160° Yaw=0.103° (MEDW=0.262°)
+#   - Yaw已达标，Roll接近，Pitch需重点优化
+#
+# 策略：
+#   Phase 2a: ±2° 精细训练（提升Roll和Pitch）
+#   Phase 2b: ±1° 极致优化（如果2a后仍未达标）
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+    PROJFUSION_ROOT: /mnt/drtraining/user/dahailu/code/ProjFusion
+
+  params:
+    # Proj-only最优配置
+    fusion_backend: proj_only
+    pc_encoder_mode: pointgpt2bev
+    batch_size: 24
+    learning_rate: 1.0e-4  # 更小的LR用于精细调整
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 10.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    native_cross: 0
+    cam2bev_mode: query
+    backbone_type: dinov2
+    backbone_variant: dinov2-small
+    freeze_backbone: 1
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,2.5,1.0"  # Roll, Pitch, Yaw - 加强Pitch权重
+    use_balanced_axis_loss: 1
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+    # 增强Pitch数据增强
+    augment_mount_jitter_prob: 0.5
+    augment_mount_jitter_rot_sigma: 3.0
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.35  # 0.20 → 0.35（增强Pitch）
+    augment_pitch_flip_max_deg: 5.0  # 3.0 → 5.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    native_cross_extend_ratio: 2.5
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 25  # 更短的周期用于快速收敛
+    cosine_Tmult: 2
+    warmup_epochs: 5
+    backbone_lr_scale: 0.0
+    max_frames_per_seq: 1000  # 恢复完整数据
+    save_ckpt_per_epoches: 10
+    eval_epoches: 10
+    iterative_refine: 0
+    projfusion_image_hw: [224, 448]
+    native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+    native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+    native_cross_pointgpt_max_depth: 60.0
+    pose_aware_sampling: true
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    seed: 42
+
+experiments:
+  # Phase 2a: ±2° 精细训练
+  - name: "v39_phase2a_proj_finetune_2deg"
+    description: "Fine-tune from Epoch 121 ckpt with ±2° for sub-0.1° precision"
+    dataset: "all"
+    version: "v39_phase2a_proj_finetune_2deg"
+    params:
+      angle_range_deg: 2  # ±2° 精细训练
+      trans_range: 0.10  # 也缩小平移范围
+      pretrain_ckpt: logs/all_training_data/model_small_5deg_v39_M1_htcn_main_f1000/all_training_data_scratch/checkpoint/ckpt_epoch_121.pth
+      num_epochs: 80  # 充分训练
+      
+  # Phase 2b: ±1° 极致优化（如果2a后仍未达0.1°）
+  - name: "v39_phase2b_proj_finetune_1deg"
+    description: "Ultra-fine tuning with ±1° for 0.08-0.1° precision"
+    dataset: "all"
+    version: "v39_phase2b_proj_finetune_1deg"
+    skip: true
+    skip_reason: "Enable after Phase 2a if MEDW > 0.12° per axis"
+    params:
+      angle_range_deg: 1  # ±1° 极致优化
+      trans_range: 0.05
+      axis_weights: "1.0,3.0,1.0"  # 进一步加强Pitch
+      pretrain_ckpt: logs/all_training_data/v39_phase2a_proj_finetune_2deg/all_training_data_scratch/checkpoint/ckpt_best_medw.pth
+      learning_rate: 5.0e-5  # 更小LR
+      num_epochs: 50

@@ -1,0 +1,172 @@
+# V46 泛化评估配置
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v46.yaml --parallel -1 --eval_max_frames_per_seq 400
+#   python run_generalization_eval.py --config configs/eval_generalization_v46.yaml --generalization_diag --parallel -1 --eval_max_frames_per_seq 400
+#
+# 评估内容:
+#   - V45 GIN S1/S2/S3 Full (baseline)
+#   - V46 S1/S2/S3 Quick + Full
+#   - best_dual + best_val checkpoints
+#   - generalization_diag: zero-drift / inject / shortcut / GS_medw (MEDW多帧聚合)
+#
+# 使用 exclude_seqs 排除有问题的序列:
+#   python run_generalization_eval.py --config configs/eval_generalization_v46.yaml --exclude_seqs seq07
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v46"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v45_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+
+models:
+  # ===== V45 GIN Full Baselines =====
+  - label: "v45gin-S1-full-dual"
+    dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S1 Full baseline"
+
+  - label: "v45gin-S2-full-dual"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Full (val=0.087°, MEDW=0.027°, Jac=0.990)"
+
+  - label: "v45gin-S2-full-val"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Full best_val"
+
+  - label: "v45gin-S3-full-dual"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full (val=0.105°, GS=0.627 - generalization degraded)"
+
+  - label: "v45gin-S3-full-val"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full best_val"
+
+  # ===== V45b S1 Quick (strong generalization baseline, GS=0.319) =====
+  - label: "v45b-S1q-dual"
+    dir_name: "model_small_5deg_v45b_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45b S1 Quick (GS=0.319, strong generalization baseline)"
+
+  # ===== V46 Quick =====
+  - label: "v46-S1-quick-dual"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick: symmetric perturb + enhanced per_axis"
+
+  - label: "v46-S1-quick-val"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick best_val"
+
+  - label: "v46-S2-quick-dual"
+    dir_name: "model_small_3deg_v46_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S2 Quick: ±3° symmetric"
+
+  - label: "v46-S3-quick-dual"
+    dir_name: "model_small_2deg_v46_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S3 Quick: ±2° (wider than V45's ±1°) to prevent collapse"
+
+  # ===== V46 Full =====
+  - label: "v46-S1-full-dual"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Full: symmetric perturb + enhanced per_axis"
+
+  - label: "v46-S2-full-dual"
+    dir_name: "model_small_3deg_v46_cf_bev_r_S2"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S2 Full: ±3° symmetric"
+
+  - label: "v46-S3-full-dual"
+    dir_name: "model_small_2deg_v46_cf_bev_r_S3"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S3 Full: ±2° prevent generalization collapse"
+
+  - label: "v46-S3-full-val"
+    dir_name: "model_small_2deg_v46_cf_bev_r_S3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S3 Full best_val"

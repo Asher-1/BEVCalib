@@ -114,4 +114,7 @@ class SwinT_tiny_Encoder(nn.Module):
 
         ret = [all_reshaped[i] for i in self.output_indices]
         out = self.FPN(ret)
+        if getattr(self, '_return_multiscale', False):
+            raw = [all_reshaped[i] for i in self.output_indices]
+            return out[0].view(B, N, self.out_channels, self.fH, self.fW), raw
         return out[0].view(B, N, self.out_channels, self.fH, self.fW)

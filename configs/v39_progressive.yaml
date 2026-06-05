@@ -1,0 +1,162 @@
+# V39 渐进式训练方案：平衡精度与泛化
+#
+# 解决矛盾：
+#   - 大扰动（±10°）→ 克服shortcut，提升Jacobian
+#   - 小扰动（±3-5°）→ 聚焦实际场景，提升MEDW
+#
+# 3阶段策略：
+#   Stage 1: ±10° 广泛泛化，强几何约束
+#   Stage 2: ±5° 正常范围，平衡性能
+#   Stage 3: ±3° 实际部署，精细调优（可选）
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+    PROJFUSION_ROOT: /mnt/drtraining/user/dahailu/code/ProjFusion
+
+  params:
+    # Proj-only最优配置
+    fusion_backend: proj_only
+    pc_encoder_mode: pointgpt2bev
+    batch_size: 24
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 10.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    native_cross: 0
+    cam2bev_mode: query
+    backbone_type: dinov2
+    backbone_variant: dinov2-small
+    freeze_backbone: 1
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.5,1.0"  # Roll, Pitch, Yaw
+    use_balanced_axis_loss: 1
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+    # v37泛化增强
+    augment_mount_jitter_prob: 0.5
+    augment_mount_jitter_rot_sigma: 3.0
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    native_cross_extend_ratio: 2.5
+    lr_schedule: cosine_warm_restarts
+    warmup_epochs: 10
+    backbone_lr_scale: 0.0
+    max_frames_per_seq: 1000
+    save_ckpt_per_epoches: 20
+    eval_epoches: 20
+    iterative_refine: 0
+    projfusion_image_hw: [224, 448]
+    native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+    native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+    native_cross_pointgpt_max_depth: 60.0
+    pose_aware_sampling: true
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    seed: 42
+
+experiments:
+  # ============================================================
+  # Stage 1: 广泛泛化训练（克服shortcut）
+  # ============================================================
+  - name: "v39_stage1_wide_generalization"
+    description: "±10° + strong PC_reproj to overcome shortcut, target Jacobian>0.85"
+    dataset: "all"
+    version: "v39_stage1_wide_generalization"
+    params:
+      # 核心改进1：扩大扰动范围
+      angle_range_deg: 10  # ±10° 覆盖正常+异常场景
+      trans_range: 0.20
+      
+      # 核心改进2：增强几何约束权重（关键！）
+      # 在train_kitti.py中，需要添加这些参数传递给realworld_loss
+      # 当前默认：weight_PCreproj=0.5
+      # 新设置：weight_PCreproj=1.5（3倍权重）
+      # 注意：需要修改train_kitti.py添加命令行参数支持
+      
+      learning_rate: 4.0e-4
+      num_epochs: 100
+      cosine_T0: 50
+      cosine_Tmult: 2
+      
+      # 从最佳checkpoint继续（Epoch 41 MEDW最优）
+      pretrain_ckpt: logs/all_training_data/model_small_5deg_v39_M1_htcn_main_f1000/all_training_data_scratch/checkpoint/ckpt_epoch_41.pth
+      
+  # ============================================================
+  # Stage 2: 正常范围训练（平衡精度与泛化）
+  # ============================================================
+  - name: "v39_stage2_normal_range"
+    description: "±5° balanced training, target Jacobian>0.75 and MEDW<0.3°"
+    dataset: "all"
+    version: "v39_stage2_normal_range"
+    skip: true
+    skip_reason: "Enable after Stage 1 completes and Jacobian>0.85 confirmed"
+    params:
+      angle_range_deg: 5   # ±5° 正常训练范围
+      trans_range: 0.15
+      
+      # Stage 2恢复正常权重平衡
+      # weight_PCreproj: 1.0（正常）
+      
+      learning_rate: 2.0e-4  # 更小LR用于精细调整
+      num_epochs: 80
+      cosine_T0: 40
+      cosine_Tmult: 2
+      
+      # 从Stage 1最佳checkpoint继续
+      pretrain_ckpt: logs/all_training_data/v39_stage1_wide_generalization/all_training_data_scratch/checkpoint/ckpt_best_medw.pth
+      
+  # ============================================================
+  # Stage 3: 实际部署精调（可选，如需0.12°级别精度）
+  # ============================================================
+  - name: "v39_stage3_deployment_tuning"
+    description: "±3° fine-tuning for actual deployment scenario, target MEDW<0.15°"
+    dataset: "all"
+    version: "v39_stage3_deployment_tuning"
+    skip: true
+    skip_reason: "Enable only if Stage 2 MEDW>0.15° and need further refinement"
+    params:
+      angle_range_deg: 3   # ±3° 实际部署范围
+      trans_range: 0.10
+      
+      axis_weights: "1.0,2.0,1.0"  # 加强Pitch权重
+      augment_pitch_flip_prob: 0.30  # 增强Pitch数据增强
+      
+      learning_rate: 1.0e-4  # 极小LR
+      num_epochs: 50
+      cosine_T0: 25
+      cosine_Tmult: 2
+      
+      pretrain_ckpt: logs/all_training_data/v39_stage2_normal_range/all_training_data_scratch/checkpoint/ckpt_best_medw.pth

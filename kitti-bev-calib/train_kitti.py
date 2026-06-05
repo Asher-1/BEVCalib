@@ -22,7 +22,139 @@ import shutil
 import cv2
 import os
 import time
+import json
 from contextlib import nullcontext
+
+
+def _accumulate_fusion_gate_stats(raw_model, accum):
+    """Accumulate gated-fusion weights for collapse monitoring."""
+    meta = getattr(raw_model, '_last_fusion_meta', None)
+    if not meta or 'gate_bev' not in meta:
+        return
+    gb = meta['gate_bev'].detach().float()
+    gp = meta['gate_proj'].detach().float()
+    accum['gate_bev_sum'] += gb.sum().item()
+    accum['gate_proj_sum'] += gp.sum().item()
+    n = gb.numel()
+    accum['gate_count'] += n
+    w = torch.stack([gb, gp], dim=-1).clamp(min=1e-8)
+    ent = -(w * w.log()).sum(dim=-1) / np.log(2)
+    accum['gate_entropy_sum'] += ent.sum().item()
+
+
+def _loss_scalar(loss, key, default=None):
+    if key not in loss:
+        return default
+    v = loss[key]
+    return float(v.item()) if hasattr(v, 'item') else float(v)
+
+
+def _format_gmp_step_suffix(loss, correspondence_loss_weight=0.0):
+    """GMP step log: match/EPnP + geo metrics (when present in loss dict)."""
+    chunks = []
+    match_parts = []
+    corr_px = _loss_scalar(loss, 'correspondence_loss')
+    if corr_px is not None:
+        corr_w = float(correspondence_loss_weight or 0.0)
+        if corr_w > 0:
+            match_parts.append(
+                f"corr={corr_px:.1f}px×{corr_w:g}={corr_px * corr_w:.0f}")
+        else:
+            match_parts.append(f"corr={corr_px:.1f}px")
+    v_gt = _loss_scalar(loss, 'match_valid_ratio_gt')
+    v_init = _loss_scalar(loss, 'match_valid_ratio_init')
+    if v_gt is not None:
+        match_parts.append(f"valid_gt={v_gt:.3f}")
+    if v_init is not None:
+        match_parts.append(f"valid_init={v_init:.3f}")
+    elif _loss_scalar(loss, 'match_valid_ratio') is not None:
+        match_parts.append(f"valid={_loss_scalar(loss, 'match_valid_ratio'):.3f}")
+    if _loss_scalar(loss, 'match_fallback_ratio') is not None:
+        match_parts.append(f"fb={_loss_scalar(loss, 'match_fallback_ratio'):.3f}")
+    if _loss_scalar(loss, 'epnp_insufficient_ratio') is not None:
+        match_parts.append(
+            f"epnp_fail={_loss_scalar(loss, 'epnp_insufficient_ratio'):.3f}")
+    if _loss_scalar(loss, 'epnp_mean_effective_points') is not None:
+        match_parts.append(
+            f"epnp_pts={_loss_scalar(loss, 'epnp_mean_effective_points'):.1f}")
+    if _loss_scalar(loss, 'epnp_grad_detached') is not None:
+        match_parts.append(f"epnp_grad={int(_loss_scalar(loss, 'epnp_grad_detached'))}")
+    if _loss_scalar(loss, 'corr_valid_ratio') is not None:
+        match_parts.append(f"corr_win={_loss_scalar(loss, 'corr_valid_ratio'):.3f}")
+    if match_parts:
+        chunks.append(f"match[{' '.join(match_parts)}]")
+    if _loss_scalar(loss, 'appearance_loss') is not None:
+        geo = f"app={_loss_scalar(loss, 'appearance_loss'):.4f}"
+        if _loss_scalar(loss, 'depth_loss') is not None:
+            geo += f" dep={_loss_scalar(loss, 'depth_loss'):.4f}"
+        if _loss_scalar(loss, 'geo_valid_ratio') is not None:
+            geo += f" gvalid={_loss_scalar(loss, 'geo_valid_ratio'):.3f}"
+        chunks.append(f"geo[{geo}]")
+    return f" | {' | '.join(chunks)}" if chunks else ""
+
+
+def _format_step_loss_head(total_loss, loss, batch_errors, rotation_only,
+                           correspondence_loss_weight=0.0):
+    """Human-readable step loss: separate weighted total from pose / aux terms."""
+    tl = float(total_loss.item() if hasattr(total_loss, 'item') else total_loss)
+    rot_err = batch_errors['rot_error']
+    rot_loss_deg = _loss_scalar(loss, 'rotation_loss')
+    parts = [f"total={tl:.2f} (w-sum)"]
+    if rot_loss_deg is not None:
+        parts.append(f"pose_L={rot_loss_deg:.2f}°")
+    parts.append(f"Rot err={rot_err:.2f}°")
+    corr_px = _loss_scalar(loss, 'correspondence_loss')
+    corr_w = float(correspondence_loss_weight or 0.0)
+    if corr_px is not None and corr_w > 0:
+        parts.append(f"corr×{corr_w:g}={corr_px * corr_w:.0f}")
+    elif corr_px is not None:
+        parts.append(f"corr={corr_px:.1f}px")
+    cons = _loss_scalar(loss, 'v32_consistency_loss')
+    if cons is not None:
+        parts.append(f"cons={cons:.4f}")
+    jac_w = _loss_scalar(loss, 'jacobian_weighted')
+    if jac_w is not None:
+        parts.append(f"jac={jac_w:.4f}")
+    mag_p = _loss_scalar(loss, 'magnitude_pred_deg')
+    mag_g = _loss_scalar(loss, 'magnitude_gt_deg')
+    if mag_p is not None and mag_g is not None:
+        parts.append(f"mag={mag_p:.2f}/{mag_g:.2f}°")
+    overcorr = _loss_scalar(loss, 'overcorr_ratio')
+    if overcorr is not None:
+        parts.append(f"oc={overcorr:.2f}")
+    head = "Loss: " + ", ".join(parts)
+    if not rotation_only:
+        head += (f", Trans err={batch_errors['trans_error']:.4f}m "
+                 f"(Fwd:{batch_errors['fwd_error']:.4f} Lat:{batch_errors['lat_error']:.4f} "
+                 f"Ht:{batch_errors['ht_error']:.4f})")
+    return head
+
+
+def _log_gmp_step_scalars(writer, loss, global_step):
+    if writer is None:
+        return
+    for key, tag in (
+        ('correspondence_loss', 'GMP/train/correspondence_loss_px'),
+        ('match_valid_ratio', 'GMP/train/match_valid_ratio'),
+        ('match_valid_ratio_init', 'GMP/train/match_valid_ratio_init'),
+        ('match_valid_ratio_gt', 'GMP/train/match_valid_ratio_gt'),
+        ('match_fallback_ratio', 'GMP/train/match_fallback_ratio'),
+        ('epnp_insufficient_ratio', 'GMP/train/epnp_insufficient_ratio'),
+        ('epnp_mean_effective_points', 'GMP/train/epnp_mean_effective_points'),
+        ('epnp_grad_detached', 'GMP/train/epnp_grad_detached'),
+        ('corr_valid_ratio', 'GMP/train/corr_valid_ratio'),
+        ('appearance_loss', 'GMP/train/appearance_loss'),
+        ('depth_loss', 'GMP/train/depth_loss'),
+        ('geo_valid_ratio', 'GMP/train/geo_valid_ratio'),
+        ('magnitude_loss', 'V46/train/magnitude_loss'),
+        ('magnitude_pred_deg', 'V46/train/magnitude_pred_deg'),
+        ('magnitude_gt_deg', 'V46/train/magnitude_gt_deg'),
+        ('overcorr_ratio', 'V46/train/overcorr_ratio'),
+        ('overcorr_scale', 'V46/train/overcorr_scale'),
+    ):
+        v = _loss_scalar(loss, key)
+        if v is not None:
+            writer.add_scalar(tag, v, global_step)
 
 
 def set_seed(seed, rank=0):
@@ -167,6 +299,581 @@ from visualization import (
     compute_pose_errors
 )
 
+
+def _compute_medw_deploy(T_pred_arr, T_gt_arr, seq_arr, unique_seqs, window=200):
+    """MEDW{N}: uniform sample N frames/seq, median axis-angle aggregate, compare to GT."""
+    from scipy.spatial.transform import Rotation as ScipyRot
+
+    per_seq_errs = {'rot_error': [], 'roll_error': [], 'pitch_error': [], 'yaw_error': []}
+    seq_aa_cache = {}
+    seq_t_cache = {}
+    for sid in unique_seqs:
+        mask = seq_arr == sid
+        seq_Rs = T_pred_arr[mask, :3, :3]
+        seq_ts = T_pred_arr[mask, :3, 3]
+        if len(seq_Rs) == 0:
+            continue
+        seq_aa_cache[sid] = ScipyRot.from_matrix(seq_Rs).as_rotvec()
+        seq_t_cache[sid] = seq_ts
+
+    for sid in unique_seqs:
+        if sid not in seq_aa_cache:
+            continue
+        mask = seq_arr == sid
+        gt_T = T_gt_arr[mask][0]
+        seq_aa_full = seq_aa_cache[sid]
+        seq_ts_full = seq_t_cache[sid]
+        n = len(seq_aa_full)
+        ns = min(window, n)
+        indices = np.linspace(0, n - 1, num=ns, dtype=int)
+        aa_sub = seq_aa_full[indices]
+        ts_sub = seq_ts_full[indices]
+        aa_med = np.median(aa_sub, axis=0)
+        R_avg = ScipyRot.from_rotvec(aa_med).as_matrix()
+        t_avg = np.mean(ts_sub, axis=0)
+        T_agg = np.eye(4, dtype=np.float64)
+        T_agg[:3, :3] = R_avg
+        T_agg[:3, 3] = t_avg
+        errs = compute_pose_errors(T_agg, gt_T)
+        for k in per_seq_errs:
+            per_seq_errs[k].append(errs[k])
+
+    if not per_seq_errs['rot_error']:
+        return None
+    return {
+        'rot': float(np.mean(per_seq_errs['rot_error'])),
+        'roll': float(np.mean(per_seq_errs['roll_error'])),
+        'pitch': float(np.mean(per_seq_errs['pitch_error'])),
+        'yaw': float(np.mean(per_seq_errs['yaw_error'])),
+    }
+
+
+def _euler_perturb_T(T_base_np, delta_rpy_deg):
+    """Apply Euler perturbation (degrees) to 4×4 transform rotation part."""
+    r, p, y = np.deg2rad(delta_rpy_deg)
+    cr, sr = np.cos(r), np.sin(r)
+    cp, sp = np.cos(p), np.sin(p)
+    cy, sy = np.cos(y), np.sin(y)
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    dR = Rz @ Ry @ Rx
+    T_out = T_base_np.copy()
+    T_out[:3, :3] = dR @ T_base_np[:3, :3]
+    return T_out
+
+
+def _rotation_matrix_to_euler(R):
+    """3×3 rotation → Euler degrees [roll, pitch, yaw] (LiDAR convention)."""
+    sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+    if sy > 1e-6:
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        pitch = np.arctan2(-R[2, 0], sy)
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        roll = np.arctan2(-R[1, 2], R[1, 1])
+        pitch = np.arctan2(-R[2, 0], sy)
+        yaw = 0.0
+    return np.rad2deg([roll, pitch, yaw])
+
+
+def _perturbation_euler_from_T_pair(gt_T, init_T):
+    """Applied rotation perturbation (deg) from gt→init: R_init = delta_R @ R_gt."""
+    R_gt = gt_T[:3, :3]
+    R_init = init_T[:3, :3]
+    delta_R = R_init @ R_gt.T
+    return _rotation_matrix_to_euler(delta_R)
+
+
+def _axis_error_and_correction_euler(gt_T, init_T, out_T):
+    """Per-axis init error and correction toward GT (degrees).
+
+    init_err = euler(R_init @ R_gt^T)
+    out_err  = euler(R_out  @ R_gt^T)
+    correction = init_err - out_err   # ideal adaptive: d(correction)/d(bias) ≈ 1
+    """
+    init_err = _perturbation_euler_from_T_pair(gt_T, init_T)
+    out_err = _perturbation_euler_from_T_pair(gt_T, out_T)
+    correction = init_err - out_err
+    return init_err, out_err, correction
+
+
+def _euler_from_delta_R_torch(R_delta):
+    """(B,3,3) delta rotation → (B,3) roll/pitch/yaw degrees (matches numpy path)."""
+    sy = torch.sqrt(R_delta[:, 0, 0] ** 2 + R_delta[:, 1, 0] ** 2 + 1e-8)
+    roll = torch.atan2(R_delta[:, 2, 1], R_delta[:, 2, 2])
+    pitch = torch.atan2(-R_delta[:, 2, 0], sy)
+    yaw = torch.atan2(R_delta[:, 1, 0], R_delta[:, 0, 0])
+    return torch.stack([roll, pitch, yaw], dim=-1) * (180.0 / math.pi)
+
+
+def _axis_correction_torch(R_gt, R_init, R_out):
+    """Differentiable per-axis correction = init_err - out_err (degrees)."""
+    R_gt_f = R_gt.float()
+    R_init_f = R_init.float()
+    R_out_f = R_out.float()
+    R_err_init = torch.bmm(R_init_f, R_gt_f.transpose(1, 2))
+    R_err_out = torch.bmm(R_out_f, R_gt_f.transpose(1, 2))
+    return _euler_from_delta_R_torch(R_err_init) - _euler_from_delta_R_torch(R_err_out)
+
+
+def _finalize_jacobian_axis_accum(axis_accum):
+    """Mean per-axis J values collected from one or more val batches."""
+    if not axis_accum or not any(axis_accum.get(k) for k in ('roll', 'pitch', 'yaw')):
+        return None
+    result = {}
+    for key in ('roll', 'pitch', 'yaw'):
+        vals = [float(v) for v in axis_accum.get(key, []) if v == v]
+        result[key] = float(np.mean(vals)) if vals else float('nan')
+    finite = [v for v in result.values() if v == v]
+    if not finite:
+        return None
+    result['overall'] = float(np.mean(finite))
+    result['verdict'] = 'ADAPTIVE' if result['overall'] > 0.85 else (
+        'WEAK' if result['overall'] < 0.3 else 'MODERATE')
+    return result
+
+
+def _merge_jacobian_results(results):
+    """Average Jacobian dicts gathered from DDP ranks."""
+    valid = [r for r in results if r]
+    if not valid:
+        return None
+    merged = {}
+    for key in ('roll', 'pitch', 'yaw'):
+        vals = [float(r[key]) for r in valid if key in r and r[key] == r[key]]
+        merged[key] = float(np.mean(vals)) if vals else float('nan')
+    finite = [v for v in merged.values() if v == v]
+    if not finite:
+        return None
+    merged['overall'] = float(np.mean(finite))
+    merged['verdict'] = 'ADAPTIVE' if merged['overall'] > 0.85 else (
+        'WEAK' if merged['overall'] < 0.3 else 'MODERATE')
+    return merged
+
+
+def _medw_max_rpy(medw_result):
+    """Max per-axis MEDW error (Roll/Pitch/Yaw)."""
+    if medw_result is None:
+        return float('inf')
+    return max(float(medw_result['roll']), float(medw_result['pitch']),
+               float(medw_result['yaw']))
+
+
+def _medw_axis_pass(medw_result, threshold_deg):
+    """True when max(R,P,Y) MEDW < threshold."""
+    if medw_result is None:
+        return False
+    return _medw_max_rpy(medw_result) < float(threshold_deg)
+
+
+def _jacobian_min_axis(jac_result):
+    """Minimum Jacobian across roll/pitch/yaw (ignore NaN)."""
+    if jac_result is None:
+        return float('-inf')
+    vals = [float(jac_result[k]) for k in ('roll', 'pitch', 'yaw')
+            if k in jac_result and jac_result[k] == jac_result[k]]
+    return min(vals) if vals else float(jac_result.get('overall', float('-inf')))
+
+
+def _jacobian_pass(jac_result, j_min=0.85):
+    """True when overall and all axis Jacobians exceed threshold."""
+    if jac_result is None:
+        return False
+    j_min = float(j_min)
+    if jac_result.get('overall') != jac_result.get('overall'):
+        return False
+    if float(jac_result['overall']) <= j_min:
+        return False
+    for key in ('roll', 'pitch', 'yaw'):
+        v = jac_result.get(key)
+        if v != v or float(v) <= j_min:
+            return False
+    return True
+
+
+def _dual_gate_pass(medw_result, jac_result, medw_max_deg, jac_min):
+    return _medw_axis_pass(medw_result, medw_max_deg) and _jacobian_pass(jac_result, jac_min)
+
+
+def _format_dual_gate_status(medw_result, jac_result, medw_max_deg, jac_min):
+    """Human-readable dual-gate pass/fail breakdown."""
+    medw_max = _medw_max_rpy(medw_result)
+    medw_ok = _medw_axis_pass(medw_result, medw_max_deg)
+    jac_ok = _jacobian_pass(jac_result, jac_min)
+    medw_detail = "N/A"
+    if medw_result is not None:
+        medw_detail = (f"max(R,P,Y)={medw_max:.4f}° "
+                       f"(R={medw_result['roll']:.4f} P={medw_result['pitch']:.4f} "
+                       f"Y={medw_result['yaw']:.4f}) thr<{medw_max_deg:.2f}° "
+                       f"{'PASS' if medw_ok else 'FAIL'}")
+    jac_detail = "N/A"
+    if jac_result is not None:
+        jac_min_ax = _jacobian_min_axis(jac_result)
+        jac_detail = (f"Jac overall={jac_result.get('overall', float('nan')):.3f} "
+                      f"(R={jac_result.get('roll', float('nan')):.3f} "
+                      f"P={jac_result.get('pitch', float('nan')):.3f} "
+                      f"Y={jac_result.get('yaw', float('nan')):.3f}) "
+                      f"min_axis={jac_min_ax:.3f} thr>{jac_min:.2f} "
+                      f"{'PASS' if jac_ok else 'FAIL'}")
+    verdict = "PASS" if (medw_ok and jac_ok) else "FAIL"
+    return verdict, medw_detail, jac_detail
+
+
+def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual, kpi_history):
+    """Write CONVERGENCE_REPORT.md + convergence_report.json after training."""
+    medw_thr = float(args.dual_gate_medw_max)
+    jac_thr = float(args.dual_gate_jacobian_min)
+    converged = best_dual.get('epoch', -1) > 0
+
+    if converged:
+        verdict = "CONVERGED"
+        verdict_cn = "收敛达标"
+        detail = (f"Epoch {best_dual['epoch']} 通过 dual gate，"
+                  f"ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_dual.pth')}")
+    elif kpi_history:
+        last = kpi_history[-1]
+        _, medw_d, jac_d = _format_dual_gate_status(
+            last.get('medw'), last.get('jacobian'), medw_thr, jac_thr)
+        verdict = "NOT_CONVERGED"
+        verdict_cn = "未收敛"
+        detail = f"末次 eval (ep{last['epoch']}): {medw_d}; {jac_d}"
+    else:
+        verdict = "NO_KPI_EVAL"
+        verdict_cn = "无 KPI 评估"
+        detail = "未启用 MEDW/Jacobian eval 或无 eval 记录"
+
+    lines = [
+        "# BEVCalib 收敛报告 / Convergence Report",
+        "",
+        f"**Verdict: {verdict} ({verdict_cn})**",
+        "",
+        "## 验收标准",
+        f"- MEDW{args.medw_eval_max_frames}: max(Roll, Pitch, Yaw) < **{medw_thr:.2f}°**",
+        f"- Jacobian@±{args.jacobian_eval_angle_deg}°: overall 及 R/P/Y 均 > **{jac_thr:.2f}**",
+        "",
+        "## 结果摘要",
+        detail,
+        "",
+    ]
+
+    if best_dual.get('epoch', -1) > 0:
+        lines.extend([
+            "## Best Dual Gate Checkpoint",
+            f"- Epoch: {best_dual['epoch']}",
+            f"- max(R,P,Y): {best_dual.get('medw_max_rpy', best_dual.get('medw', float('nan'))):.4f}°",
+            f"- MEDW R/P/Y: {best_dual.get('medw_roll', float('nan')):.4f} / "
+            f"{best_dual.get('medw_pitch', float('nan')):.4f} / "
+            f"{best_dual.get('medw_yaw', float('nan')):.4f}°",
+            f"- Jacobian overall: {best_dual.get('jacobian', float('nan')):.3f} "
+            f"(R={best_dual.get('jacobian_roll', float('nan')):.3f} "
+            f"P={best_dual.get('jacobian_pitch', float('nan')):.3f} "
+            f"Y={best_dual.get('jacobian_yaw', float('nan')):.3f})",
+            "",
+        ])
+    elif best_medw.get('epoch', -1) > 0:
+        bm = _medw_max_rpy(best_medw)
+        lines.extend([
+            "## Best MEDW (dual gate 未通过)",
+            f"- Epoch: {best_medw['epoch']}",
+            f"- max(R,P,Y): {bm:.4f}° "
+            f"(R={best_medw['roll']:.4f} P={best_medw['pitch']:.4f} Y={best_medw['yaw']:.4f})",
+            "",
+        ])
+
+    if kpi_history:
+        lines.extend([
+            "## KPI 评估历史 (每 eval epoch)",
+            "",
+            "| Epoch | max(R,P,Y)° | R | P | Y | Jac overall | Jac R | P | Y | Dual |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ])
+        for rec in kpi_history:
+            m = rec.get('medw')
+            j = rec.get('jacobian')
+            if m is None:
+                lines.append(f"| {rec['epoch']} | - | - | - | - | - | - | - | - | - |")
+                continue
+            mx = _medw_max_rpy(m)
+            jo = j.get('overall', float('nan')) if j else float('nan')
+            jr = j.get('roll', float('nan')) if j else float('nan')
+            jp = j.get('pitch', float('nan')) if j else float('nan')
+            jy = j.get('yaw', float('nan')) if j else float('nan')
+            dg = "PASS" if rec.get('dual_pass') else "FAIL"
+            lines.append(
+                f"| {rec['epoch']} | {mx:.4f} | {m['roll']:.4f} | {m['pitch']:.4f} | "
+                f"{m['yaw']:.4f} | {jo:.3f} | {jr:.3f} | {jp:.3f} | {jy:.3f} | {dg} |")
+        lines.append("")
+
+    report_md = os.path.join(log_dir, "CONVERGENCE_REPORT.md")
+    with open(report_md, 'w') as f:
+        f.write("\n".join(lines) + "\n")
+
+    report_json = {
+        'verdict': verdict,
+        'verdict_cn': verdict_cn,
+        'converged': converged,
+        'criteria': {
+            'medw_max_rpy_deg': medw_thr,
+            'jacobian_min': jac_thr,
+            'medw_window': args.medw_eval_max_frames,
+            'jacobian_angle_deg': args.jacobian_eval_angle_deg,
+        },
+        'best_dual': best_dual,
+        'best_medw': best_medw,
+        'kpi_history': kpi_history,
+        'report_md': report_md,
+    }
+    json_path = os.path.join(log_dir, "convergence_report.json")
+    with open(json_path, 'w') as jf:
+        json.dump(report_json, jf, indent=2)
+    return report_md, json_path, verdict
+
+
+def _clear_projfusion_encoder_buffer(model):
+    """Reset ProjFusion feat_buffer between multiple forwards in one step."""
+    raw = model.module if hasattr(model, 'module') else model
+    enc = getattr(getattr(raw, 'proj_branch', None), 'encoder', None)
+    if enc is not None and hasattr(enc, 'clear_buffer'):
+        enc.clear_buffer()
+
+
+def _get_gmp_model(model):
+    """GeoMatchProjCalib (GMP) wrapper, or None for legacy backends."""
+    raw = model.module if hasattr(model, 'module') else model
+    if hasattr(raw, 'forward_pose_from_cache') and hasattr(raw, '_stash_proj_cache_for_jacobian'):
+        return raw
+    return None
+
+
+def _compute_jacobian_supervision_loss(
+        model, resize_imgs, pcs_t, gt_T_t, init_T_np, post_cam2ego_T,
+        intrinsic_matrix, masks_t, probe_deg, use_amp, amp_dtype, domain_ids_t=None,
+        max_samples=4, T_pred_center=None):
+    """Train-time loss: encourage d(correction)/d(bias) ≈ 1 on a random axis.
+
+    GMP: reuses encoder cache from main forward via forward_pose_from_cache (no
+    DINOv2/PointGPT re-encode). Must run after main loss backward() so stash is
+    populated and main graph is released. Non-GMP: full model forward fallback.
+    """
+    B = gt_T_t.shape[0]
+    if B < 1 or probe_deg <= 0:
+        return None
+    n_sub = min(max_samples, B)
+    sub_idx = np.random.choice(B, n_sub, replace=False)
+    ax_idx = int(np.random.randint(0, 3))
+    probe = float(probe_deg)
+
+    init_probe_np = init_T_np.copy()
+    delta = [0.0, 0.0, 0.0]
+    delta[ax_idx] = probe
+    for i in sub_idx:
+        init_probe_np[i] = _euler_perturb_T(init_T_np[i], delta)
+
+    sub_t = torch.as_tensor(sub_idx, device=gt_T_t.device, dtype=torch.long)
+    imgs_s = resize_imgs.index_select(0, sub_t)
+    pcs_s = pcs_t.index_select(0, sub_t)
+    gt_s = gt_T_t.index_select(0, sub_t)
+    post_s = post_cam2ego_T.index_select(0, sub_t)
+    K_s = intrinsic_matrix.index_select(0, sub_t)
+    masks_s = masks_t.index_select(0, sub_t) if masks_t is not None else None
+    dom_s = domain_ids_t.index_select(0, sub_t) if domain_ids_t is not None else None
+    init_base_t = torch.from_numpy(init_T_np[sub_idx].astype(np.float32)).to(gt_T_t.device)
+    init_probe_t = torch.from_numpy(init_probe_np[sub_idx].astype(np.float32)).to(gt_T_t.device)
+
+    R_gt = gt_s[:, :3, :3]
+    gmp = _get_gmp_model(model)
+    use_cache_probe = (
+        gmp is not None and getattr(gmp, '_jac_stash', None) is not None)
+
+    if T_pred_center is not None:
+        T0 = T_pred_center.index_select(0, sub_t)
+        corr_0 = _axis_correction_torch(
+            R_gt, init_base_t[:, :3, :3], T0[:, :3, :3]).detach()
+    elif use_cache_probe:
+        with torch.no_grad():
+            T0 = gmp.forward_pose_from_cache(
+                init_base_t, gt_s, pcs_s, masks=masks_s, batch_indices=sub_t)
+        corr_0 = _axis_correction_torch(
+            R_gt, init_base_t[:, :3, :3], T0[:, :3, :3])
+    else:
+        with torch.no_grad():
+            _clear_projfusion_encoder_buffer(model)
+            T0, _, _ = model(
+                imgs_s, pcs_s, gt_s, init_base_t, post_s, K_s,
+                masks=masks_s, out_init_loss=False, domain_ids=dom_s)
+            corr_0 = _axis_correction_torch(
+                R_gt, init_base_t[:, :3, :3], T0[:, :3, :3])
+
+    with autocast(enabled=use_amp, dtype=amp_dtype):
+        if use_cache_probe:
+            T_out_probe = gmp.forward_pose_from_cache(
+                init_probe_t, gt_s, pcs_s, masks=masks_s, batch_indices=sub_t)
+        else:
+            _clear_projfusion_encoder_buffer(model)
+            T_out_probe, _, _ = model(
+                imgs_s, pcs_s, gt_s, init_probe_t, post_s, K_s,
+                masks=masks_s, out_init_loss=False, domain_ids=dom_s)
+
+    corr_probe = _axis_correction_torch(
+        R_gt, init_probe_t[:, :3, :3], T_out_probe[:, :3, :3])
+    j_est = (corr_probe[:, ax_idx] - corr_0[:, ax_idx]) / probe
+    j_raw = torch.nn.functional.smooth_l1_loss(
+        j_est, torch.ones_like(j_est), beta=0.5, reduction='mean')
+    return j_raw, j_est.detach().mean()
+
+
+def _batch_data_to_numpy(data, xyz_only=False):
+    """Convert dataloader batch (list/ndarray/torch.Tensor) to host numpy."""
+    if isinstance(data, torch.Tensor):
+        out = data.detach().cpu().numpy()
+    elif isinstance(data, (list, tuple)):
+        if len(data) == 0:
+            out = np.asarray(data)
+        elif isinstance(data[0], torch.Tensor):
+            out = np.stack([x.detach().cpu().numpy() for x in data])
+        else:
+            out = np.asarray(data)
+    else:
+        out = np.asarray(data)
+    if xyz_only and out.ndim >= 3 and out.shape[-1] > 3:
+        out = out[..., :3]
+    return out
+
+
+def _compute_jacobian_one_batch(raw_model, imgs, pcs, masks, gt_T_np, intrinsics, device,
+                                angle_range, n_probes, use_amp, amp_dtype, identity_4x4,
+                                xyz_only_choise):
+    """Per-axis J = d(correction)/d(init_bias) with controlled single-axis sweep."""
+    B = len(imgs) if not isinstance(imgs, torch.Tensor) else imgs.shape[0]
+    base_init_T_np, _, _ = generate_single_perturbation_from_T(
+        gt_T_np, angle_range_deg=2.0, trans_range=0.0, rotation_only=True,
+        distribution='truncated_normal')
+    bias_levels = np.linspace(-angle_range, angle_range, n_probes)
+    pcs_np = _batch_data_to_numpy(pcs, xyz_only=xyz_only_choise)
+    pcs_t = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
+    gt_T_t = torch.from_numpy(gt_T_np.astype(np.float32)).to(device, non_blocking=True)
+    imgs_np = _batch_data_to_numpy(imgs)
+    resize_imgs = torch.from_numpy(imgs_np).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
+    post_cam2ego_T = identity_4x4.unsqueeze(0).expand(B, -1, -1)
+    intrinsic_matrix = torch.from_numpy(np.array(intrinsics, dtype=np.float32)).to(device, non_blocking=True)
+    masks_t = torch.from_numpy(np.array(masks)).float().to(device, non_blocking=True) if masks is not None else None
+
+    axis_jacobians = {}
+    for ax_idx, ax_name in enumerate(['roll', 'pitch', 'yaw']):
+        corrections_per_bias = []
+        for bias_deg in bias_levels:
+            biased_init_np = base_init_T_np.copy()
+            delta = [0.0, 0.0, 0.0]
+            delta[ax_idx] = float(bias_deg)
+            for b in range(B):
+                biased_init_np[b] = _euler_perturb_T(base_init_T_np[b], delta)
+            init_T_t = torch.from_numpy(biased_init_np.astype(np.float32)).to(device, non_blocking=True)
+            with autocast(enabled=use_amp, dtype=amp_dtype):
+                T_pred, _, _ = raw_model(
+                    resize_imgs, pcs_t, gt_T_t, init_T_t, post_cam2ego_T,
+                    intrinsic_matrix, masks=masks_t, out_init_loss=False,
+                )
+            T_pred_np = T_pred.detach().cpu().numpy()
+            batch_corr = []
+            for b in range(B):
+                _, _, corr = _axis_error_and_correction_euler(
+                    gt_T_np[b], biased_init_np[b], T_pred_np[b])
+                batch_corr.append(corr[ax_idx])
+            corrections_per_bias.append((float(bias_deg), float(np.mean(batch_corr))))
+        if len(corrections_per_bias) >= 3:
+            biases = np.array([x[0] for x in corrections_per_bias])
+            corrections = np.array([x[1] for x in corrections_per_bias])
+            axis_jacobians[ax_name] = float(np.polyfit(biases, corrections, 1)[0])
+        else:
+            axis_jacobians[ax_name] = float('nan')
+    return axis_jacobians
+
+
+def _run_jacobian_eval_inprocess(raw_model, val_loader, device, args, use_amp, amp_dtype,
+                                 identity_4x4, xyz_only_choise):
+    """Standalone Jacobian sweep (re-reads val_loader). Prefer in-val-loop hook below."""
+    n_batches = args.jacobian_eval_batches
+    angle_range = args.jacobian_eval_angle_deg
+    n_probes = args.jacobian_eval_n_probes
+    accum = {'roll': [], 'pitch': [], 'yaw': []}
+    raw_model.eval()
+    with torch.no_grad():
+        for batch_idx, batch_data in enumerate(val_loader):
+            if batch_idx >= n_batches or batch_data is None:
+                break
+            imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data[:5]
+            gt_T_np = np.array(gt_T_to_camera).astype(np.float32)
+            j = _compute_jacobian_one_batch(
+                raw_model, imgs, pcs, masks, gt_T_np, intrinsics, device,
+                angle_range, n_probes, use_amp, amp_dtype, identity_4x4, xyz_only_choise,
+            )
+            for k, v in j.items():
+                if v == v:
+                    accum[k].append(v)
+    return _finalize_jacobian_axis_accum(accum)
+
+
+def _build_val_idx_to_seq(val_preprocessed, custom_dataset):
+    """Map val DataLoader sample index -> sequence id (for MEDW aggregation)."""
+    idx_to_seq = {}
+    subset = val_preprocessed.dataset if hasattr(val_preprocessed, 'dataset') else val_preprocessed
+    all_files = getattr(custom_dataset, 'all_files', None)
+    if hasattr(subset, 'indices') and all_files is not None:
+        for loader_idx, global_idx in enumerate(subset.indices):
+            idx_to_seq[loader_idx] = all_files[global_idx].split('/')[0]
+    elif all_files is not None:
+        for loader_idx, fpath in enumerate(all_files):
+            idx_to_seq[loader_idx] = fpath.split('/')[0]
+    return idx_to_seq
+
+
+def _compute_medw_from_val_accum(all_T_pred, all_T_gt, sample_sequences, window=200):
+    """MEDW from val-eval forward results (zero extra inference)."""
+    if not all_T_pred:
+        return None
+    T_pred_arr = np.array(all_T_pred)
+    T_gt_arr = np.array(all_T_gt)
+    seq_arr = np.array(sample_sequences)
+    unique_seqs = sorted(set(sample_sequences), key=lambda x: (str(type(x)), str(x)))
+    return _compute_medw_deploy(T_pred_arr, T_gt_arr, seq_arr, unique_seqs, window=window)
+
+
+def _ddp_val_rank_indices(dataset_len, rank, world_size, drop_last=False):
+    """Mirror DistributedSampler(shuffle=False) index assignment per rank."""
+    if drop_last:
+        num_samples = dataset_len // world_size
+    else:
+        num_samples = math.ceil(dataset_len / world_size)
+    total_size = num_samples * world_size
+    indices = list(range(dataset_len))
+    if total_size > len(indices):
+        indices += indices[:(total_size - len(indices))]
+    return indices[rank:total_size:world_size]
+
+
+def _ddp_all_reduce_scalar(value, device):
+    if not (dist.is_available() and dist.is_initialized()):
+        return value
+    t = torch.tensor([float(value)], device=device, dtype=torch.float64)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return t.item()
+
+
+def _ddp_all_reduce_dict_sum(d, device):
+    if not d:
+        return d
+    return {k: _ddp_all_reduce_scalar(v, device) for k, v in d.items()}
+
+
+def _ddp_gather_object(local_obj):
+    if not (dist.is_available() and dist.is_initialized()):
+        return [local_obj]
+    world_size = dist.get_world_size()
+    gathered = [None] * world_size
+    dist.all_gather_object(gathered, local_obj)
+    return gathered
+
 import sys
 import io
 import math
@@ -270,6 +977,36 @@ def capture_prints(is_main):
             _tprint_log_file.flush()
 
 
+def _subsample_pcd(pcs_np, masks, max_pts):
+    """Subsample point clouds to max_pts per sample. Returns (pcs_np, masks)."""
+    B = pcs_np.shape[0]
+    new_pcs, new_masks = [], []
+    for bi in range(B):
+        m = np.asarray(masks[bi])
+        valid_idx = np.where(m == 1)[0]
+        n_valid = len(valid_idx)
+        if n_valid > max_pts:
+            chosen = np.random.choice(n_valid, max_pts, replace=False)
+            chosen.sort()
+            sel_idx = valid_idx[chosen]
+            new_pcs.append(pcs_np[bi, sel_idx])
+            new_masks.append(np.ones(max_pts, dtype=np.float32))
+        elif n_valid > 0:
+            new_pcs.append(pcs_np[bi, valid_idx])
+            new_masks.append(np.ones(n_valid, dtype=np.float32))
+        else:
+            new_pcs.append(pcs_np[bi, :1])
+            new_masks.append(np.ones(1, dtype=np.float32))
+    max_n = max(p.shape[0] for p in new_pcs)
+    padded_pcs = np.zeros((B, max_n, pcs_np.shape[2]), dtype=np.float32)
+    padded_masks = np.zeros((B, max_n), dtype=np.float32)
+    for bi in range(B):
+        n = new_pcs[bi].shape[0]
+        padded_pcs[bi, :n] = new_pcs[bi]
+        padded_masks[bi, :n] = new_masks[bi]
+    return padded_pcs, padded_masks
+
+
 def _apply_color_jitter(imgs_tensor, strength):
     """Apply random color jitter to a batch of images (B, C, H, W) in [0, 255]."""
     B = imgs_tensor.shape[0]
@@ -322,6 +1059,160 @@ def _augment_intrinsics(intrinsic_matrix, strength, cx_cy_strength=None):
     K[:, 1, 2] *= cy_scale          # cy
     return K
 
+
+def _apply_fov_crop(imgs_tensor, intrinsics, crop_ratio_min=0.75, crop_ratio_max=0.95):
+    """
+    Apply random center crop to simulate different FOV/mounting height.
+    Simulates various camera installations with different vertical FOV coverage.
+    
+    Args:
+        imgs_tensor: (B, 3, H, W) torch.Tensor in [0, 255]
+        intrinsics: (B, 3, 3) numpy array
+        crop_ratio_min/max: range of crop ratios (e.g. 0.75-0.95 keeps center 75%-95%)
+    
+    Returns:
+        cropped_imgs: (B, 3, H, W) torch.Tensor (resized back to original size)
+        updated_intrinsics: (B, 3, 3) numpy array
+    """
+    B, C, H, W = imgs_tensor.shape
+    device = imgs_tensor.device
+    
+    # Convert to numpy for cropping
+    imgs_np = imgs_tensor.permute(0, 2, 3, 1).cpu().numpy()  # (B, H, W, 3)
+    
+    cropped_imgs = []
+    updated_intrinsics = []
+    
+    for b in range(B):
+        img = imgs_np[b]
+        K = intrinsics[b].copy()
+        
+        # Random crop ratio (independent for H and W to simulate different aspects)
+        crop_ratio_h = random.uniform(crop_ratio_min, crop_ratio_max)
+        crop_ratio_w = random.uniform(crop_ratio_min, crop_ratio_max)
+        
+        H_crop = int(H * crop_ratio_h)
+        W_crop = int(W * crop_ratio_w)
+        
+        # Center crop
+        y_start = (H - H_crop) // 2
+        x_start = (W - W_crop) // 2
+        img_cropped = img[y_start:y_start+H_crop, x_start:x_start+W_crop]
+        
+        # Resize back to original size
+        img_resized = cv2.resize(img_cropped, (W, H))
+        
+        # Update intrinsics
+        # Step 1: adjust for crop offset
+        K[0, 2] -= x_start  # cx
+        K[1, 2] -= y_start  # cy
+        
+        # Step 2: adjust for resize scale
+        scale_x = W / W_crop
+        scale_y = H / H_crop
+        K[0, 0] *= scale_x  # fx
+        K[1, 1] *= scale_y  # fy
+        K[0, 2] *= scale_x  # cx
+        K[1, 2] *= scale_y  # cy
+        
+        cropped_imgs.append(img_resized)
+        updated_intrinsics.append(K)
+    
+    # Convert back to tensor
+    cropped_imgs = np.stack(cropped_imgs)  # (B, H, W, 3)
+    cropped_imgs_tensor = torch.from_numpy(cropped_imgs).permute(0, 3, 1, 2).to(device).float()
+    updated_intrinsics = np.stack(updated_intrinsics)
+    
+    return cropped_imgs_tensor, updated_intrinsics
+
+
+def _parse_csv_cli_list(s, cast=float):
+    """Parse comma-separated CLI values (tolerate bash printf %q artifacts like '16\\')."""
+    cleaned = str(s).replace('\\', '')
+    return [cast(x.strip()) for x in cleaned.split(',') if x.strip()]
+
+
+def _apply_lidar_sparsification(pcs_np, masks, target_lines=32, 
+                                  vertical_fov=(-25, 15), original_lines=128):
+    """
+    Simulate sparse LiDAR by vertical angle binning (no ring id needed).
+    Models different LiDAR configurations (16/32/64 vs 128 lines).
+    
+    Uses vertical angle to create pseudo ring bins, then samples uniformly
+    to simulate lower vertical resolution LiDAR.
+    
+    Args:
+        pcs_np: (B, N, 4) numpy array [x, y, z, intensity]
+        masks: list of (N,) masks
+        target_lines: target number of lines (16/32/64)
+        vertical_fov: (min_deg, max_deg) vertical FOV range
+        original_lines: original resolution (e.g. 128)
+    
+    Returns:
+        sparse_pcs: (B, N_sparse, 4) padded array
+        sparse_masks: list of (N_sparse,) masks
+    """
+    B = pcs_np.shape[0]
+    v_min, v_max = np.deg2rad(vertical_fov[0]), np.deg2rad(vertical_fov[1])
+    
+    sparse_pcs = []
+    sparse_masks = []
+    
+    for b in range(B):
+        pc = pcs_np[b]  # (N, 4)
+        mask = np.asarray(masks[b])
+        valid_idx = np.where(mask == 1)[0]
+        
+        if len(valid_idx) == 0:
+            sparse_pcs.append(pc)
+            sparse_masks.append(mask)
+            continue
+        
+        # Get valid points
+        pc_valid = pc[valid_idx]  # (N_valid, 4)
+        x, y, z = pc_valid[:, 0], pc_valid[:, 1], pc_valid[:, 2]
+        
+        # Compute vertical angle for each point
+        distance_xy = np.sqrt(x**2 + y**2)
+        distance_xy = np.maximum(distance_xy, 1e-6)  # avoid division by zero
+        vertical_angle = np.arctan2(z, distance_xy)  # radians
+        
+        # Assign to pseudo ring bins
+        # Normalize angle to [0, 1]
+        angle_normalized = (vertical_angle - v_min) / (v_max - v_min)
+        angle_normalized = np.clip(angle_normalized, 0, 1)
+        
+        # Map to original_lines bins
+        pseudo_ring_id = (angle_normalized * original_lines).astype(int)
+        pseudo_ring_id = np.clip(pseudo_ring_id, 0, original_lines - 1)
+        
+        # Select target_lines uniformly from original_lines
+        selected_rings = np.linspace(0, original_lines - 1, target_lines).astype(int)
+        
+        # Keep only points from selected rings
+        keep_mask = np.isin(pseudo_ring_id, selected_rings)
+        pc_sparse = pc_valid[keep_mask]
+        
+        if len(pc_sparse) == 0:
+            # Fallback: keep at least 1 point
+            pc_sparse = pc_valid[:1]
+        
+        sparse_pcs.append(pc_sparse)
+        sparse_masks.append(np.ones(len(pc_sparse)))
+    
+    # Pad to same length
+    max_pts = max(pc.shape[0] for pc in sparse_pcs)
+    padded_pcs = np.full((B, max_pts, pcs_np.shape[2]), 999999, dtype=np.float32)
+    padded_masks = []
+    
+    for b in range(B):
+        n = sparse_pcs[b].shape[0]
+        padded_pcs[b, :n, :] = sparse_pcs[b]
+        padded_masks.append(np.concatenate([sparse_masks[b], np.zeros(max_pts - n)]))
+    
+    return padded_pcs, padded_masks
+
+
 def setup_ddp():
     """Auto-detect and initialize DDP when launched via torchrun."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
@@ -353,6 +1244,8 @@ def parse_args():
     parser.add_argument("--deformable", type=int, default=-1)
     parser.add_argument("--bev_encoder", type=int, default=1)
     parser.add_argument("--xyz_only", type=int, default=1)
+    parser.add_argument("--max_pcd_points", type=int, default=0,
+                        help="Max points per sample (0=unlimited). For V42 PointEncoder, 16384 recommended.")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--wd", type=float, default=1e-4)
@@ -380,6 +1273,32 @@ def parse_args():
     parser.add_argument("--vis_point_radius", type=int, default=1, help="可视化点的半径")
     parser.add_argument("--enable_vis", type=int, default=1, help="是否启用点云投影可视化 (1=启用, 0=禁用)")
     parser.add_argument("--enable_ckpt_eval", type=int, default=1, help="是否在保存checkpoint时进行评估 (1=启用, 0=禁用)")
+    parser.add_argument("--enable_medw_eval", type=int, default=0,
+                        help="eval epoch 时在 val 划分上统计 MEDW (复用 val forward, 1=启用)")
+    parser.add_argument("--medw_eval_max_frames", type=int, default=200,
+                        help="MEDW eval 每序列均匀采样帧数 (默认 200，复用 val forward)")
+    parser.add_argument("--enable_dual_gate_ckpt", type=int, default=0,
+                        help="Save ckpt_best_dual.pth only when MEDW and Jacobian both pass gates (1=on)")
+    parser.add_argument("--dual_gate_jacobian_min", type=float, default=0.85,
+                        help="Dual gate: min Jacobian on overall AND each axis (roll/pitch/yaw)")
+    parser.add_argument("--dual_gate_medw_max", type=float, default=0.30,
+                        help="Dual gate: max(R,P,Y) MEDW error (deg) on val split must be below this")
+    parser.add_argument("--enable_jacobian_eval", type=int, default=0,
+                        help="eval epoch 时在 val 上跑 lightweight Jacobian (1=启用)")
+    parser.add_argument("--jacobian_eval_angle_deg", type=float, default=3.0,
+                        help="Jacobian bias sweep ±degrees (部署±3°对齐; 训练仍可±5°)")
+    parser.add_argument("--jacobian_eval_batches", type=int, default=1,
+                        help="Jacobian sweep 复用 val 前 N 个 batch (额外 forward, 不二次读数据)")
+    parser.add_argument("--jacobian_eval_n_probes", type=int, default=3,
+                        help="每轴 bias 采样点数 (≥3; 默认 3 平衡速度与 polyfit)")
+    parser.add_argument("--jacobian_loss_weight", type=float, default=0.0,
+                        help="Train-time Jacobian supervision: penalize (d(correction)/d(bias)-1)^2 (0=off)")
+    parser.add_argument("--jacobian_loss_start_epoch", type=int, default=10,
+                        help="Epoch to start jacobian_loss (after main pose loss stabilizes)")
+    parser.add_argument("--jacobian_loss_probe_deg", type=float, default=2.0,
+                        help="±degrees for two-probe Jacobian loss (init±probe on one axis)")
+    parser.add_argument("--jacobian_loss_interval", type=int, default=4,
+                        help="Run Jacobian supervision every N train batches (1=every batch)")
     parser.add_argument("--compile", type=int, default=0, help="使用 torch.compile 加速模型 (1=启用, 0=禁用)")
     parser.add_argument("--no_amp", type=int, default=0, help="禁用 AMP 混合精度训练 (1=禁用FP16, 用FP32; 0=默认FP16)")
     parser.add_argument("--amp_bf16", type=int, default=0, help="AMP 使用 bfloat16 替代 float16 (减少溢出风险, 需GPU支持)")
@@ -401,6 +1320,16 @@ def parse_args():
                         help="Enable front-view Pitch branch for Z-aware Pitch prediction (1=enable)")
     parser.add_argument("--pitch_aux_weight", type=float, default=0.3,
                         help="Auxiliary pitch loss weight (only when use_pitch_branch=1)")
+    parser.add_argument("--use_dla", type=int, default=0,
+                        help="V44: Enable DLA multi-scale aggregation (1=enable)")
+    parser.add_argument("--use_pitch_fusion", type=int, default=0,
+                        help="V44: Enable Pitch branch inference fusion (1=enable)")
+    parser.add_argument("--use_instance_norm", type=int, default=0,
+                        help="V44: Enable Instance Normalization for domain alignment (1=enable)")
+    parser.add_argument("--use_gated_instance_norm", type=int, default=0,
+                        help="V45: Enable Gated Instance Norm (1=enable, overrides use_instance_norm)")
+    parser.add_argument("--gin_init_gate", type=float, default=0.5,
+                        help="V45: GIN initial gate value (0.5=balanced IN/bypass)")
     parser.add_argument("--drop_path_rate", type=float, default=0.1,
                         help="Stochastic depth rate for transformer layers")
     parser.add_argument("--head_dropout", type=float, default=0.1,
@@ -429,6 +1358,122 @@ def parse_args():
     parser.add_argument("--fuser_type", type=str, default="concat",
                         choices=["concat", "diff", "diff_v2"],
                         help="BEV fuser: concat(ConvFuser) / diff(BEVDiffFuser) / diff_v2(BEVDiffFuser with cam-drop-aware dual path)")
+    parser.add_argument("--correlation_fusion", type=int, default=0,
+                        help="V33-B: Use spatial correlation fusion instead of concat+transformer+global_pool. "
+                             "Preserves spatial alignment info for true calibration ability.")
+    parser.add_argument("--cross_correlation_fusion", type=int, default=0,
+                        help="V34: Use cost-volume cross-correlation fusion for explicit spatial offset detection.")
+    parser.add_argument("--explicit_tinit", type=int, default=0,
+                        help="V35: Explicit T_init RPY encoding injected before prediction head.")
+    parser.add_argument("--tinit_sensitivity_weight", type=float, default=0.0,
+                        help="V35 Phase2: Weight for T_init sensitivity contrastive loss (0=disabled).")
+    parser.add_argument("--iterative_refine", type=int, default=0,
+                        help="V35 Phase3: Number of iterative refinement steps (0=disabled, 3=recommended).")
+    parser.add_argument("--native_cross", type=int, default=0,
+                        help="V36: Native-domain cross-attention mode (0=disabled, 1=enabled).")
+    parser.add_argument("--native_cross_pc_groups", type=int, default=128,
+                        help="V36: Number of point cloud groups for cross-attention.")
+    parser.add_argument("--native_cross_n_harmonic", type=int, default=6,
+                        help="V36: Number of harmonic functions for positional embedding.")
+    parser.add_argument("--native_cross_n_layers", type=int, default=1,
+                        help="V36: Number of stacked cross-attention layers (1=MVP, 2+=deeper).")
+    parser.add_argument("--native_cross_dual_branch", type=int, default=1,
+                        help="V36: Dual independent cross-attention branches (ProjFusion-style).")
+    parser.add_argument("--native_cross_knn", type=int, default=8,
+                        help="V36: kNN neighbors for local point geometry encoding.")
+    parser.add_argument("--native_cross_use_fps", type=int, default=1,
+                        help="V36: Use farthest-point sampling for point groups.")
+    parser.add_argument("--native_cross_use_pointgpt", type=int, default=0,
+                        help="V36: Use ProjFusion PointGPT pretrained encoder (requires ckpt).")
+    parser.add_argument("--native_cross_pointgpt_ckpt", type=str, default=None,
+                        help="V36: Path to kitti_pointgpt_tiny.pth")
+    parser.add_argument("--native_cross_pointgpt_config", type=str, default=None,
+                        help="V36: PointGPT yaml config (default: ProjFusion finetune_kitti_tiny.yaml)")
+    parser.add_argument("--native_cross_pointgpt_max_depth", type=float, default=50.0,
+                        help="V36: Point cloud depth normalization for PointGPT.")
+    parser.add_argument("--native_cross_extend_ratio", type=float, default=1.0,
+                        help="V36/V37: ProjFusion-style projection canvas expansion (2.5 recommended)")
+    parser.add_argument("--fusion_backend", type=str, default="bev",
+                        choices=["bev", "bev_only", "proj_only", "hybrid_dual", "hybrid_triple",
+                                 "geo_match_proj", "cf_bev_r"],
+                        help="Fusion backend: HTCN variants, V40 geo_match_proj (GMP), or V42 cf_bev_r.")
+    # --- CF-BEV-R (V42) parameters ---
+    parser.add_argument("--cf_feat_dim", type=int, default=256)
+    parser.add_argument("--cf_n_groups", type=int, default=128)
+    parser.add_argument("--cf_knn", type=int, default=8)
+    parser.add_argument("--cf_corr_heads", type=int, default=4)
+    parser.add_argument("--cf_corr_radius", type=int, default=4)
+    parser.add_argument("--cf_num_queries", type=int, default=6)
+    parser.add_argument("--cf_encoder_layers", type=int, default=2)
+    parser.add_argument("--cf_decoder_layers", type=int, default=4)
+    parser.add_argument("--use_rocr", type=int, default=1)
+    parser.add_argument("--rocr_dropout", type=float, default=0.3)
+    parser.add_argument("--rocr_center_bias", type=float, default=0.5)
+    parser.add_argument("--rocr_detach_epochs", type=int, default=0,
+                        help="Detach RoCR gradient for first N epochs (V42 S1)")
+    parser.add_argument("--quat_norm_weight", type=float, default=0.5,
+                        help="Quaternion normalization loss weight (default: 0.5)")
+    parser.add_argument("--corr_alignment_weight", type=float, default=0.0)
+    parser.add_argument("--corr_alignment_warmup", type=int, default=20)
+    parser.add_argument("--seq_consistency_weight", type=float, default=0.0)
+    parser.add_argument("--seq_consistency_start_epoch", type=int, default=999)
+    parser.add_argument("--corr_window_mode", type=str, default="fixed",
+                        choices=["fixed", "adaptive"])
+    parser.add_argument("--pc_encoder_mode", type=str, default="pointgpt2bev",
+                        choices=["spconv", "pointgpt2bev"],
+                        help="HTCN BEV branch point cloud encoder.")
+    parser.add_argument("--fusion_variant", type=str, default="gated",
+                        choices=["gated", "cascade", "residual"],
+                        help="HTCN fusion head variant.")
+    parser.add_argument("--deep_supervision_weight", type=float, default=0.2,
+                        help="HTCN auxiliary branch loss weight.")
+    parser.add_argument("--gate_entropy_weight", type=float, default=0.0,
+                        help="Weight for gate entropy regularization (prevent gate collapse, e.g. 0.05)")
+    parser.add_argument("--projfusion_image_hw", type=int, nargs=2, default=[224, 448],
+                        help="ViT input size for ProjFusion branch (H W). GMP default: 252 448.")
+    # V40 GMP (geo_match_proj)
+    parser.add_argument("--appearance_loss_weight", type=float, default=0.0,
+                        help="V40 GeoConsistency photometric weight (P0a).")
+    parser.add_argument("--depth_loss_weight", type=float, default=0.0,
+                        help="V40 GeoConsistency depth weight (P0a).")
+    parser.add_argument("--geo_loss_start_epoch", type=int, default=5,
+                        help="V40: start GeoConsistency after this epoch (pose-only warmup).")
+    parser.add_argument("--use_match_head", type=int, default=0,
+                        help="V40 P1b: CorrespondenceHead + EPnP (0=off).")
+    parser.add_argument("--use_local_correlation", type=int, default=0,
+                        help="V40 P1a: local multi-head correlation (0=off).")
+    parser.add_argument("--correspondence_loss_weight", type=float, default=0.0,
+                        help="V40 P1b: L_corr weight.")
+    parser.add_argument("--correspondence_loss_start_epoch", type=int, default=0,
+                        help="Start adding L_corr to total_loss after this epoch (0-indexed).")
+    parser.add_argument("--correspondence_loss_warmup_epochs", type=int, default=0,
+                        help="Linearly ramp correspondence_loss_weight over N epochs after start.")
+    parser.add_argument("--compose_mode", type=str, default="match_then_refine",
+                        choices=["refine_only", "match_only", "match_then_refine"],
+                        help="V40 P1: pose composition mode.")
+    parser.add_argument("--num_correspondences", type=int, default=64,
+                        help="V40 P1b: number of sparse correspondences K.")
+    parser.add_argument("--match_valid_ratio_min", type=float, default=0.3,
+                        help="V40 P1b: fallback to refine when valid_ratio below this.")
+    parser.add_argument("--match_disable_fallback", type=int, default=0,
+                        help="V41: 1=never zero R_match via fallback gate (force match path).")
+    parser.add_argument("--match_gate_use_init_ratio", type=int, default=0,
+                        help="V41: 1=gate fallback on match_valid_ratio_init not GT-masked ratio.")
+    parser.add_argument("--match_confidence_threshold", type=float, default=0.2,
+                        help="CorrespondenceHead min confidence for valid match.")
+    parser.add_argument("--match_corr_validity_mode", type=str, default='gt',
+                        choices=['gt', 'init'],
+                        help="L_corr mask: gt=intersect GT proj (strict); init=T_init visible points.")
+    parser.add_argument("--match_epnp_min_points", type=int, default=4,
+                        help="EPnP min weighted points before identity R.")
+    parser.add_argument("--match_phase_noise_max_deg", type=float, default=0.0,
+                        help="Cap V32 continuous init noise (deg) when match head on; 0=use global max.")
+    parser.add_argument("--correspondence_supervision", type=int, default=1,
+                        help="V40 P1b: use T_gt pseudo uv labels for L_corr (1=on).")
+    parser.add_argument("--differentiable_epnp", type=int, default=0,
+                        help="V40 P1b: enable gradient flow through EPnP (0=detach/stable, 1=diff).")
+    parser.add_argument("--diff_epnp_warmup_epochs", type=int, default=5,
+                        help="V40 P1b: detach EPnP pose gradients for first N epochs when differentiable_epnp=1.")
     parser.add_argument("--cam_drop_prob", type=float, default=0.0,
                         help="Camera branch dropout probability during training (0=disabled)")
     parser.add_argument("--cam_drop_mode", type=str, default="zero",
@@ -443,8 +1488,32 @@ def parse_args():
                         help="Linear warmup epochs")
     parser.add_argument("--backbone_lr_scale", type=float, default=0.1,
                         help="LR multiplier for pretrained backbone (SwinT)")
+    parser.add_argument("--bev_branch_lr_scale", type=float, default=None,
+                        help="LR multiplier for HTCN BEV trainable modules (fuser/transformer/pc_branch). "
+                             "Default: same as backbone_lr_scale")
     parser.add_argument("--backbone_warmup_epochs", type=int, default=0,
                         help="Gradually increase backbone LR from 1%% to 100%% over N epochs (0=disabled)")
+    
+    # P2b: FOV crop augmentation
+    parser.add_argument("--augment_fov_crop_prob", type=float, default=0.0,
+                        help="P2b: Probability of random FOV center crop (0.0-1.0, 0=disabled). "
+                             "Simulates different mounting heights / camera FOV configurations.")
+    parser.add_argument("--augment_fov_crop_ratio_min", type=float, default=0.75,
+                        help="P2b: Min FOV crop ratio (e.g. 0.75=keep center 75%, default: 0.75)")
+    parser.add_argument("--augment_fov_crop_ratio_max", type=float, default=0.95,
+                        help="P2b: Max FOV crop ratio (e.g. 0.95=keep center 95%, default: 0.95)")
+    
+    # P2b: LiDAR sparsification augmentation
+    parser.add_argument("--augment_lidar_sparse_prob", type=float, default=0.0,
+                        help="P2b: Probability of simulating sparse LiDAR (0.0-1.0, 0=disabled). "
+                             "Models 16/32/64-line LiDAR by vertical angle binning.")
+    parser.add_argument("--augment_lidar_sparse_lines", type=str, default="16,32,64",
+                        help="P2b: Comma-separated target line numbers (e.g. '16,32,64'). "
+                             "Randomly picks one to simulate lower vertical resolution.")
+    parser.add_argument("--augment_lidar_vertical_fov", type=str, default="-25,15",
+                        help="P2b: Vertical FOV range in degrees (e.g. '-25,15' for -25° to +15°). "
+                             "Used for vertical angle binning. Adjust per dataset.")
+    
     parser.add_argument("--augment_mount_jitter_prob", type=float, default=0.0,
                         help="Probability of applying mount jitter to GT extrinsics (0=disabled). "
                              "Simulates diverse camera installations for domain generalization.")
@@ -493,12 +1562,27 @@ def parse_args():
     parser.add_argument("--cosine_Tmult", type=int, default=2,
                         help="CosineAnnealingWarmRestarts T_mult")
     parser.add_argument("--perturb_distribution", type=str, default="uniform",
-                        choices=["uniform", "truncated_normal"],
+                        choices=["uniform", "truncated_normal", "magnitude_balanced"],
                         help="Perturbation angle distribution")
     parser.add_argument("--per_axis_prob", type=float, default=0.0,
                         help="Probability of single-axis perturbation (0=disabled)")
     parser.add_argument("--per_axis_weights", type=str, default="",
                         help="Roll,Pitch,Yaw sampling weights for per-axis mode (e.g. 0.5,0.3,0.2). Empty=uniform")
+    parser.add_argument("--symmetric_perturb", type=int, default=0,
+                        help="Force symmetric positive/negative perturbation within each batch (0=disabled, 1=enabled)")
+    parser.add_argument("--multi_range_prob", type=float, default=0.0,
+                        help="V46: probability of using wide-range perturbation (experience replay) to prevent generalization collapse (0=disabled)")
+    parser.add_argument("--multi_range_angle", type=float, default=5.0,
+                        help="V46: wide-range angle for experience replay (default: 5.0°)")
+    parser.add_argument("--zero_perturbation_prob", type=float, default=0.0,
+                        help="V43: probability of using T_init=T_gt (zero perturbation) to teach model identity mapping")
+    parser.add_argument("--overcorrection_penalty", type=float, default=0.0,
+                        help="V47: extra weight multiplier on loss when model overcorrects "
+                             "(prediction error > initial perturbation). 0=disabled, 2.0=recommended")
+    parser.add_argument("--use_magnitude_head", type=int, default=0,
+                        help="V46: enable magnitude estimation head in PoseQueryDecoder (0=disabled, 1=enabled)")
+    parser.add_argument("--magnitude_loss_weight", type=float, default=0.3,
+                        help="V46: weight for magnitude estimation auxiliary loss (default: 0.3)")
     parser.add_argument("--augment_pc_jitter", type=float, default=0.0,
                         help="Point cloud Gaussian jitter sigma in meters (0=disabled)")
     parser.add_argument("--augment_pc_dropout", type=float, default=0.0,
@@ -518,6 +1602,30 @@ def parse_args():
                         help="GT pitch sign flip probability (0=disabled). "
                              "Precisely negates the pitch angle to simulate "
                              "reversed camera mounting (e.g. Seq02/06).")
+    # === v32: T_init Invariance Training ===
+    parser.add_argument("--tinit_dropout_prob", type=float, default=0.0,
+                        help="v32: Probability of replacing T_init with random rotation (0=disabled). "
+                             "Forces model to rely on visual features instead of T_init shortcut.")
+    parser.add_argument("--consistency_loss_weight", type=float, default=0.0,
+                        help="v32: Weight for consistency loss (0=disabled). Penalizes prediction "
+                             "difference when same scene gets two different T_init perturbations.")
+    parser.add_argument("--consistency_loss_start_epoch", type=int, default=0,
+                        help="v32: Epoch to start applying consistency loss.")
+    parser.add_argument("--progressive_angle_start", type=float, default=0.0,
+                        help="v32: Starting angle_range for progressive curriculum (0=disabled, use fixed angle_range_deg).")
+    parser.add_argument("--progressive_angle_end", type=float, default=0.0,
+                        help="v32: Ending angle_range for progressive curriculum.")
+    parser.add_argument("--progressive_warmup_epochs", type=int, default=100,
+                        help="v32: Number of epochs to ramp from progressive_angle_start to progressive_angle_end.")
+    parser.add_argument("--ema_consistency", type=int, default=0,
+                        help="v32.1: Use EMA target network for consistency loss (0=disabled, 1=enabled)")
+    parser.add_argument("--ema_decay", type=float, default=0.996,
+                        help="v32.1: EMA decay rate for target network (default: 0.996)")
+    parser.add_argument("--continuous_tinit_noise", type=int, default=0,
+                        help="v32.1: Replace binary T_init dropout with continuous noise schedule "
+                             "(0=disabled/use binary dropout, 1=enabled)")
+    parser.add_argument("--continuous_noise_max_deg", type=float, default=30.0,
+                        help="v32.1: Max extra rotation noise in degrees for continuous schedule (default: 30)")
     parser.add_argument("--early_stopping_patience", type=int, default=0,
                         help="Early stopping patience in epochs (0=disabled)")
     parser.add_argument("--seed", type=int, default=42,
@@ -990,17 +2098,30 @@ def main():
         else:
             tprint(f"   均衡采样: 数据集无 all_files 属性, 降级为默认采样")
     
+    val_sampler = None
+    if use_ddp:
+        val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        shuffle=False,
+        shuffle=(val_sampler is None),
+        sampler=val_sampler,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
         worker_init_fn=_worker_init_fn,
     )
+
+    val_idx_to_seq = None
+    if args.enable_medw_eval > 0:
+        val_idx_to_seq = _build_val_idx_to_seq(val_dataset, dataset)
+        if is_main:
+            tprint(f"MEDW eval: reuse val split ({len(val_idx_to_seq)} samples), "
+                   f"window={args.medw_eval_max_frames} (zero extra forward)")
+            if use_ddp:
+                tprint(f"  Val DDP: {dist.get_world_size()} GPUs shard val forward (~{dist.get_world_size()}× faster)")
 
     deformable_choise = args.deformable > 0
     bev_encoder_choise = args.bev_encoder > 0
@@ -1036,53 +2157,43 @@ def main():
     if is_main and use_foundation_depth:
         tprint(f"Foundation Depth: 启用 (model={args.depth_model_type}, mode={fd_mode})")
     with capture_prints(is_main):
-        model = BEVCalib(
-            deformable=deformable_choise,
-            bev_encoder=bev_encoder_choise,
-            img_shape=img_shape,
-            rotation_only=rotation_only,
-            enable_axis_loss=enable_axis_loss,
-            weight_axis_rotation=args.weight_axis_rotation,
-            axis_weights=axis_weights_tuple,
-            drop_path_rate=args.drop_path_rate,
-            head_dropout=args.head_dropout,
-            use_geodesic_loss=use_geodesic_loss,
-            use_mlp_head=use_mlp_head,
-            bev_pool_factor=args.bev_pool_factor,
-            use_foundation_depth=use_foundation_depth,
-            depth_model_type=args.depth_model_type,
-            fd_mode=fd_mode,
-            voxel_mode=args.voxel_mode,
-            to_bev_mode=args.to_bev_mode,
-            scatter_reduce=args.scatter_reduce,
-            fuser_type=args.fuser_type,
-            cam_drop_prob=args.cam_drop_prob,
-            cam_drop_mode=args.cam_drop_mode,
-            intrinsic_input=args.intrinsic_input,
-            use_pitch_branch=args.use_pitch_branch > 0,
-            pitch_aux_weight=args.pitch_aux_weight,
-            bev_instance_norm=args.bev_instance_norm > 0,
-            use_contrastive_extrinsic=args.use_contrastive_extrinsic > 0,
-            contrastive_weight=args.contrastive_weight,
-            use_balanced_axis_loss=args.use_balanced_axis_loss > 0,
-            domain_adversarial=args.domain_adversarial > 0,
-            domain_adversarial_weight=args.domain_adversarial_weight,
-            num_domains=_num_domains,
-            cam2bev_mode=args.cam2bev_mode,
-            backbone_type=args.backbone_type,
-            backbone_variant=args.backbone_variant,
-            freeze_backbone=args.freeze_backbone > 0,
-            freeze_layers=args.backbone_freeze_layers,
-            backbone_weights=args.backbone_weights,
-        ).to(device)
+        from hybrid_triple_calib import build_calib_model
+        model = build_calib_model(
+            args, device, img_shape, rotation_only, is_main=is_main, tprint=tprint)
 
     if args.pretrain_ckpt is not None:
         state_dict = torch.load(args.pretrain_ckpt, map_location=device)
-        missing, unexpected = model.load_state_dict(state_dict['model_state_dict'], strict=False)
+        ckpt_sd = state_dict['model_state_dict']
+        model_sd = model.state_dict()
+        # V40 HybridPoseHead: V39 ckpt uses fusion_head.head.*, P1c uses refine_head.head.*
+        remapped_sd = {}
+        remap_count = 0
+        for k, v in ckpt_sd.items():
+            if k.startswith('fusion_head.head.') and k not in model_sd:
+                alt = k.replace('fusion_head.head.', 'fusion_head.refine_head.head.', 1)
+                if alt in model_sd and model_sd[alt].shape == v.shape:
+                    remapped_sd[alt] = v
+                    remap_count += 1
+                    continue
+            remapped_sd[k] = v
+        if remap_count and is_main:
+            tprint(f"  Pretrain remap: fusion_head.head.* -> refine_head.head.* ({remap_count} keys)")
+        ckpt_sd = remapped_sd
+        filtered_sd = {}
+        skipped_shape = []
+        for k, v in ckpt_sd.items():
+            if k in model_sd and model_sd[k].shape == v.shape:
+                filtered_sd[k] = v
+            elif k in model_sd:
+                skipped_shape.append(f"{k}: ckpt={list(v.shape)} vs model={list(model_sd[k].shape)}")
+        missing, unexpected = model.load_state_dict(filtered_sd, strict=False)
         if is_main:
             tprint(f"Load pretrain model from {args.pretrain_ckpt}")
+            tprint(f"  Loaded {len(filtered_sd)}/{len(model_sd)} model keys from ckpt")
+            if skipped_shape:
+                tprint(f"  Shape mismatch (skipped): {skipped_shape}")
             if missing:
-                tprint(f"  Missing keys (new layers): {missing}")
+                tprint(f"  Missing keys (new layers): {len(missing)} keys")
             if unexpected:
                 tprint(f"  Unexpected keys (skipped): {unexpected}")
     
@@ -1101,7 +2212,9 @@ def main():
                             or getattr(args, 'use_contrastive_extrinsic', 0) > 0
                             or getattr(args, 'domain_adversarial', 0) > 0
                             or getattr(args, 'cam2bev_mode', 'lss') == 'query'
-                            or getattr(args, 'backbone_type', 'swin') == 'dinov2')
+                            or getattr(args, 'backbone_type', 'swin') == 'dinov2'
+                            or getattr(args, 'fusion_backend', 'bev') == 'geo_match_proj'
+                            or getattr(args, 'fusion_backend', 'bev') == 'cf_bev_r')
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=need_find_unused)
         if is_main:
             tprint(f"Model wrapped with DistributedDataParallel on {world_size} GPUs "
@@ -1114,19 +2227,25 @@ def main():
         tprint(f"The initial learning rate is: {args.lr}")
 
     backbone_params = []
+    bev_branch_params = []
     head_params = []
     _backbone_param_set = set()
+    _bev_branch_param_set = set()
     _module_param_map = {}
     _layer_wise_groups = {}
+    _HTCN_BEV_MODULES = ('conv_fuser', 'transformer', 'bev_encoder', 'pose_embed', 'pc_branch')
     for name, param in raw_model.named_parameters():
         if not param.requires_grad:
             continue
-        if 'img_branch' in name or 'pc_branch' in name:
+        if any(name.startswith(m + '.') or name == m for m in _HTCN_BEV_MODULES):
+            bev_branch_params.append(param)
+            _bev_branch_param_set.add(id(param))
+        elif 'img_branch' in name or name.startswith('img_encoder.'):
             backbone_params.append(param)
             _backbone_param_set.add(id(param))
             if args.layer_wise_lr_decay < 1.0:
                 import re
-                m_layer = re.search(r'CamEncode\.model\.encoder\.layers\.(\d+)', name)
+                m_layer = re.search(r'(?:CamEncode|img_encoder)\.model\.encoder\.layers\.(\d+)', name)
                 if m_layer:
                     layer_idx = int(m_layer.group(1))
                     _layer_wise_groups.setdefault(layer_idx, []).append(param)
@@ -1140,8 +2259,8 @@ def main():
         _module_param_map[mod].append(param)
 
     def _compute_grad_norms():
-        """Compute per-group gradient L2 norms (backbone, head, per-module)."""
-        bb_sq, hd_sq = 0.0, 0.0
+        """Compute per-group gradient L2 norms (backbone, bev_branch, head, per-module)."""
+        bb_sq, bev_sq, hd_sq = 0.0, 0.0, 0.0
         mod_sq = {m: 0.0 for m in _module_param_map}
         for mod, params in _module_param_map.items():
             for p in params:
@@ -1151,11 +2270,16 @@ def main():
                 mod_sq[mod] += g2
                 if id(p) in _backbone_param_set:
                     bb_sq += g2
+                elif id(p) in _bev_branch_param_set:
+                    bev_sq += g2
                 else:
                     hd_sq += g2
-        return bb_sq ** 0.5, hd_sq ** 0.5, {m: v ** 0.5 for m, v in mod_sq.items()}
+        return bb_sq ** 0.5, bev_sq ** 0.5, hd_sq ** 0.5, {m: v ** 0.5 for m, v in mod_sq.items()}
 
     backbone_lr = args.lr * args.backbone_lr_scale
+    bev_branch_lr_scale = (args.bev_branch_lr_scale if args.bev_branch_lr_scale is not None
+                           else args.backbone_lr_scale)
+    bev_branch_lr = args.lr * bev_branch_lr_scale
 
     if args.layer_wise_lr_decay < 1.0 and _layer_wise_groups:
         max_layer = max(k for k in _layer_wise_groups if k >= 0) if any(k >= 0 for k in _layer_wise_groups) else 0
@@ -1171,14 +2295,18 @@ def main():
         optimizer = torch.optim.AdamW(param_groups, weight_decay=args.wd)
         _backbone_group_count = len(param_groups) - 1
     else:
-        optimizer = torch.optim.AdamW([
-            {'params': backbone_params, 'lr': backbone_lr},
-            {'params': head_params, 'lr': args.lr},
-        ], weight_decay=args.wd)
-        _backbone_group_count = 1
+        param_groups = []
+        if backbone_params:
+            param_groups.append({'params': backbone_params, 'lr': backbone_lr})
+        if bev_branch_params:
+            param_groups.append({'params': bev_branch_params, 'lr': bev_branch_lr})
+        param_groups.append({'params': head_params, 'lr': args.lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=args.wd)
+        _backbone_group_count = max(len(param_groups) - 1, 1)
 
     if is_main:
         tprint(f"Differential LR: backbone={backbone_lr:.2e} ({len(backbone_params)} params), "
+               f"bev_branch={bev_branch_lr:.2e} ({len(bev_branch_params)} params), "
                f"heads={args.lr:.2e} ({len(head_params)} params)")
         if args.layer_wise_lr_decay < 1.0 and _layer_wise_groups:
             for i, pg in enumerate(optimizer.param_groups[:-1]):
@@ -1247,6 +2375,144 @@ def main():
         else:
             tprint(f"Intrinsic augmentation: fx/fy ±{args.augment_intrinsic*100:.0f}%, cx/cy ±{args.augment_intrinsic*100:.0f}%")
 
+    # === v32: T_init Invariance Config ===
+    _v32_tinit_dropout = getattr(args, 'tinit_dropout_prob', 0.0)
+    _v32_consistency_w = getattr(args, 'consistency_loss_weight', 0.0)
+    _v32_consistency_start = getattr(args, 'consistency_loss_start_epoch', 0)
+    _v32_prog_start = getattr(args, 'progressive_angle_start', 0.0)
+    _v32_prog_end = getattr(args, 'progressive_angle_end', 0.0)
+    _v32_prog_warmup = getattr(args, 'progressive_warmup_epochs', 100)
+    _v32_enabled = _v32_tinit_dropout > 0 or _v32_consistency_w > 0 or _v32_prog_start > 0
+
+    # === v32.1: EMA Target Network ===
+    _v321_ema_enabled = getattr(args, 'ema_consistency', 0) > 0 and _v32_consistency_w > 0
+    _v321_ema_decay = getattr(args, 'ema_decay', 0.996)
+    _v321_ema_model = None
+    if _v321_ema_enabled:
+        import copy
+        _v321_ema_model = copy.deepcopy(raw_model)
+        _v321_ema_model.eval()
+        for p in _v321_ema_model.parameters():
+            p.requires_grad_(False)
+
+    # === v32.1: Continuous T_init Noise ===
+    _v321_continuous_noise = getattr(args, 'continuous_tinit_noise', 0) > 0
+    _v321_noise_max_deg = getattr(args, 'continuous_noise_max_deg', 30.0)
+    _match_phase_noise_max = float(getattr(args, 'match_phase_noise_max_deg', 0.0) or 0.0)
+    _use_match_head = getattr(args, 'use_match_head', 0) > 0
+
+    if is_main and _v32_enabled:
+        tprint("=" * 60)
+        tprint("v32 T_init Invariance Training ENABLED:")
+        if _v321_continuous_noise:
+            tprint(f"  [v32.1] Continuous T_init noise: 0°-{_v321_noise_max_deg}° (replaces binary dropout)")
+        elif _v32_tinit_dropout > 0:
+            tprint(f"  T_init dropout: {_v32_tinit_dropout*100:.0f}% probability")
+        if _v32_consistency_w > 0:
+            _cons_mode = "EMA target" if _v321_ema_enabled else "stop-gradient"
+            tprint(f"  Consistency loss: weight={_v32_consistency_w}, start_epoch={_v32_consistency_start}, mode={_cons_mode}")
+            if _v321_ema_enabled:
+                tprint(f"  EMA decay: {_v321_ema_decay}")
+        if _v32_prog_start > 0:
+            tprint(f"  Progressive angle: {_v32_prog_start}° → {_v32_prog_end}° over {_v32_prog_warmup} epochs")
+        tprint("=" * 60)
+
+    if is_main and _use_match_head:
+        tprint("=" * 60)
+        tprint("GMP Match/Corr training:")
+        tprint(f"  L_corr weight={getattr(args, 'correspondence_loss_weight', 0)}, "
+               f"start_ep={getattr(args, 'correspondence_loss_start_epoch', 0)}, "
+               f"warmup_ep={getattr(args, 'correspondence_loss_warmup_epochs', 0)}")
+        tprint(f"  fallback: disable={getattr(args, 'match_disable_fallback', 0)}, "
+               f"gate_init_ratio={getattr(args, 'match_gate_use_init_ratio', 0)}, "
+               f"valid_min={getattr(args, 'match_valid_ratio_min', 0.3)}")
+        tprint(f"  corr_validity={getattr(args, 'match_corr_validity_mode', 'gt')}, "
+               f"conf_thr={getattr(args, 'match_confidence_threshold', 0.2)}, "
+               f"epnp_min_pts={getattr(args, 'match_epnp_min_points', 4)}")
+        if _match_phase_noise_max > 0:
+            tprint(f"  match_phase_noise cap: {_match_phase_noise_max}° "
+                   f"(global continuous max {_v321_noise_max_deg}°)")
+        tprint("=" * 60)
+
+    # === V42 CF-BEV-R specific training config ===
+    _v42_enabled = getattr(args, 'fusion_backend', '') == 'cf_bev_r'
+    _v42_rocr_detach_epochs = getattr(args, 'rocr_detach_epochs', 0)
+    _v42_corr_alignment_w = getattr(args, 'corr_alignment_weight', 0.0)
+    _v42_corr_alignment_warmup = getattr(args, 'corr_alignment_warmup', 20)
+    _v42_seq_consistency_w = getattr(args, 'seq_consistency_weight', 0.0)
+    _v42_seq_consistency_start = getattr(args, 'seq_consistency_start_epoch', 999)
+
+    _v42_corr_loss = None
+    _v42_seq_loss = None
+    if _v42_enabled:
+        if _v42_corr_alignment_w > 0:
+            from losses.corr_alignment_loss import CorrelationAlignmentLoss
+            _v42_corr_loss = CorrelationAlignmentLoss(
+                weight=_v42_corr_alignment_w,
+                warmup_epochs=_v42_corr_alignment_warmup,
+            )
+        if _v42_seq_consistency_w > 0:
+            from losses.corr_alignment_loss import SequenceConsistencyLoss
+            _v42_seq_loss = SequenceConsistencyLoss(weight=_v42_seq_consistency_w)
+        if is_main:
+            tprint("=" * 60)
+            tprint("V42 CF-BEV-R Training Config:")
+            tprint(f"  RoCR detach epochs: {_v42_rocr_detach_epochs}")
+            tprint(f"  Corr alignment loss: w={_v42_corr_alignment_w}, warmup={_v42_corr_alignment_warmup}")
+            tprint(f"  Seq consistency loss: w={_v42_seq_consistency_w}, start_epoch={_v42_seq_consistency_start}")
+            tprint("=" * 60)
+
+    def _v32_get_angle_range(epoch):
+        """Progressive angle curriculum for v32."""
+        if _v32_prog_start <= 0:
+            return train_noise["angle_range_deg"]
+        if epoch >= _v32_prog_warmup:
+            return _v32_prog_end
+        alpha = epoch / max(1, _v32_prog_warmup)
+        return _v32_prog_start + alpha * (_v32_prog_end - _v32_prog_start)
+
+    def _v32_apply_tinit_dropout(init_T_np, gt_T_np, prob):
+        """Replace T_init with random rotation to break shortcut.
+        Uses random perturbation far from GT (15-30 deg) to force visual learning."""
+        if prob <= 0:
+            return init_T_np
+        B = init_T_np.shape[0]
+        mask = np.random.random(B) < prob
+        if not mask.any():
+            return init_T_np
+        from scipy.spatial.transform import Rotation as R_sp
+        for i in range(B):
+            if mask[i]:
+                rand_rv = np.random.randn(3)
+                rand_rv = rand_rv / (np.linalg.norm(rand_rv) + 1e-8)
+                rand_angle = np.random.uniform(15, 30) * np.pi / 180
+                dR = R_sp.from_rotvec(rand_rv * rand_angle).as_matrix()
+                init_T_np[i, :3, :3] = dR @ gt_T_np[i, :3, :3]
+        return init_T_np
+
+    def _v321_apply_continuous_noise(init_T_np, max_deg, epoch=0):
+        """v32.1: Apply continuous random rotation noise to ALL T_init samples.
+        Noise magnitude ramps up with progressive curriculum to avoid
+        overwhelming the model in early training. At epoch 0, max noise = max_deg * alpha
+        where alpha tracks the progressive curriculum fraction (0→1)."""
+        if _v32_prog_warmup > 0:
+            alpha = min(1.0, epoch / max(1, _v32_prog_warmup))
+        else:
+            alpha = 1.0
+        effective_max = max_deg * max(0.1, alpha)
+        if _use_match_head and _match_phase_noise_max > 0:
+            effective_max = min(effective_max, _match_phase_noise_max)
+        from scipy.spatial.transform import Rotation as R_sp
+        B = init_T_np.shape[0]
+        for i in range(B):
+            noise_deg = np.random.uniform(0, effective_max)
+            rand_rv = np.random.randn(3)
+            rand_rv = rand_rv / (np.linalg.norm(rand_rv) + 1e-8)
+            noise_rad = noise_deg * np.pi / 180
+            dR = R_sp.from_rotvec(rand_rv * noise_rad).as_matrix()
+            init_T_np[i, :3, :3] = dR @ init_T_np[i, :3, :3]
+        return init_T_np
+
     if is_main and args.augment_pitch_flip_prob > 0:
         tprint(f"GT pitch perturbation (Y-axis): prob={args.augment_pitch_flip_prob}, "
                f"max_deg={args.augment_pitch_flip_max_deg}°")
@@ -1280,6 +2546,13 @@ def main():
     
     best_train = {'epoch': -1, 'loss': float('inf'), 'trans': float('inf'), 'rot': float('inf'), 'errors': None}
     best_val = {'epoch': -1, 'loss': float('inf'), 'trans': float('inf'), 'rot': float('inf'), 'errors': None}
+    best_medw = {'epoch': -1, 'rot': float('inf'), 'roll': float('inf'), 'pitch': float('inf'),
+                 'yaw': float('inf'), 'max_rpy': float('inf')}
+    best_dual = {'epoch': -1, 'score': float('inf'), 'medw_max_rpy': float('inf'),
+                 'medw_roll': float('inf'), 'medw_pitch': float('inf'), 'medw_yaw': float('inf'),
+                 'jacobian': float('-inf'), 'jacobian_roll': float('-inf'),
+                 'jacobian_pitch': float('-inf'), 'jacobian_yaw': float('-inf')}
+    kpi_history = []
     last_epoch_train_errors = None
     last_epoch_val_errors = None
     checkpoint_records = []
@@ -1303,11 +2576,32 @@ def main():
             tprint("  Default weights (full-pose): w_rot=0.5, w_pc=0.5, w_trans=1.0, w_quat=0.5")
         tprint("")
         tprint("Log Terminology:")
-        tprint("  • rotation_loss: displayed in degrees (°) for readability, but total_loss uses radians")
+        tprint("  • rotation_loss / pose_L: displayed in degrees (°); total_loss (w-sum) uses radians + all weighted terms")
+        tprint("  • Step Loss total (w-sum): weighted sum incl. corr×weight, geo, cons, jac; NOT comparable to A-only ~3–4 scale")
+        tprint("  • correspondence_loss: raw px; step log shows corr×weight contribution when match head enabled")
         tprint("  • PC_reproj_loss: point cloud reprojection error")
         tprint("  • quat_norm_loss: quaternion normalization penalty")
         tprint("  • Pose Error - Rot: rotation error with Roll/Pitch/Yaw breakdown")
         tprint("  • Pose Error - Trans: translation error with Forward/Lateral/Height breakdown")
+        if args.enable_medw_eval > 0:
+            tprint(f"  • MEDW eval: MEDW{args.medw_eval_max_frames} on val split "
+                   f"(reuse val forward) every {args.eval_epoches} epochs")
+        if args.enable_jacobian_eval > 0:
+            _jac_extra = (args.jacobian_eval_batches * 3 * args.jacobian_eval_n_probes)
+            tprint(f"  • Jacobian eval: ±{args.jacobian_eval_angle_deg}° sweep on val batch[0:"
+                   f"{args.jacobian_eval_batches}] (+{_jac_extra} extra forwards/eval, "
+                   f"correction=init_err-out_err)")
+        if getattr(args, 'jacobian_loss_weight', 0.0) > 0:
+            tprint(f"  • Jacobian loss: weight={args.jacobian_loss_weight}, "
+                   f"start_ep={args.jacobian_loss_start_epoch}, "
+                   f"interval={getattr(args, 'jacobian_loss_interval', 4)} batches, "
+                   f"probe=±{args.jacobian_loss_probe_deg}°")
+        if args.enable_dual_gate_ckpt > 0:
+            tprint(f"  • Dual gate ckpt: max(MEDW{args.medw_eval_max_frames} R,P,Y) < {args.dual_gate_medw_max}° "
+                   f"AND Jacobian R/P/Y/overall > {args.dual_gate_jacobian_min} → ckpt_best_dual.pth")
+        if getattr(args, 'fusion_backend', 'bev') == 'geo_match_proj':
+            tprint("  • match[...]: L_corr(px), valid_init/valid_gt, fb, epnp_fail, epnp_pts, epnp_grad")
+            tprint("  • geo[...]: appearance/depth consistency loss + geo valid ratio")
         tprint("=" * 80)
     
     start_epoch = 0
@@ -1349,6 +2643,23 @@ def main():
                 best_train = ckpt['best_train']
             if 'best_val' in ckpt and ckpt['best_val'] is not None:
                 best_val = ckpt['best_val']
+            if 'best_medw' in ckpt and ckpt['best_medw'] is not None:
+                best_medw = ckpt['best_medw']
+            if 'best_dual' in ckpt and ckpt['best_dual'] is not None:
+                best_dual = ckpt['best_dual']
+            if 'kpi_history' in ckpt and ckpt['kpi_history']:
+                kpi_history = ckpt['kpi_history']
+            if 'early_stop_counter' in ckpt:
+                early_stop_counter = int(ckpt['early_stop_counter'])
+            if _v321_ema_enabled and _v321_ema_model is not None and 'ema_state_dict' in ckpt:
+                _v321_ema_model.load_state_dict(ckpt['ema_state_dict'])
+                if is_main:
+                    tprint(f"  EMA model restored from checkpoint")
+            elif _v321_ema_enabled and _v321_ema_model is not None:
+                import copy as _copy_mod
+                _v321_ema_model.load_state_dict(model_to_load.state_dict())
+                if is_main:
+                    tprint(f"  EMA model re-initialized from online model (no ema_state_dict in checkpoint)")
             if is_main:
                 tprint(f"Resumed from {resume_path}: epoch={start_epoch}, "
                        f"best_val_rot={best_val.get('rot', 'N/A')}")
@@ -1389,9 +2700,12 @@ def main():
 
     for epoch in range(start_epoch, num_epochs):
         _current_epoch[0] = epoch
+        main._cuda_error_count = 0
         if train_sampler is not None and hasattr(train_sampler, 'set_epoch'):
             train_sampler.set_epoch(epoch)
         model.train()
+        if hasattr(raw_model, 'set_training_epoch'):
+            raw_model.set_training_epoch(epoch)
         if args.domain_adversarial > 0:
             raw_model._dann_epoch_ratio = epoch / max(num_epochs - 1, 1)
 
@@ -1418,21 +2732,24 @@ def main():
         for key in epoch_pose_errors:
             epoch_pose_errors[key] = 0
 
-        if epoch == 0:
+        if epoch == 0 and hasattr(raw_model, 'get_module_profile'):
             raw_model._profile_modules = True
         elif epoch == 1:
-            raw_model._profile_modules = False
+            if hasattr(raw_model, '_profile_modules'):
+                raw_model._profile_modules = False
 
         epoch_start = time.time()
         out_init_loss_choice = epoch < 5
         t_data_total, t_prep_total, t_compute_total, t_vis_total = 0.0, 0.0, 0.0, 0.0
         vis_count = 0
-        _epoch_grad_accum = {'bb': [], 'hd': [], 'mod': {}}
-        _bwd_profile_events = [] if raw_model._profile_modules else None
-        _do_detailed_profile = raw_model._profile_modules
+        _epoch_grad_accum = {'bb': [], 'bev': [], 'hd': [], 'mod': {}}
+        _profile_on = getattr(raw_model, '_profile_modules', False)
+        _bwd_profile_events = [] if _profile_on else None
+        _do_detailed_profile = _profile_on
         t_h2d_total = 0.0
         t_cpu_aug_total = 0.0
         processed_batches = 0
+        _gate_stats = {'gate_bev_sum': 0.0, 'gate_proj_sum': 0.0, 'gate_entropy_sum': 0.0, 'gate_count': 0}
         t_iter_start = time.time()
         for batch_index, batch_data in enumerate(train_loader):
             t_data_end = time.time()
@@ -1464,22 +2781,69 @@ def main():
                     max_deg=args.augment_pitch_flip_max_deg,
                     sign_flip_prob=_sign_flip_p,
                 )
-            init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(
-                gt_T_to_camera_np,
-                angle_range_deg=train_noise["angle_range_deg"],
-                trans_range=train_noise["trans_range"],
-                rotation_only=rotation_only,
-                distribution=args.perturb_distribution,
-                per_axis_prob=args.per_axis_prob,
-                per_axis_weights=per_axis_weights_parsed,
-            )
+            _current_angle_range = _v32_get_angle_range(epoch) if _v32_enabled else train_noise["angle_range_deg"]
+            _mr_prob = getattr(args, 'multi_range_prob', 0.0)
+            _mr_angle = getattr(args, 'multi_range_angle', 5.0)
+            if _mr_prob > 0 and np.random.rand() < _mr_prob:
+                _current_angle_range = _mr_angle
+            _use_zero_perturb = (args.zero_perturbation_prob > 0 and
+                                 np.random.rand() < args.zero_perturbation_prob)
+            if _use_zero_perturb:
+                init_T_to_camera_np = gt_T_to_camera_np.copy()
+            else:
+                init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(
+                    gt_T_to_camera_np,
+                    angle_range_deg=_current_angle_range,
+                    trans_range=train_noise["trans_range"],
+                    rotation_only=rotation_only,
+                    distribution=args.perturb_distribution,
+                    per_axis_prob=args.per_axis_prob,
+                    per_axis_weights=per_axis_weights_parsed,
+                    symmetric_perturb=bool(getattr(args, 'symmetric_perturb', 0)),
+                )
+                if _v321_continuous_noise:
+                    init_T_to_camera_np = _v321_apply_continuous_noise(
+                        init_T_to_camera_np, _v321_noise_max_deg, epoch=epoch)
+                elif _v32_tinit_dropout > 0:
+                    init_T_to_camera_np = _v32_apply_tinit_dropout(
+                        init_T_to_camera_np, gt_T_to_camera_np, _v32_tinit_dropout)
+
+            _v32_init_T_alt = None
+            if _v32_consistency_w > 0 and epoch >= _v32_consistency_start:
+                _v32_init_T_alt, _, _ = generate_single_perturbation_from_T(
+                    gt_T_to_camera_np,
+                    angle_range_deg=_current_angle_range,
+                    trans_range=train_noise["trans_range"],
+                    rotation_only=rotation_only,
+                    distribution=args.perturb_distribution,
+                    per_axis_prob=args.per_axis_prob,
+                    per_axis_weights=per_axis_weights_parsed,
+                )
+                if _v321_continuous_noise:
+                    _v32_init_T_alt = _v321_apply_continuous_noise(
+                        _v32_init_T_alt, _v321_noise_max_deg, epoch=epoch)
+                elif _v32_tinit_dropout > 0:
+                    _v32_init_T_alt = _v32_apply_tinit_dropout(
+                        _v32_init_T_alt, gt_T_to_camera_np, _v32_tinit_dropout)
+
             resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float()
             if args.augment_color_jitter > 0:
                 resize_imgs = _apply_color_jitter(resize_imgs, args.augment_color_jitter)
+            
+            # P2b: FOV crop augmentation (before intrinsic augmentation)
+            if args.augment_fov_crop_prob > 0 and random.random() < args.augment_fov_crop_prob:
+                resize_imgs, intrinsics = _apply_fov_crop(
+                    resize_imgs, intrinsics,
+                    crop_ratio_min=args.augment_fov_crop_ratio_min,
+                    crop_ratio_max=args.augment_fov_crop_ratio_max
+                )
+            
             if xyz_only_choise:
                 pcs_np = np.array(pcs)[:, :, :3]
             else:
                 pcs_np = np.array(pcs)
+            if args.max_pcd_points > 0:
+                pcs_np, masks = _subsample_pcd(pcs_np, masks, args.max_pcd_points)
             if args.augment_pc_jitter > 0:
                 pcs_np = pcs_np + np.random.normal(0, args.augment_pc_jitter, pcs_np.shape).astype(np.float32)
             if args.augment_pc_dropout > 0:
@@ -1512,6 +2876,19 @@ def main():
                     padded_masks.append(np.concatenate([new_masks[b], np.zeros(max_pts - n)]))
                 pcs_np = padded_pcs
                 masks = padded_masks
+            
+            # P2b: LiDAR sparsification augmentation
+            if args.augment_lidar_sparse_prob > 0 and random.random() < args.augment_lidar_sparse_prob:
+                target_lines_choices = _parse_csv_cli_list(args.augment_lidar_sparse_lines, cast=int)
+                target_lines = random.choice(target_lines_choices)
+                v_fov = _parse_csv_cli_list(args.augment_lidar_vertical_fov, cast=float)
+                pcs_np, masks = _apply_lidar_sparsification(
+                    pcs_np, masks,
+                    target_lines=target_lines,
+                    vertical_fov=tuple(v_fov),
+                    original_lines=128
+                )
+            
             if _do_detailed_profile:
                 t_cpu_aug_total += time.time() - t_prep_start
                 t_h2d_start = time.time()
@@ -1542,17 +2919,130 @@ def main():
                 optimizer.zero_grad(set_to_none=True)
             sync_ctx = model.no_sync() if (use_ddp and is_accum_step) else nullcontext()
             _bwd_ev = None
+            _jac_loss_w = getattr(args, 'jacobian_loss_weight', 0.0)
+            _jac_loss_start = getattr(args, 'jacobian_loss_start_epoch', 10)
+            _jac_interval = max(1, int(getattr(args, 'jacobian_loss_interval', 4)))
+            _jac_do_this_batch = (
+                _jac_loss_w > 0 and epoch >= _jac_loss_start
+                and batch_index % _jac_interval == 0)
+            B_cur = resize_imgs.shape[0]
+            # V32 consistency: split-forward approach (memory-safe).
+            # Run main batch with gradients, then alt batch with no_grad for consistency loss.
+            # The old 2B-concat approach OOMs on L20 (46GB) when B=16 → 2B=32.
+            _cons_need_alt_forward = (_v32_init_T_alt is not None and not _v321_ema_enabled)
+            if _cons_need_alt_forward:
+                init_T_alt_t = torch.from_numpy(
+                    _v32_init_T_alt.astype(np.float32)).to(device, non_blocking=True)
+            _fwd_imgs = resize_imgs
+            _fwd_pcs = pcs_t
+            _fwd_gt = gt_T_to_camera_t
+            _fwd_init = init_T_to_camera_t
+            _fwd_post = post_cam2ego_T
+            _fwd_K = intrinsic_matrix
+            _fwd_masks = masks_t
+            _fwd_dom = domain_ids_t
+            _cons_batched = False
             if _bwd_profile_events is not None:
                 _bwd_ev = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
             with sync_ctx:
                 try:
                     with autocast(enabled=use_amp, dtype=amp_dtype):
-                        T_pred, init_loss, loss = model(resize_imgs, pcs_t, gt_T_to_camera_t, init_T_to_camera_t, post_cam2ego_T, intrinsic_matrix, masks=masks_t, out_init_loss=out_init_loss_choice, domain_ids=domain_ids_t)
+                        _v42_kwargs = {}
+                        if _v42_enabled:
+                            _v42_kwargs['rocr_detach'] = (epoch < _v42_rocr_detach_epochs)
+                        T_pred_all, init_loss, loss = model(
+                            _fwd_imgs, _fwd_pcs, _fwd_gt, _fwd_init, _fwd_post, _fwd_K,
+                            masks=_fwd_masks, out_init_loss=out_init_loss_choice,
+                            domain_ids=_fwd_dom, **_v42_kwargs)
+                        T_pred = T_pred_all[:B_cur]
                         total_loss = loss["total_loss"]
+
+                        # V42: corr_alignment_loss (slice to B_cur for consistency-doubled batches)
+                        if _v42_corr_loss is not None and 'v42_delta_uv' in loss:
+                            _ca_loss = _v42_corr_loss(
+                                delta_uv_pred=loss['v42_delta_uv'][:B_cur],
+                                T_gt=_fwd_gt[:B_cur],
+                                T_init=_fwd_init[:B_cur],
+                                xyz_groups=loss['v42_xyz_groups'][:B_cur],
+                                cam_intrinsic=_fwd_K[:B_cur],
+                                valid_mask=loss['v42_valid_mask'][:B_cur],
+                                patch_size=loss.get('v42_patch_size', 4.0),
+                                current_epoch=epoch,
+                                corr_radius=getattr(args, 'cf_corr_radius', 4),
+                            )
+                            _ca_loss_raw = _ca_loss.item()
+                            _ca_cap = 10.0
+                            if _ca_loss_raw > _ca_cap:
+                                _ca_loss = _ca_loss * (_ca_cap / _ca_loss_raw)
+                            total_loss = total_loss + _ca_loss
+                            loss['corr_alignment_loss'] = _ca_loss_raw
+
+                        # V42: seq_consistency_loss (slice to B_cur for consistency-doubled batches)
+                        if (_v42_seq_loss is not None
+                                and epoch >= _v42_seq_consistency_start
+                                and 'v42_rotation' in loss):
+                            _rot_q = loss['v42_rotation'][:B_cur]
+                            _q_list = list(_rot_q.unbind(0))
+                            _sc_loss = _v42_seq_loss(_q_list)
+                            total_loss = total_loss + _sc_loss
+                            loss['seq_consistency_loss'] = _sc_loss.item()
+
                         if fd_mode == "supervision" and use_foundation_depth:
                             ds_loss = raw_model.img_branch.get_depth_supervision_loss(alpha=args.depth_sup_alpha)
                             total_loss = total_loss + ds_loss
                             loss["depth_sup_loss"] = ds_loss
+
+                        if _cons_need_alt_forward:
+                            with torch.no_grad():
+                                T_pred_alt_all, _, _ = raw_model(
+                                    resize_imgs, pcs_t, gt_T_to_camera_t,
+                                    init_T_alt_t, post_cam2ego_T, intrinsic_matrix,
+                                    masks=masks_t, out_init_loss=False)
+                            T_pred_alt = T_pred_alt_all.detach()
+                            R_diff = torch.bmm(
+                                T_pred[:, :3, :3], T_pred_alt[:, :3, :3].transpose(1, 2))
+                            trace = R_diff[:, 0, 0] + R_diff[:, 1, 1] + R_diff[:, 2, 2]
+                            consistency_loss = (1.0 - trace / 3.0).mean()
+                            total_loss = total_loss + _v32_consistency_w * consistency_loss
+                            loss["v32_consistency_loss"] = consistency_loss.item()
+                        elif _v32_init_T_alt is not None and _v321_ema_enabled:
+                            init_T_alt_t = torch.from_numpy(
+                                _v32_init_T_alt.astype(np.float32)).to(device, non_blocking=True)
+                            with torch.no_grad():
+                                T_pred_alt, _, _ = _v321_ema_model(
+                                    resize_imgs, pcs_t, gt_T_to_camera_t, init_T_alt_t,
+                                    post_cam2ego_T, intrinsic_matrix, masks=masks_t,
+                                    out_init_loss=False, domain_ids=domain_ids_t)
+                            R_diff = torch.bmm(
+                                T_pred[:, :3, :3], T_pred_alt[:, :3, :3].detach().transpose(1, 2))
+                            trace = R_diff[:, 0, 0] + R_diff[:, 1, 1] + R_diff[:, 2, 2]
+                            consistency_loss = (1.0 - trace / 3.0).mean()
+                            total_loss = total_loss + _v32_consistency_w * consistency_loss
+                            loss["v32_consistency_loss"] = consistency_loss.item()
+
+                        # V47: overcorrection penalty
+                        _overcorr_w = getattr(args, 'overcorrection_penalty', 0.0)
+                        if _overcorr_w > 0 and not _use_zero_perturb:
+                            with torch.no_grad():
+                                _R_pred = T_pred[:B_cur, :3, :3]
+                                _R_gt = _fwd_gt[:B_cur, :3, :3]
+                                _R_init = _fwd_init[:B_cur, :3, :3]
+                                _tr_pred = (_R_pred @ _R_gt.transpose(1, 2)).diagonal(dim1=-2, dim2=-1).sum(-1)
+                                _tr_init = (_R_init @ _R_gt.transpose(1, 2)).diagonal(dim1=-2, dim2=-1).sum(-1)
+                                _ang_pred = torch.acos(torch.clamp((_tr_pred - 1) / 2, -1 + 1e-7, 1 - 1e-7))
+                                _ang_init = torch.acos(torch.clamp((_tr_init - 1) / 2, -1 + 1e-7, 1 - 1e-7))
+                                _overcorr_ratio = (_ang_pred > _ang_init).float().mean()
+                            _overcorr_scale = 1.0 + _overcorr_w * _overcorr_ratio
+                            total_loss = total_loss * _overcorr_scale
+                            loss['overcorr_ratio'] = _overcorr_ratio.item()
+                            loss['overcorr_scale'] = _overcorr_scale.item()
+
+                        _mag_w = getattr(args, 'magnitude_loss_weight', 0.3)
+                        if 'magnitude_loss' in loss and _mag_w > 0:
+                            _mag_loss = loss['magnitude_loss']
+                            total_loss = total_loss + _mag_w * _mag_loss
+                            loss['magnitude_loss_weighted'] = (_mag_w * _mag_loss).item()
+
                         if grad_accum_steps > 1:
                             total_loss = total_loss / grad_accum_steps
                 except RuntimeError as _fwd_err:
@@ -1598,14 +3088,16 @@ def main():
                     raise
                 if torch.isnan(total_loss) or torch.isinf(total_loss):
                     if is_main:
-                        tprint(f"  [NaN GUARD] Skipping batch {batch_index}: "
-                               f"total_loss={total_loss.item()}, "
-                               + ", ".join(f"{k}={v.item() if torch.is_tensor(v) else v:.4f}"
-                                           for k, v in loss.items() if k != "total_loss"))
-                    optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
-                    t_iter_start = time.time()
-                    continue
+                        _nan_parts = []
+                        for k, v in loss.items():
+                            if k == "total_loss" or v is None:
+                                continue
+                            if torch.is_tensor(v) and v.dim() == 0 and not (torch.isnan(v) or torch.isinf(v)):
+                                _nan_parts.append(f"{k}={v.item():.4f}")
+                            elif not torch.is_tensor(v):
+                                _nan_parts.append(f"{k}={float(v):.4f}")
+                        tprint(f"  [NaN GUARD] Zeroing batch {batch_index}: " + ", ".join(_nan_parts))
+                    total_loss = total_loss * 0.0
                 if _bwd_ev is not None:
                     _bwd_ev[0].record()
                 try:
@@ -1662,6 +3154,39 @@ def main():
                         t_iter_start = time.time()
                         continue
                     raise
+                if _jac_do_this_batch:
+                    # After main backward: ProjFusion clear_buffer in jacobian probe
+                    # must not run while the consistency 2B forward graph is live.
+                    try:
+                        jac_out = _compute_jacobian_supervision_loss(
+                            model, resize_imgs, pcs_t, gt_T_to_camera_t,
+                            init_T_to_camera_np, post_cam2ego_T, intrinsic_matrix,
+                            masks_t, args.jacobian_loss_probe_deg, use_amp, amp_dtype,
+                            domain_ids_t=domain_ids_t, T_pred_center=T_pred.detach())
+                        if jac_out is not None:
+                            jac_sup, j_est_mean = jac_out
+                            _jac_term = _jac_loss_w * jac_sup
+                            if grad_accum_steps > 1:
+                                _jac_term = _jac_term / grad_accum_steps
+                            loss["jacobian_supervision_loss"] = jac_sup.item()
+                            loss["jacobian_j_est"] = j_est_mean.item()
+                            loss["jacobian_weighted"] = (_jac_loss_w * jac_sup).item()
+                            scaler.scale(_jac_term).backward()
+                    except RuntimeError as _jac_err:
+                        if is_main:
+                            tprint(f"  [JAC GUARD] jacobian backward failed at batch {batch_index}: {_jac_err}")
+                        optimizer.zero_grad(set_to_none=True)
+                        try:
+                            scaler.unscale_(optimizer)
+                        except RuntimeError:
+                            pass
+                        try:
+                            scaler.update()
+                        except (AssertionError, RuntimeError):
+                            pass
+                        global_step += 1
+                        t_iter_start = time.time()
+                        continue
                 if _bwd_ev is not None:
                     _bwd_ev[1].record()
             if not is_accum_step:
@@ -1674,28 +3199,69 @@ def main():
                     if is_main:
                         tprint(f"  [NaN GUARD] Inf/NaN in gradients at batch {batch_index}, "
                                f"affected params: {_found_inf}. Skipping optimizer step.")
+                    if not hasattr(main, '_nan_consec_count'):
+                        main._nan_consec_count = 0
+                    main._nan_consec_count += 1
+                    _NAN_RECOVERY_THRESH = 30
+                    if main._nan_consec_count >= _NAN_RECOVERY_THRESH:
+                        if is_main:
+                            _ckpt_dir = os.path.join(args.log_dir, args.label, 'checkpoint')
+                            _best_ckpt = os.path.join(_ckpt_dir, 'ckpt_best_val.pth')
+                            if os.path.exists(_best_ckpt):
+                                tprint(f"  [NaN RECOVERY] {main._nan_consec_count} consecutive NaN batches! "
+                                       f"Rolling back to {_best_ckpt}")
+                                _ckpt = torch.load(_best_ckpt, map_location=device)
+                                raw_model.load_state_dict(_ckpt['model_state_dict'], strict=False)
+                                if 'optimizer_state_dict' in _ckpt:
+                                    optimizer.load_state_dict(_ckpt['optimizer_state_dict'])
+                                main._nan_consec_count = 0
+                                tprint(f"  [NaN RECOVERY] Model restored. Reducing LR by 0.5x.")
+                                for _pg in optimizer.param_groups:
+                                    _pg['lr'] *= 0.5
+                            else:
+                                tprint(f"  [NaN RECOVERY] {main._nan_consec_count} consecutive NaN! "
+                                       f"No best_val checkpoint found, zeroing grads and continuing.")
+                                main._nan_consec_count = 0
                     optimizer.zero_grad(set_to_none=True)
                     scaler.update()
                     global_step += 1
                     t_iter_start = time.time()
                     continue
+                else:
+                    if hasattr(main, '_nan_consec_count'):
+                        main._nan_consec_count = 0
                 if is_main and batch_index % 50 == 0:
-                    bb_gn, hd_gn, mod_gn = _compute_grad_norms()
+                    bb_gn, bev_gn, hd_gn, mod_gn = _compute_grad_norms()
                     _epoch_grad_accum['bb'].append(bb_gn)
+                    _epoch_grad_accum['bev'].append(bev_gn)
                     _epoch_grad_accum['hd'].append(hd_gn)
                     for m, v in mod_gn.items():
                         _epoch_grad_accum['mod'].setdefault(m, []).append(v)
                     if writer is not None:
                         writer.add_scalar('GradNorm/backbone', bb_gn, global_step)
+                        writer.add_scalar('GradNorm/bev_branch', bev_gn, global_step)
                         writer.add_scalar('GradNorm/head', hd_gn, global_step)
                         writer.add_scalar('GradNorm/ratio_hd_bb', hd_gn / max(bb_gn, 1e-10), global_step)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
+                if _v42_enabled:
+                    _corr_params = [p for n, p in raw_model.named_parameters()
+                                    if 'corr' in n and p.grad is not None]
+                    if _corr_params:
+                        torch.nn.utils.clip_grad_norm_(_corr_params, max_norm=5.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
                 if _bwd_ev is not None:
                     _bwd_ev[2].record()
                 scaler.step(optimizer)
                 scaler.update()
+                if _v321_ema_enabled and _v321_ema_model is not None:
+                    _tau = _v321_ema_decay
+                    with torch.no_grad():
+                        for p_online, p_ema in zip(raw_model.parameters(), _v321_ema_model.parameters()):
+                            p_ema.data.mul_(_tau).add_(p_online.data, alpha=1 - _tau)
+                        for b_online, b_ema in zip(raw_model.buffers(), _v321_ema_model.buffers()):
+                            b_ema.data.copy_(b_online.data)
                 if _bwd_ev is not None:
                     _bwd_ev[3].record()
+
             if _bwd_ev is not None:
                 _bwd_profile_events.append((_bwd_ev, not is_accum_step))
             t_compute_total += time.time() - t_compute_start
@@ -1704,12 +3270,20 @@ def main():
                 batch_errors = compute_batch_pose_errors(T_pred, gt_T_to_camera_t)
                 for key in epoch_pose_errors:
                     epoch_pose_errors[key] += batch_errors[key]
+                if is_main:
+                    _accumulate_fusion_gate_stats(raw_model, _gate_stats)
             
             for key in loss.keys():
+                _val = loss[key]
+                if _val is None:
+                    continue
+                if hasattr(_val, 'dim') and _val.dim() > 0:
+                    continue
+                _lv = _val.item() if hasattr(_val, 'item') else float(_val)
                 if key not in train_loss:
-                    train_loss[key] = loss[key].item()
+                    train_loss[key] = _lv
                 else:
-                    train_loss[key] += loss[key].item()
+                    train_loss[key] += _lv
             
             if init_loss is not None:
                 for key in init_loss.keys():
@@ -1720,14 +3294,18 @@ def main():
                         train_loss[train_key] += init_loss[key].item()
 
             if batch_index % 10 == 0 and is_main:
-                if rotation_only:
-                    tprint(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], "
-                           f"Loss: {total_loss.item():.4f} (total), Rot: {batch_errors['rot_error']:.2f}°")
-                else:
-                    tprint(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], "
-                           f"Loss: {total_loss.item():.4f} (total), Trans: {batch_errors['trans_error']:.4f}m "
-                           f"(Fwd:{batch_errors['fwd_error']:.4f}m Lat:{batch_errors['lat_error']:.4f}m Ht:{batch_errors['ht_error']:.4f}m), "
-                           f"Rot: {batch_errors['rot_error']:.2f}°")
+                _v32_suffix = ""
+                if _v32_enabled:
+                    _v32_parts = [f"ang={_current_angle_range:.1f}°"]
+                    _v32_suffix = f" | v32[{' '.join(_v32_parts)}]"
+                _corr_w = float(getattr(args, 'correspondence_loss_weight', 0.0) or 0.0)
+                _loss_head = _format_step_loss_head(
+                    total_loss, loss, batch_errors, rotation_only, _corr_w)
+                _gmp_suffix = _format_gmp_step_suffix(loss, _corr_w)
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_index+1}/{len(train_loader)}], "
+                       f"{_loss_head}{_v32_suffix}{_gmp_suffix}")
+                if writer is not None:
+                    _log_gmp_step_scalars(writer, loss, global_step)
             
             if args.enable_vis > 0 and batch_index % args.vis_freq == 0 and is_main:
                 t_vis_start = time.time()
@@ -1793,7 +3371,7 @@ def main():
             if _do_detailed_profile:
                 tprint(f"  Prep detail: cpu_aug={t_cpu_aug_total:.1f}s({t_cpu_aug_total/epoch_time*100:.1f}%), "
                        f"h2d_transfer={t_h2d_total:.1f}s({t_h2d_total/epoch_time*100:.1f}%)")
-            mod_prof = raw_model.get_module_profile(reset=True)
+            mod_prof = raw_model.get_module_profile(reset=True) if hasattr(raw_model, 'get_module_profile') else {}
             if mod_prof:
                 total_ms = mod_prof.get("total", 1)
                 parts = " | ".join(f"{k}={v:.1f}ms({v/total_ms*100:.0f}%)" for k, v in mod_prof.items() if k != "total")
@@ -1855,6 +3433,26 @@ def main():
                     unit_str = " (quaternion normalization)"
                 elif key == "translation_loss":
                     unit_str = "m"
+                elif key == "correspondence_loss":
+                    unit_str = "px (L_corr)"
+                elif key == "match_valid_ratio":
+                    unit_str = " (match inlier ratio, GT-masked alias)"
+                elif key == "match_valid_ratio_init":
+                    unit_str = " (match inlier ratio, T_init only)"
+                elif key == "match_valid_ratio_gt":
+                    unit_str = " (match inlier ratio, GT-masked, gates fallback)"
+                elif key == "match_fallback_ratio":
+                    unit_str = " (EPnP fallback to refine-only, uses valid_gt)"
+                elif key == "epnp_insufficient_ratio":
+                    unit_str = " (EPnP returned identity: weight count < min_points)"
+                elif key == "epnp_mean_effective_points":
+                    unit_str = " (mean EPnP points with weight > 1e-4)"
+                elif key == "epnp_grad_detached":
+                    unit_str = " (1=warmup, pose grad off EPnP)"
+                elif key == "corr_valid_ratio":
+                    unit_str = " (local corr window valid)"
+                elif key == "geo_valid_ratio":
+                    unit_str = " (geo consistency valid)"
                 else:
                     unit_str = ""
                 
@@ -1885,6 +3483,18 @@ def main():
             writer.add_scalar('Epoch/train/roll_error_deg', epoch_pose_errors['roll_error'], epoch)
             writer.add_scalar('Epoch/train/pitch_error_deg', epoch_pose_errors['pitch_error'], epoch)
             writer.add_scalar('Epoch/train/yaw_error_deg', epoch_pose_errors['yaw_error'], epoch)
+
+            if _gate_stats['gate_count'] > 0:
+                _gn = _gate_stats['gate_count']
+                _mean_bev = _gate_stats['gate_bev_sum'] / _gn
+                _mean_proj = _gate_stats['gate_proj_sum'] / _gn
+                _mean_ent = _gate_stats['gate_entropy_sum'] / _gn
+                writer.add_scalar('Epoch/train/gate_bev_mean', _mean_bev, epoch)
+                writer.add_scalar('Epoch/train/gate_proj_mean', _mean_proj, epoch)
+                writer.add_scalar('Epoch/train/gate_entropy', _mean_ent, epoch)
+                tprint(f"Epoch [{epoch+1}/{num_epochs}], Gate mean: "
+                       f"bev={_mean_bev:.3f} proj={_mean_proj:.3f} entropy={_mean_ent:.3f} "
+                       f"(collapse if entropy→0 or weight→1)")
             
             cur_train_loss = train_loss.get('total_loss', float('inf')) if train_loss else float('inf')
             if rotation_only:
@@ -1919,8 +3529,14 @@ def main():
                 'epoch_val_errors': last_epoch_val_errors,
                 'best_train': best_train,
                 'best_val': best_val,
+                'best_medw': best_medw,
+                'best_dual': best_dual,
+                'kpi_history': kpi_history,
+                'early_stop_counter': early_stop_counter,
                 'args': vars(args),
             }
+            if _v321_ema_enabled and _v321_ema_model is not None:
+                _ckpt_data['ema_state_dict'] = _v321_ema_model.state_dict()
             _ckpt_data.update(_build_ckpt_metadata(model, args))
             torch.save(_ckpt_data, ckpt_path)
             tprint(f"Checkpoint saved to {ckpt_path}")
@@ -1969,15 +3585,18 @@ def main():
                             pcs_np = np.array(pcs)[:, :, :3]
                         else:
                             pcs_np = np.array(pcs)
+                        if args.max_pcd_points > 0:
+                            pcs_np, masks = _subsample_pcd(pcs_np, masks, args.max_pcd_points)
                         pcs = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
                         gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device, non_blocking=True)
                         init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device, non_blocking=True)
                         B_cur = gt_T_to_camera.shape[0]
                         post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
                         intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device, non_blocking=True)
+                        masks_t_vis = torch.from_numpy(np.array(masks)).float().to(device, non_blocking=True) if masks is not None else None
                         
                         with autocast(enabled=use_amp, dtype=amp_dtype):
-                            T_pred, _, _ = raw_model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+                            T_pred, _, _ = raw_model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks_t_vis, out_init_loss=False)
                         
                         imgs_np = np.array(imgs)
                         masks_np = np.array(masks)
@@ -2110,9 +3729,12 @@ def main():
         if use_ddp:
             dist.barrier()
 
-        if epoch % args.eval_epoches == 0 and is_main:
+        if epoch % args.eval_epoches == 0:
+            torch.cuda.empty_cache()
             eval_trans_range = eval_noise["trans_range"]
             eval_angle_range = eval_noise["angle_range_deg"]
+            if val_sampler is not None:
+                val_sampler.set_epoch(epoch)
             raw_model.eval()
             val_loss = {}
             val_pose_errors = {
@@ -2120,7 +3742,19 @@ def main():
                 'rot_error': 0, 'roll_error': 0, 'pitch_error': 0, 'yaw_error': 0,
             }
             val_processed_batches = 0
-            
+            medw_T_pred, medw_T_gt, medw_seqs = [], [], []
+            medw_local_idx = 0
+            if use_ddp:
+                rank_val_indices = _ddp_val_rank_indices(
+                    len(val_dataset), dist.get_rank(), dist.get_world_size())
+            else:
+                rank_val_indices = list(range(len(val_dataset)))
+
+            jacobian_axis_accum = (
+                {'roll': [], 'pitch': [], 'yaw': []}
+                if args.enable_jacobian_eval > 0 else None
+            )
+
             with torch.no_grad():
                 for batch_index, batch_data in enumerate(val_loader):
                     if batch_data is None:
@@ -2136,26 +3770,55 @@ def main():
                         pcs_np = np.array(pcs)[:, :, :3]
                     else:
                         pcs_np = np.array(pcs)
+                    if args.max_pcd_points > 0:
+                        pcs_np, masks = _subsample_pcd(pcs_np, masks, args.max_pcd_points)
                     pcs = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
                     gt_T_to_camera = torch.from_numpy(gt_T_to_camera_np).float().to(device, non_blocking=True)
                     init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device, non_blocking=True)
                     B_cur = gt_T_to_camera.shape[0]
                     post_cam2ego_T = _identity_4x4.unsqueeze(0).expand(B_cur, -1, -1)
                     intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device, non_blocking=True)
+                    masks_t_val = torch.from_numpy(np.array(masks)).float().to(device, non_blocking=True) if masks is not None else None
                     with autocast(enabled=use_amp, dtype=amp_dtype):
-                        T_pred, init_loss, loss = raw_model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+                        T_pred, init_loss, loss = raw_model(resize_imgs, pcs, gt_T_to_camera, init_T_to_camera, post_cam2ego_T, intrinsic_matrix, masks=masks_t_val, out_init_loss=False)
 
-                    # 计算姿态误差
                     batch_errors = compute_batch_pose_errors(T_pred, gt_T_to_camera)
                     for key in val_pose_errors:
                         val_pose_errors[key] += batch_errors[key]
 
+                    # Jacobian: piggyback on already-loaded val batch (no 2nd dataloader pass).
+                    # Extra cost = jacobian_eval_batches × 3 axes × n_probes forwards per eval epoch.
+                    if (jacobian_axis_accum is not None
+                            and batch_index < args.jacobian_eval_batches):
+                        j_batch = _compute_jacobian_one_batch(
+                            raw_model, imgs, pcs_np, masks, gt_T_to_camera_np, intrinsics,
+                            device, args.jacobian_eval_angle_deg, args.jacobian_eval_n_probes,
+                            use_amp, amp_dtype, _identity_4x4, xyz_only_choise)
+                        for k, v in j_batch.items():
+                            if v == v:
+                                jacobian_axis_accum[k].append(v)
+
+                    if args.enable_medw_eval > 0 and val_idx_to_seq is not None:
+                        T_pred_np_medw = T_pred.detach().cpu().numpy()
+                        for i in range(B_cur):
+                            global_val_idx = rank_val_indices[medw_local_idx + i]
+                            medw_seqs.append(val_idx_to_seq.get(global_val_idx, 'unknown'))
+                            medw_T_pred.append(T_pred_np_medw[i].copy())
+                            medw_T_gt.append(gt_T_to_camera_np[i].copy())
+                        medw_local_idx += B_cur
+
                     for key in loss.keys():
+                        _val = loss[key]
+                        if _val is None:
+                            continue
+                        if hasattr(_val, 'dim') and _val.dim() > 0:
+                            continue
                         val_key = key
+                        _lv = _val.item() if hasattr(_val, 'item') else float(_val)
                         if val_key not in val_loss.keys():
-                            val_loss[val_key] = loss[key].item()
+                            val_loss[val_key] = _lv
                         else:
-                            val_loss[val_key] += loss[key].item()
+                            val_loss[val_key] += _lv
                     if init_loss is not None:
                         for key in init_loss.keys():
                             val_key = f"init_{key}"
@@ -2163,15 +3826,14 @@ def main():
                                 val_loss[val_key] = init_loss[key].item()
                             else:
                                 val_loss[val_key] += init_loss[key].item()
-                    
+
                     val_processed_batches += 1
-                    
-                    # 验证集可视化 (每个epoch只可视化第一个batch)
-                    if args.enable_vis > 0 and batch_index == 0:
+
+                    if is_main and args.enable_vis > 0 and batch_index == 0:
                         imgs_np = np.array(imgs)
                         masks_np = np.array(masks)
                         T_pred_np = T_pred.detach().cpu().numpy()
-                        
+
                         vis_image = visualize_batch_projection(
                             images=imgs_np,
                             points_batch=pcs_np,
@@ -2189,115 +3851,314 @@ def main():
                             epoch_train_errors=last_epoch_train_errors,
                             epoch_val_errors=last_epoch_val_errors,
                         )
-                        
+
                         vis_image_tb = prepare_image_for_tensorboard(vis_image)
                         writer.add_image('Val/Projection', vis_image_tb, epoch)
 
-            # 构建验证集标签（清晰标注扰动范围）
-            if rotation_only:
-                val_label = f"Val[±{eval_angle_range}°]"
-            else:
-                val_label = f"Val[±{eval_angle_range}°, ±{eval_trans_range}m]"
-            
-            effective_val_batches = max(1, val_processed_batches)
-            for key in val_loss.keys():
-                val_loss[key] /= effective_val_batches
-                if rotation_only and 'translation' in key:
-                    continue
-                # 为各个损失添加单位说明
-                if key == "total_loss":
-                    unit_str = " (weighted sum)"
-                elif key == "rotation_loss":
-                    unit_str = "° (for display; total_loss uses radians)"
-                elif key == "geodesic_loss":
-                    unit_str = "° (geodesic; drives training)"
-                elif key == "PC_reproj_loss":
-                    unit_str = " (point cloud reprojection)"
-                elif key == "quat_norm_loss":
-                    unit_str = " (quaternion normalization)"
-                elif key == "translation_loss":
-                    unit_str = "m"
-                else:
-                    unit_str = ""
-                
-                tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Loss {key}: {val_loss[key]:.4f}{unit_str}")
-                writer.add_scalar(f"Loss/val/{key}", val_loss[key], epoch)
-            
-            for key in val_pose_errors:
-                val_pose_errors[key] /= effective_val_batches
-            last_epoch_val_errors = dict(val_pose_errors)
-            
-            if rotation_only:
-                tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Pose Error - "
-                       f"Rot: {val_pose_errors['rot_error']:.2f}° "
-                       f"(Roll:{val_pose_errors['roll_error']:.2f}° Pitch:{val_pose_errors['pitch_error']:.2f}° Yaw:{val_pose_errors['yaw_error']:.2f}°)")
-            else:
-                tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Pose Error - "
-                       f"Trans: {val_pose_errors['trans_error']:.4f}m "
-                       f"(Fwd:{val_pose_errors['fwd_error']:.4f}m Lat:{val_pose_errors['lat_error']:.4f}m Ht:{val_pose_errors['ht_error']:.4f}m), "
-                       f"Rot: {val_pose_errors['rot_error']:.2f}° "
-                       f"(Roll:{val_pose_errors['roll_error']:.2f}° Pitch:{val_pose_errors['pitch_error']:.2f}° Yaw:{val_pose_errors['yaw_error']:.2f}°)")
-            
-            if not rotation_only:
-                writer.add_scalar('Epoch/val/trans_error_m', val_pose_errors['trans_error'], epoch)
-                writer.add_scalar('Epoch/val/fwd_error_m', val_pose_errors['fwd_error'], epoch)
-                writer.add_scalar('Epoch/val/lat_error_m', val_pose_errors['lat_error'], epoch)
-                writer.add_scalar('Epoch/val/ht_error_m', val_pose_errors['ht_error'], epoch)
-            writer.add_scalar('Epoch/val/rot_error_deg', val_pose_errors['rot_error'], epoch)
-            writer.add_scalar('Epoch/val/roll_error_deg', val_pose_errors['roll_error'], epoch)
-            writer.add_scalar('Epoch/val/pitch_error_deg', val_pose_errors['pitch_error'], epoch)
-            writer.add_scalar('Epoch/val/yaw_error_deg', val_pose_errors['yaw_error'], epoch)
-            
-            if rotation_only:
-                cur_val_score = val_pose_errors['rot_error']
-                best_val_score = best_val['rot']
-            else:
-                cur_val_score = val_pose_errors['trans_error'] + val_pose_errors['rot_error'] * 0.1
-                best_val_score = best_val['trans'] + best_val['rot'] * 0.1
-            if cur_val_score < best_val_score:
-                cur_val_loss = val_loss.get('total_loss', float('inf')) if val_loss else float('inf')
-                best_val.update({
-                    'epoch': epoch + 1,
-                    'loss': cur_val_loss,
-                    'trans': val_pose_errors['trans_error'],
-                    'rot': val_pose_errors['rot_error'],
-                    'errors': dict(val_pose_errors),
-                })
-                early_stop_counter = 0
-                best_ckpt_path = os.path.join(ckpt_save_dir, "ckpt_best_val.pth")
-                model_to_save = model.module if use_ddp else model
-                _best_data = {
-                    'epoch': epoch + 1,
-                    'model_state_dict': model_to_save.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
-                    'scaler_state_dict': scaler.state_dict(),
-                    'train_noise': train_noise,
-                    'eval_noise': eval_noise,
-                    'rotation_only': rotation_only,
-                    'epoch_train_errors': last_epoch_train_errors,
-                    'epoch_val_errors': dict(val_pose_errors),
-                    'best_train': best_train,
-                    'best_val': best_val,
-                    'args': vars(args),
-                }
-                _best_data.update(_build_ckpt_metadata(model, args))
-                torch.save(_best_data, best_ckpt_path)
-                tprint(f"Best val model saved to {best_ckpt_path} "
-                       f"(val_rot={val_pose_errors['rot_error']:.4f}°)")
-            else:
-                early_stop_counter += 1
-                if args.early_stopping_patience > 0:
-                    tprint(f"Val did not improve for {early_stop_counter} eval cycles "
-                           f"(patience={args.early_stopping_patience})")
+            # DDP: 聚合各 rank 的 val 统计
+            if use_ddp:
+                val_processed_batches = int(_ddp_all_reduce_scalar(val_processed_batches, device))
+                val_loss = _ddp_all_reduce_dict_sum(val_loss, device)
+                val_pose_errors = _ddp_all_reduce_dict_sum(val_pose_errors, device)
+                if args.enable_medw_eval > 0 and medw_T_pred:
+                    gathered_medw = _ddp_gather_object((medw_T_pred, medw_T_gt, medw_seqs))
+                    if is_main:
+                        medw_T_pred, medw_T_gt, medw_seqs = [], [], []
+                        for pred, gt, seqs in gathered_medw:
+                            medw_T_pred.extend(pred)
+                            medw_T_gt.extend(gt)
+                            medw_seqs.extend(seqs)
 
-            if args.early_stopping_patience > 0 and early_stop_counter >= args.early_stopping_patience:
-                tprint(f"Early stopping triggered at epoch {epoch+1} "
-                       f"(no val improvement for {early_stop_counter} eval cycles)")
-                early_stop_triggered = True
+            jac_result = None
+            if jacobian_axis_accum is not None:
+                if use_ddp:
+                    _jac_gather = _ddp_gather_object(jacobian_axis_accum)
+                    if is_main:
+                        _merged_acc = {'roll': [], 'pitch': [], 'yaw': []}
+                        for acc in _jac_gather:
+                            for k in _merged_acc:
+                                _merged_acc[k].extend(acc.get(k, []))
+                        jac_result = _finalize_jacobian_axis_accum(_merged_acc)
+                else:
+                    jac_result = _finalize_jacobian_axis_accum(jacobian_axis_accum)
+
+            raw_model.train()
+
+            if is_main:
+                if rotation_only:
+                    val_label = f"Val[±{eval_angle_range}°]"
+                else:
+                    val_label = f"Val[±{eval_angle_range}°, ±{eval_trans_range}m]"
+
+                effective_val_batches = max(1, val_processed_batches)
+                for key in val_loss.keys():
+                    val_loss[key] /= effective_val_batches
+                    if rotation_only and 'translation' in key:
+                        continue
+                    if key == "total_loss":
+                        unit_str = " (weighted sum)"
+                    elif key == "rotation_loss":
+                        unit_str = "° (for display; total_loss uses radians)"
+                    elif key == "geodesic_loss":
+                        unit_str = "° (geodesic; drives training)"
+                    elif key == "PC_reproj_loss":
+                        unit_str = " (point cloud reprojection)"
+                    elif key == "quat_norm_loss":
+                        unit_str = " (quaternion normalization)"
+                    elif key == "translation_loss":
+                        unit_str = "m"
+                    elif key == "correspondence_loss":
+                        unit_str = "px (L_corr)"
+                    elif key == "match_valid_ratio":
+                        unit_str = " (match inlier ratio, GT-masked alias)"
+                    elif key == "match_valid_ratio_init":
+                        unit_str = " (match inlier ratio, T_init only)"
+                    elif key == "match_valid_ratio_gt":
+                        unit_str = " (match inlier ratio, GT-masked, gates fallback)"
+                    elif key == "match_fallback_ratio":
+                        unit_str = " (EPnP fallback to refine-only, uses valid_gt)"
+                    elif key == "epnp_insufficient_ratio":
+                        unit_str = " (EPnP returned identity: weight count < min_points)"
+                    elif key == "epnp_mean_effective_points":
+                        unit_str = " (mean EPnP points with weight > 1e-4)"
+                    elif key == "epnp_grad_detached":
+                        unit_str = " (1=warmup, pose grad off EPnP)"
+                    elif key == "corr_valid_ratio":
+                        unit_str = " (local corr window valid)"
+                    elif key == "geo_valid_ratio":
+                        unit_str = " (geo consistency valid)"
+                    else:
+                        unit_str = ""
+
+                    tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Loss {key}: {val_loss[key]:.4f}{unit_str}")
+                    writer.add_scalar(f"Loss/val/{key}", val_loss[key], epoch)
+
+                for key in val_pose_errors:
+                    val_pose_errors[key] /= effective_val_batches
+                last_epoch_val_errors = dict(val_pose_errors)
+
+                if rotation_only:
+                    tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Pose Error - "
+                           f"Rot: {val_pose_errors['rot_error']:.2f}° "
+                           f"(Roll:{val_pose_errors['roll_error']:.2f}° Pitch:{val_pose_errors['pitch_error']:.2f}° Yaw:{val_pose_errors['yaw_error']:.2f}°)")
+                else:
+                    tprint(f"Epoch [{epoch+1}/{num_epochs}], {val_label} Pose Error - "
+                           f"Trans: {val_pose_errors['trans_error']:.4f}m "
+                           f"(Fwd:{val_pose_errors['fwd_error']:.4f}m Lat:{val_pose_errors['lat_error']:.4f}m Ht:{val_pose_errors['ht_error']:.4f}m), "
+                           f"Rot: {val_pose_errors['rot_error']:.2f}° "
+                           f"(Roll:{val_pose_errors['roll_error']:.2f}° Pitch:{val_pose_errors['pitch_error']:.2f}° Yaw:{val_pose_errors['yaw_error']:.2f}°)")
+
+                if not rotation_only:
+                    writer.add_scalar('Epoch/val/trans_error_m', val_pose_errors['trans_error'], epoch)
+                    writer.add_scalar('Epoch/val/fwd_error_m', val_pose_errors['fwd_error'], epoch)
+                    writer.add_scalar('Epoch/val/lat_error_m', val_pose_errors['lat_error'], epoch)
+                    writer.add_scalar('Epoch/val/ht_error_m', val_pose_errors['ht_error'], epoch)
+                writer.add_scalar('Epoch/val/rot_error_deg', val_pose_errors['rot_error'], epoch)
+                writer.add_scalar('Epoch/val/roll_error_deg', val_pose_errors['roll_error'], epoch)
+                writer.add_scalar('Epoch/val/pitch_error_deg', val_pose_errors['pitch_error'], epoch)
+                writer.add_scalar('Epoch/val/yaw_error_deg', val_pose_errors['yaw_error'], epoch)
+
+                medw_result = None
+                if args.enable_medw_eval > 0 and medw_T_pred:
+                    medw_result = _compute_medw_from_val_accum(
+                        medw_T_pred, medw_T_gt, medw_seqs, window=args.medw_eval_max_frames)
+                    if medw_result is not None:
+                        _medw_mx = _medw_max_rpy(medw_result)
+                        writer.add_scalar('Epoch/medw/rot_error_deg', medw_result['rot'], epoch)
+                        writer.add_scalar('Epoch/medw/roll_error_deg', medw_result['roll'], epoch)
+                        writer.add_scalar('Epoch/medw/pitch_error_deg', medw_result['pitch'], epoch)
+                        writer.add_scalar('Epoch/medw/yaw_error_deg', medw_result['yaw'], epoch)
+                        writer.add_scalar('Epoch/medw/max_rpy_error_deg', _medw_mx, epoch)
+                        tprint(f"Epoch [{epoch+1}/{num_epochs}], MEDW{args.medw_eval_max_frames} "
+                               f"(val reuse): max(R,P,Y)={_medw_mx:.4f}° "
+                               f"(R:{medw_result['roll']:.4f} P:{medw_result['pitch']:.4f} "
+                               f"Y:{medw_result['yaw']:.4f}, rot={medw_result['rot']:.4f}°)")
+                    else:
+                        tprint(f"  [MEDW WARN] MEDW{args.medw_eval_max_frames} eval returned no result")
+
+                if rotation_only:
+                    cur_val_score = val_pose_errors['rot_error']
+                    best_val_score = best_val['rot']
+                else:
+                    cur_val_score = val_pose_errors['trans_error'] + val_pose_errors['rot_error'] * 0.1
+                    best_val_score = best_val['trans'] + best_val['rot'] * 0.1
+                if cur_val_score < best_val_score:
+                    cur_val_loss = val_loss.get('total_loss', float('inf')) if val_loss else float('inf')
+                    best_val.update({
+                        'epoch': epoch + 1,
+                        'loss': cur_val_loss,
+                        'trans': val_pose_errors['trans_error'],
+                        'rot': val_pose_errors['rot_error'],
+                        'errors': dict(val_pose_errors),
+                    })
+                    early_stop_counter = 0
+                    best_ckpt_path = os.path.join(ckpt_save_dir, "ckpt_best_val.pth")
+                    model_to_save = model.module if use_ddp else model
+                    _best_data = {
+                        'epoch': epoch + 1,
+                        'model_state_dict': model_to_save.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                        'scaler_state_dict': scaler.state_dict(),
+                        'train_noise': train_noise,
+                        'eval_noise': eval_noise,
+                        'rotation_only': rotation_only,
+                        'epoch_train_errors': last_epoch_train_errors,
+                        'epoch_val_errors': dict(val_pose_errors),
+                        'best_train': best_train,
+                        'best_val': best_val,
+                        'args': vars(args),
+                    }
+                    _best_data.update(_build_ckpt_metadata(model, args))
+                    if _v321_ema_enabled and _v321_ema_model is not None:
+                        _best_data['ema_state_dict'] = _v321_ema_model.state_dict()
+                    torch.save(_best_data, best_ckpt_path)
+                    tprint(f"Best val model saved to {best_ckpt_path} "
+                           f"(val_rot={val_pose_errors['rot_error']:.4f}°)")
+                else:
+                    early_stop_counter += 1
+                    if args.early_stopping_patience > 0:
+                        tprint(f"Val did not improve for {early_stop_counter} eval cycles "
+                               f"(patience={args.early_stopping_patience})")
+
+                if args.early_stopping_patience > 0 and early_stop_counter >= args.early_stopping_patience:
+                    tprint(f"Early stopping triggered at epoch {epoch+1} "
+                           f"(no val improvement for {early_stop_counter} eval cycles)")
+                    early_stop_triggered = True
+
+                if args.enable_jacobian_eval > 0 and jac_result is not None:
+                    writer.add_scalar('Epoch/jacobian/overall', jac_result['overall'], epoch)
+                    writer.add_scalar('Epoch/jacobian/roll', jac_result['roll'], epoch)
+                    writer.add_scalar('Epoch/jacobian/pitch', jac_result['pitch'], epoch)
+                    writer.add_scalar('Epoch/jacobian/yaw', jac_result['yaw'], epoch)
+                    tprint(f"Epoch [{epoch+1}/{num_epochs}], Jacobian ±{args.jacobian_eval_angle_deg}° "
+                           f"(controlled sweep, correction=init_err-out_err): "
+                           f"Overall={jac_result['overall']:.3f} "
+                           f"(R:{jac_result['roll']:.3f} P:{jac_result['pitch']:.3f} "
+                           f"Y:{jac_result['yaw']:.3f}) [{jac_result['verdict']}]")
+                elif args.enable_jacobian_eval > 0:
+                    tprint("  [JAC WARN] Insufficient Jacobian data from val sweep")
+
+                if args.enable_medw_eval > 0 and medw_result is not None:
+                    medw_max_rpy = _medw_max_rpy(medw_result)
+                    if medw_max_rpy < best_medw.get('max_rpy', float('inf')):
+                        best_medw.update({
+                            'epoch': epoch + 1,
+                            'rot': medw_result['rot'],
+                            'roll': medw_result['roll'],
+                            'pitch': medw_result['pitch'],
+                            'yaw': medw_result['yaw'],
+                            'max_rpy': medw_max_rpy,
+                        })
+                        model_to_save = model.module if use_ddp else model
+                        best_medw_path = os.path.join(ckpt_save_dir, 'ckpt_best_medw.pth')
+                        _medw_best_data = {
+                            'epoch': epoch + 1,
+                            'model_state_dict': model_to_save.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'scaler_state_dict': scaler.state_dict(),
+                            'train_noise': train_noise,
+                            'eval_noise': eval_noise,
+                            'rotation_only': rotation_only,
+                            'epoch_train_errors': last_epoch_train_errors,
+                            'epoch_val_errors': last_epoch_val_errors,
+                            'best_train': best_train,
+                            'best_val': best_val,
+                            'best_medw': best_medw,
+                            'medw_eval': medw_result,
+                            'args': vars(args),
+                        }
+                        _medw_best_data.update(_build_ckpt_metadata(model, args))
+                        if _v321_ema_enabled and _v321_ema_model is not None:
+                            _medw_best_data['ema_state_dict'] = _v321_ema_model.state_dict()
+                        torch.save(_medw_best_data, best_medw_path)
+                        medw_log_path = os.path.join(ckpt_save_dir, 'medw_eval_summary.json')
+                        with open(medw_log_path, 'w') as jf:
+                            json.dump({
+                                'best_medw_rot': medw_result['rot'],
+                                'best_medw_max_rpy': medw_max_rpy,
+                                'best_medw_roll': medw_result['roll'],
+                                'best_medw_pitch': medw_result['pitch'],
+                                'best_medw_yaw': medw_result['yaw'],
+                                'best_epoch': epoch + 1,
+                                'best_ckpt_path': best_medw_path,
+                                'medw_window': args.medw_eval_max_frames,
+                                'medw_source': 'val_split_reuse',
+                            }, jf, indent=2)
+                        tprint(f"  ★ New best MEDW → {best_medw_path} "
+                               f"(max_rpy={medw_max_rpy:.4f}° R={medw_result['roll']:.4f} "
+                               f"P={medw_result['pitch']:.4f} Y={medw_result['yaw']:.4f})")
+
+                _dual_pass = False
+                if args.enable_dual_gate_ckpt > 0 and medw_result is not None and jac_result is not None:
+                    _dual_pass = _dual_gate_pass(
+                        medw_result, jac_result,
+                        args.dual_gate_medw_max, args.dual_gate_jacobian_min)
+                    _dg_verdict, _dg_medw, _dg_jac = _format_dual_gate_status(
+                        medw_result, jac_result,
+                        args.dual_gate_medw_max, args.dual_gate_jacobian_min)
+                    if _dual_pass:
+                        medw_max_rpy = _medw_max_rpy(medw_result)
+                        jac_ov = float(jac_result['overall'])
+                        dual_score = medw_max_rpy - 0.05 * _jacobian_min_axis(jac_result)
+                        if dual_score < best_dual['score']:
+                            best_dual.update({
+                                'epoch': epoch + 1,
+                                'score': dual_score,
+                                'medw_max_rpy': medw_max_rpy,
+                                'medw_roll': medw_result['roll'],
+                                'medw_pitch': medw_result['pitch'],
+                                'medw_yaw': medw_result['yaw'],
+                                'jacobian': jac_ov,
+                                'jacobian_roll': float(jac_result['roll']),
+                                'jacobian_pitch': float(jac_result['pitch']),
+                                'jacobian_yaw': float(jac_result['yaw']),
+                            })
+                            model_to_save = model.module if use_ddp else model
+                            dual_path = os.path.join(ckpt_save_dir, 'ckpt_best_dual.pth')
+                            _dual_data = {
+                                'epoch': epoch + 1,
+                                'model_state_dict': model_to_save.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                                'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                                'scaler_state_dict': scaler.state_dict(),
+                                'train_noise': train_noise,
+                                'eval_noise': eval_noise,
+                                'rotation_only': rotation_only,
+                                'epoch_train_errors': last_epoch_train_errors,
+                                'epoch_val_errors': last_epoch_val_errors,
+                                'best_train': best_train,
+                                'best_val': best_val,
+                                'best_medw': best_medw,
+                                'best_dual': best_dual,
+                                'medw_eval': medw_result,
+                                'jacobian_eval': jac_result,
+                                'args': vars(args),
+                            }
+                            _dual_data.update(_build_ckpt_metadata(model, args))
+                            if _v321_ema_enabled and _v321_ema_model is not None:
+                                _dual_data['ema_state_dict'] = _v321_ema_model.state_dict()
+                            torch.save(_dual_data, dual_path)
+                            tprint(f"  ★ Dual gate PASS → {dual_path} "
+                                   f"({_dg_medw}; {_dg_jac}; score={dual_score:.4f})")
+                    else:
+                        tprint(f"  ○ Dual gate FAIL (ep {epoch+1}): {_dg_medw}; {_dg_jac}")
+
+                if (args.enable_medw_eval > 0 or args.enable_jacobian_eval > 0) and is_main:
+                    kpi_history.append({
+                        'epoch': epoch + 1,
+                        'medw': medw_result,
+                        'jacobian': jac_result,
+                        'dual_pass': _dual_pass,
+                    })
 
             val_loss = None
             loss = None
+
+        if use_ddp:
+            # All ranks participate in val; sync before early-stop broadcast.
+            dist.barrier()
 
         if use_ddp:
             stop_tensor = torch.tensor([1 if early_stop_triggered else 0],
@@ -2349,6 +4210,29 @@ def main():
             e = best_val['errors']
             md_lines.append(f"Best Val    (Epoch {best_val['epoch']}):")
             md_lines.append(f"  Pose Error - {_fmt_err(e)}")
+            md_lines.append("")
+
+        if best_medw['epoch'] > 0:
+            md_lines.append(f"Best MEDW{args.medw_eval_max_frames} (Epoch {best_medw['epoch']}):")
+            md_lines.append(f"  max(R,P,Y): {best_medw.get('max_rpy', _medw_max_rpy(best_medw)):.4f}° "
+                            f"(R:{best_medw['roll']:.4f} P:{best_medw['pitch']:.4f} "
+                            f"Y:{best_medw['yaw']:.4f}, rot={best_medw['rot']:.4f}°)")
+            md_lines.append("")
+
+        if best_dual['epoch'] > 0:
+            md_lines.append(f"Best Dual Gate (Epoch {best_dual['epoch']}) — CONVERGED:")
+            md_lines.append(f"  max(R,P,Y): {best_dual.get('medw_max_rpy', float('nan')):.4f}° "
+                            f"(R:{best_dual.get('medw_roll', float('nan')):.4f} "
+                            f"P:{best_dual.get('medw_pitch', float('nan')):.4f} "
+                            f"Y:{best_dual.get('medw_yaw', float('nan')):.4f})")
+            md_lines.append(f"  Jacobian: {best_dual.get('jacobian', float('nan')):.3f} "
+                            f"(R:{best_dual.get('jacobian_roll', float('nan')):.3f} "
+                            f"P:{best_dual.get('jacobian_pitch', float('nan')):.3f} "
+                            f"Y:{best_dual.get('jacobian_yaw', float('nan')):.3f})")
+            md_lines.append(f"  ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_dual.pth')}")
+            md_lines.append("")
+        elif args.enable_dual_gate_ckpt > 0 and kpi_history:
+            md_lines.append("Dual Gate: NOT CONVERGED (never passed max(R,P,Y) + Jacobian axes gate)")
             md_lines.append("")
 
         if checkpoint_records:
@@ -2416,6 +4300,13 @@ def main():
             f.write(summary_text + "\n")
 
         tprint(f"训练总结已保存到: {summary_md_path}")
+
+        if args.enable_medw_eval > 0 or args.enable_jacobian_eval > 0:
+            conv_md, conv_json, conv_verdict = _write_convergence_report(
+                log_dir, ckpt_save_dir, args, best_medw, best_dual, kpi_history)
+            tprint(f"收敛报告: {conv_verdict} → {conv_md}")
+            tprint(f"  JSON: {conv_json}")
+
         tprint("=" * 80)
     
     if is_main and writer is not None:

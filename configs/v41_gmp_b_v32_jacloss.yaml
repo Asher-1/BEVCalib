@@ -1,0 +1,145 @@
+# V41 机器 B — A + Match/Corr（无 diff_epnp）
+# 设计文档: docs/V41_DESIGN.md
+# 必过红线: 同分布 val dual gate（见 V41_DESIGN §1）
+#
+# 区分度: 在 A（jacloss 基线）上叠加对应关系监督，测试 match 路径是否改善 Jacobian
+#
+# Usage:
+#   bash batch_train.sh --force configs/v41_gmp_b_v32_jacloss.yaml
+# 策略: Match v41.1 从头训（resume_ckpt=null）；version _v2 保留旧 log 对照
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+    PROJFUSION_ROOT: /mnt/drtraining/user/dahailu/code/ProjFusion
+
+  params:
+    angle_range_deg: 5
+    trans_range: 0.15
+    eval_angle_range_deg: 5
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+    rotation_only: true
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_sign_flip_prob: 0.0
+    augment_mount_jitter_prob: 0.0
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    max_frames_per_seq: 500
+    early_stopping_patience: 30
+    eval_epoches: 20
+    num_epochs: 200
+    step_size: 50
+    seed: 42
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    foreground: true
+    no_tensorboard: true
+
+    fusion_backend: geo_match_proj
+    pc_encoder_mode: pointgpt2bev
+    native_cross: 0
+    cam2bev_mode: query
+    backbone_type: dinov2
+    backbone_variant: dinov2-small
+    freeze_backbone: 1
+    native_cross_extend_ratio: 2.5
+    projfusion_image_hw: [252, 448]
+    iterative_refine: 0
+    native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+    native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+    native_cross_pointgpt_max_depth: 60.0
+    pretrain_ckpt: null
+    resume_ckpt: null
+    no_amp: 1
+
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    save_ckpt_per_epoches: 20
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 30.0
+    tinit_dropout_prob: 0.3
+    consistency_loss_weight: 0.5
+    consistency_loss_start_epoch: 10
+    ema_consistency: 0
+    ema_decay: 0.996
+
+    jacobian_loss_weight: 0.1
+    jacobian_loss_start_epoch: 10
+    jacobian_loss_probe_deg: 3.0
+    jacobian_loss_interval: 4
+
+    appearance_loss_weight: 0.1
+    depth_loss_weight: 0.05
+    geo_loss_start_epoch: 5
+    # --- B: A + Match/Corr（无 diff_epnp）---
+    # Match 修复 v41.1（见 docs/V41_DESIGN.md §12）：分阶段 corr + 放宽 gate + init 可见性监督
+    use_match_head: 1
+    use_local_correlation: 1
+    compose_mode: match_then_refine
+    num_correspondences: 64
+    correspondence_supervision: 1
+    correspondence_loss_weight: 5.0
+    correspondence_loss_start_epoch: 20
+    correspondence_loss_warmup_epochs: 10
+    match_valid_ratio_min: 0.05
+    match_disable_fallback: 1
+    match_gate_use_init_ratio: 1
+    match_corr_validity_mode: init
+    match_confidence_threshold: 0.1
+    match_epnp_min_points: 2
+    match_phase_noise_max_deg: 10
+    differentiable_epnp: 0
+
+experiments:
+  - name: "v41_gmp_b_v32_jacloss_v2"
+    description: "B v2: Match v41.1 scratch retrain + fast (cap500)"
+    dataset: "all"
+    version: "v41_gmp_b_v32_jacloss_v2"
+    params: {}

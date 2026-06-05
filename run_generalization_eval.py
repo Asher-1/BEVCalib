@@ -126,7 +126,13 @@ def load_config(config_path=None):
             "TIMEOUT": cfg.get("eval_params", {}).get("timeout", 1800),
             "EVAL_SAMPLE_STEP": cfg.get("eval_params", {}).get("eval_sample_step", None),
             "EVAL_MAX_FRAMES_PER_SEQ": cfg.get("eval_params", {}).get("eval_max_frames_per_seq", None),
+            "SHORTCUT_DIAG": cfg.get("eval_params", {}).get("shortcut_diag", False),
+            "GENERALIZATION_DIAG": cfg.get("eval_params", {}).get("generalization_diag", False),
+            "EXCLUDE_SEQS": cfg.get("eval_params", {}).get("exclude_seqs", None),
+            "PROJFUSION_ROOT": cfg.get("projfusion_root",
+                                       "/mnt/drtraining/user/dahailu/code/ProjFusion"),
             "MODELS": cfg.get("models", DEFAULT_MODELS),
+            "BAG_EVAL_DIR": cfg.get("bag_eval_dir", None),
         }
         print(f"[Config] Loaded from: {config_path}")
         print(f"  Models: {len(config['MODELS'])}, Angle: {config['ANGLE_RANGE']}°, Trans: {config['TRANS_RANGE']}m")
@@ -146,7 +152,10 @@ def load_config(config_path=None):
         "TIMEOUT": 1800,
         "EVAL_SAMPLE_STEP": None,
         "EVAL_MAX_FRAMES_PER_SEQ": None,
+        "SHORTCUT_DIAG": False,
+        "PROJFUSION_ROOT": "/mnt/drtraining/user/dahailu/code/ProjFusion",
         "MODELS": DEFAULT_MODELS,
+        "BAG_EVAL_DIR": None,
     }
 
 
@@ -188,6 +197,19 @@ def parse_script_args():
                         help="测试集每序列最多帧数 (与 eval_sample_step 互斥)")
     parser.add_argument("--force", action="store_true", default=False,
                         help="强制重新评估所有模型 (忽略已有结果)")
+    parser.add_argument("--shortcut_diag", action="store_true", default=False,
+                        help="对每个模型运行 shortcut 诊断测试 (fixed-bias, invariance, ablation, GradCAM)")
+    parser.add_argument("--generalization_diag", action="store_true", default=False,
+                        help="对每个模型运行泛化诊断 (zero-drift, inject, shortcut-resistance)")
+    parser.add_argument("--gdiag_inject_deg", type=float, default=2.0,
+                        help="泛化诊断注入角度 (default: 2.0°)")
+    parser.add_argument("--exclude_seqs", type=str, default=None,
+                        help="逗号分隔的序列ID列表，评估时跳过这些序列 (例如: seq07,seq12)")
+    parser.add_argument("--bag_eval_dir", type=str, default=None,
+                        help="BAG 泛化评估输出根目录 (run_bag_calibration.py 输出), "
+                             "用于生成跨模型 BAG 泛化汇总排行报告")
+    parser.add_argument("--report_only", action="store_true", default=False,
+                        help="跳过评估，仅从已有结果重新生成报告和图表")
     return parser.parse_args()
 
 
@@ -200,6 +222,8 @@ if _script_args.angle_range is not None:
     CFG["ANGLE_RANGE"] = _script_args.angle_range
 if _script_args.trans_range is not None:
     CFG["TRANS_RANGE"] = _script_args.trans_range
+if _script_args.bag_eval_dir:
+    CFG["BAG_EVAL_DIR"] = _script_args.bag_eval_dir
 
 _PARALLEL_GPUS = _script_args.parallel
 if _PARALLEL_GPUS == -1:
@@ -221,6 +245,37 @@ EVAL_TIMEOUT = CFG["TIMEOUT"]
 EVAL_SAMPLE_STEP = _script_args.eval_sample_step if _script_args.eval_sample_step is not None else CFG.get("EVAL_SAMPLE_STEP")
 _EVAL_MF_CLI = getattr(_script_args, "eval_max_frames_per_seq", None)
 EVAL_MAX_FRAMES_PER_SEQ = _EVAL_MF_CLI if _EVAL_MF_CLI is not None else CFG.get("EVAL_MAX_FRAMES_PER_SEQ")
+SHORTCUT_DIAG = getattr(_script_args, "shortcut_diag", False) or CFG.get("SHORTCUT_DIAG", False)
+GENERALIZATION_DIAG = getattr(_script_args, "generalization_diag", False) or CFG.get("GENERALIZATION_DIAG", False)
+GDIAG_INJECT_DEG = getattr(_script_args, "gdiag_inject_deg", 2.0)
+_EXCLUDE_SEQS_CLI = getattr(_script_args, "exclude_seqs", None)
+EXCLUDE_SEQS = _EXCLUDE_SEQS_CLI if _EXCLUDE_SEQS_CLI else CFG.get("EXCLUDE_SEQS")
+PROJFUSION_ROOT = CFG.get("PROJFUSION_ROOT", "/mnt/drtraining/user/dahailu/code/ProjFusion")
+BAG_EVAL_DIR = CFG.get("BAG_EVAL_DIR")
+
+
+def _resolve_ckpt_path(mcfg, model_base):
+    """Resolve checkpoint path with optional fallbacks (e.g. dual → medw → latest)."""
+    scratch_label = mcfg.get("scratch_label")
+    if scratch_label:
+        ckpt_dir = os.path.join(model_base, f"{scratch_label}/checkpoint")
+    else:
+        ckpt_dir = os.path.join(model_base,
+                                os.path.basename(MODELS_DIR) + "_scratch/checkpoint")
+    ckpt_names = [mcfg.get("ckpt", "ckpt_best_val.pth")]
+    for alt in mcfg.get("ckpt_fallback", []) or []:
+        if alt not in ckpt_names:
+            ckpt_names.append(alt)
+    for name in ckpt_names:
+        path = os.path.join(ckpt_dir, name)
+        if os.path.isfile(path):
+            return path, ckpt_dir
+    import glob as _glob
+    for name in ckpt_names:
+        hits = _glob.glob(os.path.join(model_base, "*_scratch/checkpoint", name))
+        if hits:
+            return hits[0], os.path.dirname(hits[0])
+    return os.path.join(ckpt_dir, ckpt_names[0]), ckpt_dir
 
 
 def parse_eval_stats(extrinsics_path):
@@ -399,16 +454,9 @@ def _resolve_model_base(mcfg):
 def _build_eval_cmd_and_env(mcfg, per_model_dir):
     """Build subprocess command and env for a single model evaluation."""
     model_base = _resolve_model_base(mcfg)
-    ckpt_path = os.path.join(model_base,
-                             os.path.basename(MODELS_DIR) +
-                            "_scratch/checkpoint", mcfg["ckpt"])
+    ckpt_path, _ckpt_dir = _resolve_ckpt_path(mcfg, model_base)
     if not os.path.isfile(ckpt_path):
-        import glob as _glob
-        candidates = _glob.glob(os.path.join(model_base, "*_scratch/checkpoint", mcfg["ckpt"]))
-        if candidates:
-            ckpt_path = candidates[0]
-        else:
-            return None, None, ckpt_path
+        return None, None, ckpt_path
 
     env = os.environ.copy()
     if not env.get("CUDA_VISIBLE_DEVICES"):
@@ -416,6 +464,11 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
     env.pop("USE_DRCV_BACKEND", None)
     env["BEV_ZBOUND_STEP"] = mcfg["bev_zbound_step"]
     env["HF_HUB_OFFLINE"] = "1"
+    env["PROJFUSION_ROOT"] = mcfg.get("projfusion_root", PROJFUSION_ROOT)
+    if "use_drcv" in mcfg:
+        env["USE_DRCV_BACKEND"] = "1" if mcfg["use_drcv"] else "0"
+    elif mcfg.get("fusion_backend") == "geo_match_proj" or mcfg.get("gmp", False):
+        env["USE_DRCV_BACKEND"] = "0"
     for env_key in ("BEV_XBOUND_MIN", "BEV_XBOUND_MAX",
                     "BEV_YBOUND_MIN", "BEV_YBOUND_MAX", "BEV_XY_STEP"):
         if env_key.lower() in mcfg:
@@ -509,6 +562,14 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
         cmd.extend(["--data_balance", str(mcfg["data_balance"])])
     if mcfg.get("zero_image"):
         cmd.append("--zero_image")
+    if mcfg.get("shortcut_diag", False) or SHORTCUT_DIAG:
+        cmd.append("--shortcut_diag")
+    if mcfg.get("generalization_diag", False) or GENERALIZATION_DIAG:
+        cmd.append("--generalization_diag")
+        cmd.extend(["--gdiag_inject_deg", str(mcfg.get("gdiag_inject_deg", GDIAG_INJECT_DEG))])
+    _ex_seqs = mcfg.get("exclude_seqs") or EXCLUDE_SEQS
+    if _ex_seqs:
+        cmd.extend(["--exclude_seqs", str(_ex_seqs)])
 
     return cmd, env, ckpt_path
 
@@ -558,29 +619,30 @@ def _precheck_models():
             if not _is_complete:
                 _ta_path = os.path.join(per_model_dir, "temporal_aggregation.txt")
                 _is_complete = os.path.isfile(_ta_path)
+            _wants_gdiag = mcfg.get("generalization_diag", False) or GENERALIZATION_DIAG
+            if _wants_gdiag:
+                _gdiag_json = os.path.join(per_model_dir, "generalization_diagnostics.json")
+                if not os.path.isfile(_gdiag_json):
+                    _is_complete = False
             if _is_complete:
                 done.append((idx, label, mcfg, per_model_dir, None, "eval complete"))
                 continue
 
         model_base = _resolve_model_base(mcfg)
-        ckpt_path = os.path.join(model_base,
-                                 os.path.basename(MODELS_DIR) +
-                                "_scratch/checkpoint", mcfg["ckpt"])
+        ckpt_path, _ckpt_dir = _resolve_ckpt_path(mcfg, model_base)
         if not os.path.isfile(ckpt_path):
-            import glob as _glob
-            candidates = _glob.glob(os.path.join(model_base, "*_scratch/checkpoint", mcfg["ckpt"]))
-            if candidates:
-                ckpt_path = candidates[0]
+            train_log = os.path.join(model_base, "train.log")
+            tried = mcfg.get("ckpt", "?")
+            fallbacks = mcfg.get("ckpt_fallback", []) or []
+            tried_all = [tried] + list(fallbacks)
+            if os.path.isdir(model_base):
+                reason = f"ckpt not found (tried {tried_all}), dir exists"
+                if os.path.isfile(train_log):
+                    reason += " (training may be in progress)"
             else:
-                train_log = os.path.join(model_base, "train.log")
-                if os.path.isdir(model_base):
-                    reason = f"ckpt not found ({mcfg['ckpt']}), dir exists"
-                    if os.path.isfile(train_log):
-                        reason += " (training may be in progress)"
-                else:
-                    reason = f"model dir not found: {model_base}"
-                missing.append((idx, label, mcfg, per_model_dir, ckpt_path, reason))
-                continue
+                reason = f"model dir not found: {model_base}"
+            missing.append((idx, label, mcfg, per_model_dir, ckpt_path, reason))
+            continue
 
         ready.append((idx, label, mcfg, per_model_dir, ckpt_path, "ready"))
 
@@ -889,12 +951,90 @@ def collect_all_stats():
             stats['backbone'] = _detect_backbone_from_model(mcfg)
             ta_path = os.path.join(per_model_dir, "temporal_aggregation.txt")
             stats['temporal'] = _parse_temporal_aggregation(ta_path)
+            gdiag_path = os.path.join(per_model_dir, "generalization_diagnostics.json")
+            stats['gdiag'] = _parse_generalization_diagnostics(gdiag_path)
             all_stats.append(stats)
+            gdiag_info = ""
+            if stats['gdiag']:
+                gs = stats['gdiag'].get('composite', {}).get('GS_medw', -1)
+                gdiag_info = f", GS_medw={gs:.4f}"
             print(f"  {label}: Mean Rot={stats['rot_error_mean']:.3f} deg, "
-                  f"P95={stats['rot_error_p95']:.3f} deg ({stats['samples']} samples)")
+                  f"P95={stats['rot_error_p95']:.3f} deg ({stats['samples']} samples){gdiag_info}")
         else:
             print(f"  {label}: NO RESULTS")
     return all_stats
+
+
+def _parse_generalization_diagnostics(path):
+    """Parse generalization_diagnostics.json for zero-drift / inject / shortcut metrics.
+
+    Dynamically recomputes S2(correction) and GS_medw to fix the geodesic/RPY
+    dimension mismatch: residuals are geodesic but were previously divided by
+    per-axis RPY inject values, causing S2 to be clamped to 1.0 for most models.
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[WARN] Failed to parse {path}: {e}")
+        return None
+
+    comp = data.get('composite', {})
+    raw = comp.get('raw', {})
+    sub = comp.get('sub_scores', {})
+    mm = data.get('multi_magnitude', {})
+    fi = data.get('fixed_inject', {}).get('inject', {})
+    zd_signed = raw.get('zero_drift_signed_rpy', [0, 0, 0])
+    inject_deg = raw.get('inject_deg', 2.0)
+
+    if not sub or not mm:
+        return data
+
+    def _zd_deduction(raw_resid, zd_vals, injected_axes=None):
+        n = len(zd_vals)
+        if n <= 0:
+            return raw_resid
+        if injected_axes is None:
+            injected_axes = [True] * n
+        n_axes = sum(injected_axes)
+        if n_axes <= 0:
+            return raw_resid
+        inj_hat = [(1.0 / (n_axes ** 0.5) if injected_axes[i] else 0.0) for i in range(n)]
+        zd_proj = sum(z * h for z, h in zip(zd_vals, inj_hat))
+        deduction = max(0, min(zd_proj, raw_resid))
+        return max(0, raw_resid - deduction)
+
+    small_genuine_resids = []
+    for m in ['0.5', '1.0']:
+        if m in mm:
+            raw_resid = mm[m].get('residual', -1)
+            recovery = mm[m].get('recovery_pct', -999)
+            if raw_resid >= 0 and recovery > -100:
+                actual_inject_geo = raw_resid / (1.0 - recovery / 100.0) if recovery < 99.9 else raw_resid * 10
+                genuine_resid = _zd_deduction(raw_resid, zd_signed)
+                small_genuine_resids.append(genuine_resid / max(actual_inject_geo, 1e-6))
+    if small_genuine_resids:
+        s2_corr = min(1.0, sum(small_genuine_resids) / len(small_genuine_resids))
+    else:
+        fi_injected = fi.get('mean_injected', inject_deg)
+        raw_fi = fi.get('mean_residual', fi_injected)
+        genuine_fi = _zd_deduction(raw_fi, zd_signed)
+        s2_corr = min(1.0, genuine_fi / max(fi_injected, 1e-6))
+
+    sub['correction'] = s2_corr
+    w = [0.40, 0.30, 0.15, 0.15]
+    gs_medw = (w[0] * sub.get('zero_drift', 0) + w[1] * s2_corr +
+               w[2] * sub.get('shortcut', 0) + w[3] * sub.get('consistency', 0))
+    comp['GS_medw'] = gs_medw
+
+    fi_rot_mean = fi.get('mean_residual', inject_deg)
+    fi_injected_geo = fi.get('mean_injected', inject_deg)
+    genuine_fi_residual = _zd_deduction(fi_rot_mean, zd_signed)
+    raw['genuine_recovery_pct'] = ((fi_injected_geo - genuine_fi_residual) / fi_injected_geo * 100) if fi_injected_geo > 1e-6 else 0
+
+    return data
 
 
 def _parse_temporal_aggregation(path):
@@ -1296,7 +1436,9 @@ def generate_projection_comparison(all_stats):
         for mcfg in MODELS:
             label = mcfg["label"]
             per_model_dir = os.path.join(OUTPUT_DIR, label)
-            img_path = os.path.join(per_model_dir, f"sample_{sample_idx:04d}_projection.png")
+            img_path = os.path.join(per_model_dir, "perframe_projections", f"sample_{sample_idx:04d}.png")
+            if not os.path.isfile(img_path):
+                img_path = os.path.join(per_model_dir, f"sample_{sample_idx:04d}_projection.png")
             if not os.path.isfile(img_path):
                 alt_dir = os.path.join(_resolve_model_base(mcfg), "test_data_eval")
                 img_path = os.path.join(alt_dir, f"sample_{sample_idx:04d}_projection.png")
@@ -1335,6 +1477,195 @@ def generate_projection_comparison(all_stats):
         print(f"   comparison_sample_{sample_idx:04d}.png ({len(model_labels)} models)")
 
     print(f"   Projection comparisons saved to: {comparison_dir}/")
+
+
+def _collect_bag_eval_data(bag_eval_dir):
+    """Read all model subdirs under bag_eval_dir, return structured data for report."""
+    import io as _io
+    model_data = {}
+    for model_dir_name in sorted(os.listdir(bag_eval_dir)):
+        model_path = os.path.join(bag_eval_dir, model_dir_name)
+        if not os.path.isdir(model_path) or model_dir_name.startswith(("_", ".")):
+            continue
+        trips = {}
+        for trip_name in sorted(os.listdir(model_path)):
+            sidecar = os.path.join(model_path, trip_name, "result_sidecar.json")
+            if not os.path.isfile(sidecar):
+                continue
+            try:
+                with _io.open(sidecar, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                trips[trip_name] = data
+            except Exception:
+                continue
+        if trips:
+            model_data[model_dir_name] = trips
+    return model_data
+
+
+def _bag_report_lines(bag_eval_dir, model_data, section_num):
+    """Generate report lines for BAG cross-model summary."""
+    lines = []
+    all_trips = sorted(set(t for trips in model_data.values() for t in trips))
+    trip_short = {t: t.split("_")[0] for t in all_trips}
+
+    def _best_medw(data):
+        """Return the best available MEDW window dict, preferring 200 > 100 > 50."""
+        mwe = data.get("multi_window_errors") or {}
+        for k in ("200", "100", "50"):
+            w = mwe.get(k)
+            if isinstance(w, dict):
+                return w
+        return {}
+
+    def _medw200(data):
+        v = _best_medw(data).get("rot")
+        return float(v) if v is not None else float("nan")
+
+    def _medw200_rpy(data):
+        w = _best_medw(data)
+        def _s(k):
+            v = w.get(k)
+            return float(v) if v is not None else float("nan")
+        return _s("roll"), _s("pitch"), _s("yaw")
+
+    model_avg_medw = []
+    for model, trips in model_data.items():
+        medws = [_medw200(d) for d in trips.values()
+                 if d.get("status") != "failed" and _medw200(d) == _medw200(d)]
+        if medws:
+            model_avg_medw.append((model, float(np.mean(medws)), float(np.std(medws)),
+                                   float(np.min(medws)), float(np.max(medws)), len(medws)))
+    model_avg_medw.sort(key=lambda x: x[1])
+
+    _CN = {1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '七',
+           8: '八', 9: '九', 10: '十', 11: '十一', 12: '十二', 13: '十三', 14: '十四'}
+
+    lines.append("=" * 80)
+    lines.append(f"{_CN.get(section_num, str(section_num))}、BAG 泛化评估跨模型汇总 (真实行程)")
+    lines.append("=" * 80)
+    lines.append("")
+    lines.append(f"评估目录: `{bag_eval_dir}`")
+    lines.append(f"模型数: {len(model_data)}  行程数: {len(all_trips)}")
+    lines.append(f"行程: {', '.join(trip_short[t] for t in all_trips)}")
+    lines.append("")
+
+    lines.append("MEDW200 总排名 (跨行程均值, 越低越好):")
+    lines.append("")
+    lines.append("| 排名 | 模型 | Avg MEDW200 | Std | Min | Max | #Trips |")
+    lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+    for rank, (model, avg, std, mn, mx, n) in enumerate(model_avg_medw[:20], 1):
+        lines.append(f"| {rank} | {model} | {avg:.4f}° | {std:.4f} | {mn:.4f} | {mx:.4f} | {n} |")
+    if len(model_avg_medw) > 20:
+        lines.append(f"| ... | ({len(model_avg_medw) - 20} more) | | | | | |")
+    lines.append("")
+
+    lines.append("Per-Trip MEDW200 对比 (Top 15):")
+    lines.append("")
+    trip_headers = " | ".join(trip_short[t] for t in all_trips)
+    lines.append(f"| 模型 | {trip_headers} | Avg |")
+    lines.append(f"| --- | {' | '.join(['---:'] * len(all_trips))} | ---: |")
+    for model, avg, _, _, _, _ in model_avg_medw[:15]:
+        trips = model_data[model]
+        cells = []
+        for t in all_trips:
+            if t in trips:
+                m = _medw200(trips[t])
+                gs = trips[t].get("gt_source", "?")
+                flag = "*" if gs == "install_angle_error" else ""
+                cells.append(f"{m:.4f}{flag}" if m == m else "N/A")
+            else:
+                cells.append("-")
+        lines.append(f"| {model} | {' | '.join(cells)} | {avg:.4f} |")
+    lines.append("")
+    lines.append("> \\* = MEDW参考基准为init外参(非GT), 指标不可靠")
+    lines.append("")
+
+    lines.append("Per-Trip RPY 分量 (MEDW200, Top 10 per trip):")
+    lines.append("")
+    for t in all_trips:
+        lines.append(f"**{trip_short[t]}** ({t}):")
+        lines.append("")
+        lines.append("| 模型 | MEDW200 | Roll | Pitch | Yaw | GT源 | Std |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- | ---: |")
+        trip_models = []
+        for model, avg, _, _, _, _ in model_avg_medw:
+            if t in model_data[model]:
+                td = model_data[model][t]
+                if td.get("status") == "failed":
+                    continue
+                trip_models.append((model, td))
+        trip_models.sort(key=lambda x: _medw200(x[1]))
+        for model, d in trip_models[:10]:
+            m = _medw200(d)
+            r, p, y = _medw200_rpy(d)
+            gs = d.get("gt_source", "?")
+            if gs == "install_angle_error":
+                gs = "init(不可靠)"
+            elif gs == "gt_lidars_cfg":
+                gs = "GT"
+            std = d.get("total_std") or 0.0
+            lines.append(f"| {model} | {m:.4f}° | {r:.4f} | {p:.4f} | {y:.4f} | {gs} | {std:.4f} |")
+        lines.append("")
+
+    scenario_suffixes = [("_inject_small", "inject_small"),
+                         ("_shortcut", "shortcut"),
+                         ("_baseline", "baseline")]
+    scenarios = {}
+    for model in model_data:
+        for suffix, scenario in scenario_suffixes:
+            if model.endswith(suffix):
+                base_model = model[:-len(suffix)]
+                scenarios.setdefault(base_model, {})[scenario] = model
+                break
+
+    if scenarios:
+        lines.append("场景对比 (baseline vs shortcut vs inject_small):")
+        lines.append("")
+        lines.append("| 模型 | Baseline | Shortcut | Inject Small | Recovery% | Risk |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
+        for base_model in sorted(scenarios.keys()):
+            sc = scenarios[base_model]
+            bl_medw = inj_medw = sc_medw = float("nan")
+            recovery = shortcut_risk = "N/A"
+            for scenario, full_name in sc.items():
+                trips = model_data[full_name]
+                medws = [_medw200(d) for d in trips.values()
+                         if d.get("status") != "failed" and _medw200(d) == _medw200(d)]
+                avg = float(np.mean(medws)) if medws else float("nan")
+                if scenario == "baseline":
+                    bl_medw = avg
+                elif scenario == "shortcut":
+                    sc_medw = avg
+                    risks = [d.get("shortcut_risk") for d in trips.values()
+                             if d.get("shortcut_risk")]
+                    shortcut_risk = "/".join(sorted(set(risks))) if risks else "N/A"
+                elif scenario == "inject_small":
+                    inj_medw = avg
+                    recs = []
+                    for d in trips.values():
+                        cr = d.get("compensation_ratio_pct")
+                        if cr is not None and isinstance(cr, (int, float)) and cr == cr:
+                            recs.append(float(cr))
+                    if recs:
+                        recovery = f"{np.mean(recs):.1f}%"
+            bl_s = f"{bl_medw:.4f}°" if bl_medw == bl_medw else "-"
+            sc_s = f"{sc_medw:.4f}°" if sc_medw == sc_medw else "-"
+            inj_s = f"{inj_medw:.4f}°" if inj_medw == inj_medw else "-"
+            lines.append(f"| {base_model} | {bl_s} | {sc_s} | {inj_s} | {recovery} | {shortcut_risk} |")
+        lines.append("")
+
+    lines.append("跨车型一致性 (Top 10):")
+    lines.append("")
+    for model, avg, std, mn, mx, n in model_avg_medw[:10]:
+        if n < 2:
+            continue
+        cv = std / avg * 100 if avg > 0 else 0
+        verdict = "优秀" if cv < 10 else ("良好" if cv < 20 else "需改进")
+        lines.append(f"- **{model}**: Avg={avg:.4f}° Std={std:.4f} CV={cv:.1f}% → {verdict}")
+    lines.append("")
+
+    return lines, model_avg_medw
 
 
 def generate_report(all_stats):
@@ -1624,14 +1955,14 @@ def generate_report(all_stats):
                              "报告展示 SVD/MED 聚合趋势有助于理解误差随帧数的收敛行为。")
                 lines.append("")
 
-        lines.append("![Temporal Convergence](charts/temporal_convergence_all.png)")
-        lines.append("")
-        lines.append("![BEST Aggregated Ranking](charts/best_aggregated_ranking.png)")
-        lines.append("")
-        lines.append("![BEST vs Per-frame](charts/best_vs_perframe_scatter.png)")
-        lines.append("")
-        lines.append("![Best Model Per-Sequence](charts/best_model_per_seq.png)")
-        lines.append("")
+        _chart_dir = os.path.join(OUTPUT_DIR, "charts")
+        for _cn, _cf in [("Temporal Convergence", "temporal_convergence_all.png"),
+                          ("BEST Aggregated Ranking", "best_aggregated_ranking.png"),
+                          ("BEST vs Per-frame", "best_vs_perframe_scatter.png"),
+                          ("Best Model Per-Sequence", "best_model_per_seq.png")]:
+            if os.path.isfile(os.path.join(_chart_dir, _cf)):
+                lines.append(f"![{_cn}](charts/{_cf})")
+                lines.append("")
 
     _sec = 5 if has_temporal else 4
 
@@ -1894,6 +2225,280 @@ def generate_report(all_stats):
                     lines.append(f"![{fn}]({label}/temporal_projections/{fn})")
                     lines.append("")
 
+    # === Generalization Diagnostics Section ===
+    has_gdiag = any(s.get('gdiag') for s in all_stats)
+    if has_gdiag:
+        lines.append("=" * 80)
+        lines.append(f"{_CN.get(_sec, str(_sec))}、泛化诊断 (MEDW聚合: Zero-Drift / Inject / Shortcut / GS_medw)")
+        _sec += 1
+        lines.append("=" * 80)
+        lines.append("")
+        lines.append("通过五项测试综合评估模型泛化能力:")
+        lines.append("- **Zero-Drift**: 无扰动输入, 度量模型固有偏差 (越低越好)")
+        lines.append("- **Fixed-Inject**: 注入已知固定扰动(2°RPY), 度量矫正恢复能力 (Recovery%越高越好)")
+        lines.append("- **Per-Axis Shortcut**: 单轴注入Roll/Pitch/Yaw, 检测模型是否独立校准各轴")
+        lines.append("- **Asymmetry**: 正/负方向注入对比, 检测方向偏置")
+        lines.append("- **Linearity**: 多幅度注入(0.5°/1.0°/2.0°)残差一致性, 检测矫正稳定性")
+        lines.append("- **GS_medw**: 基于MEDW多帧聚合的综合泛化得分 (4项子指标, 越低越好)")
+        lines.append("  > 注: 扰动在LiDAR坐标系RPY轴注入 (右乘), 确保轴定义与误差分解一致")
+        lines.append("")
+
+        gdiag_models = [s for s in all_stats
+                        if s.get('gdiag') and s['gdiag'].get('composite', {}).get('valid', True) is not False]
+        gdiag_sorted = sorted(gdiag_models,
+                               key=lambda s: s['gdiag'].get('composite', {}).get('GS_medw', 999))
+
+        lines.append("GS_medw 泛化诊断排名 (MEDW多帧聚合, lower=better):")
+        lines.append("")
+        lines.append("| 排名 | 模型 | GS_medw | S1:ZeroDrift | S2:Correction | S3:Shortcut | S4:Consistency | Risk | #Seqs |")
+        lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |")
+        for rank, s in enumerate(gdiag_sorted, 1):
+            gd = s['gdiag']
+            comp = gd.get('composite', {})
+            sub = comp.get('sub_scores', {})
+            sc_risk = gd.get('shortcut_risk', 'N/A')
+            n_seqs = comp.get('raw', {}).get('n_seqs_evaluated', '-')
+            lines.append(
+                f"| {rank} | {s['label']} "
+                f"| {comp.get('GS_medw', -1):.4f} "
+                f"| {sub.get('zero_drift', -1):.4f} "
+                f"| {sub.get('correction', -1):.4f} "
+                f"| {sub.get('shortcut', -1):.4f} "
+                f"| {sub.get('consistency', -1):.4f} "
+                f"| {sc_risk} "
+                f"| {n_seqs} |"
+            )
+        lines.append("")
+
+        lines.append("Zero-Drift 详细 (init=GT, 无扰动, MEDW聚合后RPY分量):")
+        lines.append("")
+        lines.append("| 模型 | Rot Mean | Roll | Pitch | Yaw | max(R,P,Y) |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+        for s in gdiag_sorted:
+            zd = s['gdiag'].get('zero_drift', {})
+            lines.append(
+                f"| {s['label']} "
+                f"| {zd.get('rot_mean', -1):.4f}° "
+                f"| {zd.get('roll_mean', -1):.4f}° "
+                f"| {zd.get('pitch_mean', -1):.4f}° "
+                f"| {zd.get('yaw_mean', -1):.4f}° "
+                f"| {zd.get('max_rpy', -1):.4f}° |"
+            )
+        lines.append("")
+
+        lines.append("Fixed-Inject 恢复能力 (inject all RPY, MEDW聚合, Genuine=方向感知扣除ZeroDrift):")
+        lines.append("")
+        lines.append("| 模型 | Injected | Raw Residual | ZD(rot) | ZD方向扣除 | Genuine Resid | Raw Rec% | Genuine Rec% |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for s in gdiag_sorted:
+            fi = s['gdiag'].get('fixed_inject', {}).get('inject', {})
+            comp_raw = s['gdiag'].get('composite', {}).get('raw', {})
+            zd_val = s['gdiag'].get('zero_drift', {}).get('rot_mean', 0)
+            raw_res = fi.get('mean_residual', -1)
+            injected = fi.get('mean_injected', -1)
+            raw_rec = fi.get('mean_recovery_pct', -1)
+            zd_signed = comp_raw.get('zero_drift_signed_rpy', None)
+            has_signed = zd_signed is not None and len(zd_signed) == 3
+            if raw_res >= 0 and injected > 0:
+                if has_signed:
+                    n_ax = len(zd_signed)
+                    inj_hat = [1.0 / np.sqrt(n_ax)] * n_ax
+                    zd_proj = sum(z * h for z, h in zip(zd_signed, inj_hat))
+                    zd_deduct = max(0, min(zd_proj, raw_res))
+                    genuine_res = max(0, raw_res - zd_deduct)
+                    genuine_rec = (injected - genuine_res) / injected * 100
+                else:
+                    zd_deduct_scalar = min(zd_val, raw_res)
+                    genuine_res = max(0, raw_res - zd_deduct_scalar)
+                    genuine_rec = (injected - genuine_res) / injected * 100
+                    zd_deduct = zd_deduct_scalar
+            else:
+                zd_deduct = 0
+                genuine_res = -1
+                genuine_rec = -1
+            lines.append(
+                f"| {s['label']} "
+                f"| {injected:.3f}° "
+                f"| {raw_res:.4f}° "
+                f"| {zd_val:.4f}° "
+                f"| {zd_deduct:.4f}° "
+                f"| {genuine_res:.4f}° "
+                f"| {raw_rec:.1f}% "
+                f"| {genuine_rec:.1f}% |"
+            )
+        lines.append("")
+
+        lines.append("Per-Axis Shortcut 检测 (单轴注入, Raw=原始Recovery, Genuine=方向感知扣除ZeroDrift):")
+        lines.append("")
+        lines.append("| 模型 | R-Raw% | P-Raw% | Y-Raw% | R-Genuine% | P-Genuine% | Y-Genuine% | Risk | R/P/Y |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |")
+        for s in gdiag_sorted:
+            gd = s['gdiag']
+            spa = gd.get('shortcut_per_axis', {})
+            _cr = gd.get('composite', {}).get('raw', {})
+            pag = _cr.get('per_axis_genuine_recovery', {})
+            _has_signed = _cr.get('zero_drift_signed_rpy') is not None
+            zd = gd.get('zero_drift', {})
+            inject_d = _cr.get('inject_deg', GDIAG_INJECT_DEG)
+            axis_data = {}
+            for ai, ax in enumerate(['roll', 'pitch', 'yaw']):
+                ax_sc = spa.get(ax, {})
+                raw_rec = ax_sc.get('axis_specific_recovery', -1)
+                ax_residual = ax_sc.get('axis_residual', inject_d)
+                if ax_residual < 0:
+                    axis_data[ax] = {'raw': -1, 'genuine': -1}
+                    continue
+                if _has_signed and ax in pag:
+                    genuine_rec = pag[ax].get('genuine_recovery_pct', raw_rec)
+                else:
+                    ax_zd = zd.get(f'{ax}_mean', 0)
+                    ax_genuine_residual = max(0, ax_residual - min(ax_zd, ax_residual))
+                    genuine_rec = ((inject_d - ax_genuine_residual) / inject_d * 100) if inject_d > 0 else -1
+                axis_data[ax] = {'raw': raw_rec, 'genuine': genuine_rec}
+            sc_risk = gd.get('shortcut_risk', 'N/A')
+            risk_d = gd.get('shortcut_risk_detail', {})
+            def _pct_or_na(v):
+                return f"{v:.1f}%" if v >= 0 else "N/A"
+            lines.append(
+                f"| {s['label']} "
+                f"| {_pct_or_na(axis_data['roll']['raw'])} "
+                f"| {_pct_or_na(axis_data['pitch']['raw'])} "
+                f"| {_pct_or_na(axis_data['yaw']['raw'])} "
+                f"| {_pct_or_na(axis_data['roll']['genuine'])} "
+                f"| {_pct_or_na(axis_data['pitch']['genuine'])} "
+                f"| {_pct_or_na(axis_data['yaw']['genuine'])} "
+                f"| {sc_risk} "
+                f"| {risk_d.get('roll', '?')}/{risk_d.get('pitch', '?')}/{risk_d.get('yaw', '?')} |"
+            )
+        lines.append("")
+
+        lines.append("Cross-Axis Leakage (单轴注入时其他轴误差增量, 基线=Zero-Drift):")
+        lines.append("")
+        lines.append("| 模型 | Roll注入→其他轴 | Pitch注入→其他轴 | Yaw注入→其他轴 |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for s in gdiag_sorted:
+            cl = s['gdiag'].get('cross_axis_leakage', {})
+            r_leak = cl.get('roll', {}).get('mean_leakage_deg', -1)
+            p_leak = cl.get('pitch', {}).get('mean_leakage_deg', -1)
+            y_leak = cl.get('yaw', {}).get('mean_leakage_deg', -1)
+            lines.append(
+                f"| {s['label']} "
+                f"| {r_leak:.4f}° "
+                f"| {p_leak:.4f}° "
+                f"| {y_leak:.4f}° |"
+            )
+        lines.append("")
+
+        lines.append("Fixed-Inject Per-Axis Residual (RPY分量残差):")
+        lines.append("")
+        lines.append("| 模型 | Roll残差 | Pitch残差 | Yaw残差 | 最大轴 |")
+        lines.append("| --- | ---: | ---: | ---: | --- |")
+        for s in gdiag_sorted:
+            fi = s['gdiag'].get('fixed_inject', {}).get('inject', {})
+            r_res = fi.get('roll_residual', -1)
+            p_res = fi.get('pitch_residual', -1)
+            y_res = fi.get('yaw_residual', -1)
+            worst = max([(r_res, 'R'), (p_res, 'P'), (y_res, 'Y')], key=lambda x: x[0])
+            lines.append(
+                f"| {s['label']} "
+                f"| {r_res:.4f}° "
+                f"| {p_res:.4f}° "
+                f"| {y_res:.4f}° "
+                f"| {worst[1]} |"
+            )
+        lines.append("")
+
+        lines.append("Multi-Magnitude 矫正线性度 (0.5°→1.0°→2.0°):")
+        lines.append("")
+        lines.append("| 模型 | 0.5° Resid | 0.5° Recv% | 1.0° Resid | 1.0° Recv% | 2.0° Resid | 2.0° Recv% |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for s in gdiag_sorted:
+            mm = s['gdiag'].get('multi_magnitude', {})
+            cols = []
+            for mag in ['0.5', '1.0', '2.0']:
+                entry = mm.get(mag, {})
+                cols.append(f"{entry.get('residual', -1):.4f}°")
+                cols.append(f"{entry.get('recovery_pct', -1):.1f}%")
+            lines.append(f"| {s['label']} | " + " | ".join(cols) + " |")
+        lines.append("")
+
+        lines.append("正/负注入对称性:")
+        lines.append("")
+        lines.append("| 模型 | +inject Resid | -inject Resid | |Δ| | 对称性 |")
+        lines.append("| --- | ---: | ---: | ---: | --- |")
+        for s in gdiag_sorted:
+            gd = s['gdiag']
+            pos = gd.get('fixed_inject', {}).get('inject', {}).get('mean_residual', -1)
+            neg = gd.get('neg_inject', {}).get('inject', {}).get('mean_residual', -1)
+            delta = abs(pos - neg) if pos >= 0 and neg >= 0 else -1
+            sym = "优" if delta < 0.1 else ("良" if delta < 0.3 else "差")
+            lines.append(
+                f"| {s['label']} "
+                f"| {pos:.4f}° "
+                f"| {neg:.4f}° "
+                f"| {delta:.4f}° "
+                f"| {sym} |"
+            )
+        lines.append("")
+
+        lines.append("Prediction Independence (预测独立性 — 捷径检测):")
+        lines.append("")
+        lines.append("| 模型 | Roll独立性 | Pitch独立性 | Yaw独立性 | 综合独立性 | 判定 |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
+        for s in gdiag_sorted:
+            pi = s['gdiag'].get('prediction_independence', {})
+            if not pi:
+                lines.append(f"| {s['label']} | - | - | - | - | N/A |")
+                continue
+            per_axis = pi.get('per_axis', {})
+            r_ind = per_axis.get('roll', {}).get('independence', -1)
+            p_ind = per_axis.get('pitch', {}).get('independence', -1)
+            y_ind = per_axis.get('yaw', {}).get('independence', -1)
+            overall = pi.get('overall_independence', -1)
+            verdict = pi.get('verdict', 'N/A')
+            lines.append(
+                f"| {s['label']} "
+                f"| {r_ind:.3f} "
+                f"| {p_ind:.3f} "
+                f"| {y_ind:.3f} "
+                f"| {overall:.3f} "
+                f"| {verdict} |"
+            )
+        lines.append("")
+
+        lines.append("GS_medw (MEDW-aggregated Generalization Score) 计算说明:")
+        lines.append("- 所有指标基于 MEDW 多帧聚合: per-sequence robust median → 计算RPY误差 → 跨sequence取均值")
+        lines.append("- 与实际部署完全一致: 部署时使用多帧聚合标定, 不依赖单帧精度")
+        lines.append("- GS_medw = Σ(wi × Si), 范围 [0,1], 越低越好")
+        lines.append("- S1 Zero-Drift (w=0.40): MEDW max(R,P,Y)/0.3° 聚合后的固有偏差")
+        lines.append("- S2 Correction (w=0.30): (MEDW残差 - 方向感知ZD扣除) / 实际geodesic注入量, 取0.5°/1.0°均值")
+        lines.append("- S3 Shortcut (w=0.15): 1-mean(genuine per-axis recovery)%, 方向感知扣除ZD同向分量")
+        lines.append("- S4 Consistency (w=0.15): Asymmetry×0.6 + MagnitudeSensitivity×0.4 方向对称性(更重要)与量级敏感度")
+        lines.append("- 注: 扰动使用LiDAR坐标系RPY轴 (右乘gt_R @ dR_lidar)")
+        lines.append("- 点云投影可视化见各模型 gdiag_projections/ 目录")
+        lines.append("")
+        lines.append("指标联合解读指南:")
+        lines.append("")
+        lines.append("| | Shortcut低(<20%) | Shortcut中(20-50%) | Shortcut高(>50%) |")
+        lines.append("| --- | --- | --- | --- |")
+        lines.append("| Genuine高(>70%) | **理想模型**: 实打实的矫正 | 良好但有ZD辅助 | 需结合PredIndep验证 |")
+        lines.append("| Genuine中(30-70%) | 可用模型 | 一般 | 偏弱 |")
+        lines.append("| Genuine低(<30%) | 较差模型 | 差 | **纯捷径**: 全靠ZD |")
+        lines.append("")
+        lines.append("- Genuine Recovery: 扣除ZD后的净残差, 反映模型输出离GT多近")
+        lines.append("- Shortcut Proportion: 表观矫正中ZD贡献的比例, 反映矫正来源")
+        lines.append("- Prediction Independence: 模型预测是否随注入量变化, 独立交叉验证捷径")
+        lines.append("- 三者必须联合解读: 高Genuine+高Shortcut+SHORTCUT判定 = 纯靠ZD的虚假矫正")
+        lines.append("")
+
+    # === BAG 泛化评估跨模型汇总 ===
+    if BAG_EVAL_DIR and os.path.isdir(BAG_EVAL_DIR):
+        bag_data = _collect_bag_eval_data(BAG_EVAL_DIR)
+        if bag_data:
+            bag_lines, bag_rankings = _bag_report_lines(BAG_EVAL_DIR, bag_data, _sec)
+            _sec += 1
+            lines.extend(bag_lines)
+
     lines.append("=" * 80)
     lines.append(f"{_CN.get(_sec, str(_sec))}、结论与建议")
     _sec += 1
@@ -1947,18 +2552,35 @@ def generate_report(all_stats):
     # --- Key findings ---
     lines.append("--- 关键发现 ---")
     lines.append("")
+    finding_idx = 1
     if best_ta and best_ta['label'] != best['label']:
         lines.append(
-            f"1. Per-frame 最佳 ({best['label']}, {best.get('rot_error_mean', -1):.3f}°) "
+            f"{finding_idx}. Per-frame 最佳 ({best['label']}, {best.get('rot_error_mean', -1):.3f}°) "
             f"≠ BEST 时序聚合最佳 ({best_ta['label']}, {best_ta['temporal']['best']['rot']:.3f}°)"
         )
         lines.append(f"   说明: 单帧精度高不等于聚合后精度高, "
                      f"关键在于误差是否为可聚合消除的随机噪声")
-    lines.append(f"2. 最佳泛化模型 (per-frame): {best['label']} (Mean Rot: {best.get('rot_error_mean', -1):.3f}°)")
+        finding_idx += 1
+    lines.append(f"{finding_idx}. 最佳泛化模型 (per-frame): {best['label']} (Mean Rot: {best.get('rot_error_mean', -1):.3f}°)")
+    finding_idx += 1
     if best_ta:
-        lines.append(f"3. 最佳泛化模型 (BEST时序聚合): {best_ta['label']} "
+        lines.append(f"{finding_idx}. 最佳泛化模型 (BEST时序聚合): {best_ta['label']} "
                      f"(BEST: {best_ta['temporal']['best']['rot']:.3f}°, "
                      f"方法: {best_ta['temporal']['best'].get('method', '?')})")
+        finding_idx += 1
+    if has_gdiag and gdiag_sorted:
+        best_gs = gdiag_sorted[0]
+        gs_val = best_gs['gdiag'].get('composite', {}).get('GS_medw', -1)
+        zd_rot = best_gs['gdiag'].get('zero_drift', {}).get('rot_mean', 0)
+        raw_rec = best_gs['gdiag'].get('fixed_inject', {}).get('inject', {}).get('mean_recovery_pct', 0)
+        _comp_raw = best_gs['gdiag'].get('composite', {}).get('raw', {})
+        _has_signed = _comp_raw.get('zero_drift_signed_rpy') is not None
+        genuine_rec = _comp_raw.get('genuine_recovery_pct', raw_rec) if _has_signed else raw_rec
+        lines.append(f"{finding_idx}. 最佳综合泛化 (GS_medw): {best_gs['label']} "
+                     f"(GS_medw={gs_val:.4f}, GenuineRecovery={genuine_rec:.1f}%, "
+                     f"ZeroDrift={zd_rot:.4f}°, "
+                     f"Shortcut={best_gs['gdiag'].get('shortcut_risk', 'N/A')})")
+        finding_idx += 1
     lines.append("")
 
     # --- 0.1° target analysis ---
@@ -2041,15 +2663,20 @@ def main():
     elif EVAL_MAX_FRAMES_PER_SEQ is not None:
         print(f"  采样: 每序列最多 {EVAL_MAX_FRAMES_PER_SEQ} 帧 (均匀下采样)")
     print(f"  输出: {OUTPUT_DIR}")
+    if BAG_EVAL_DIR:
+        print(f"  BAG评估: {BAG_EVAL_DIR}")
     if _PARALLEL_GPUS > 1:
         print(f"  并行模式: {_PARALLEL_GPUS} GPUs")
     else:
         print(f"  并行模式: 关闭 (使用 --parallel -1 启用多卡并行)")
     print("=" * 80)
 
-    # Step 1: Run evaluations
-    print("\n>>> Step 1: Running evaluations...")
-    run_evaluations()
+    if not _script_args.report_only:
+        # Step 1: Run evaluations
+        print("\n>>> Step 1: Running evaluations...")
+        run_evaluations()
+    else:
+        print("\n>>> Step 1: SKIPPED (--report_only)")
 
     # Step 2: Collect stats
     print("\n>>> Step 2: Collecting results...")
@@ -2077,6 +2704,8 @@ def main():
     print(f"  Report: {report_path}")
     print(f"  Charts: {os.path.join(OUTPUT_DIR, 'charts')}/")
     print(f"  Projections: {os.path.join(OUTPUT_DIR, 'projection_comparison')}/")
+    if BAG_EVAL_DIR and os.path.isdir(BAG_EVAL_DIR):
+        print(f"  BAG泛化汇总: 已集成到报告 (来源: {BAG_EVAL_DIR})")
     print(f"  总耗时: {_format_elapsed(_total_elapsed)}")
     print(f"{'='*80}")
 

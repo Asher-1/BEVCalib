@@ -1,0 +1,184 @@
+# V40 GMP × v20 配方 — V32 init-invariance + Jacobian 监督
+#
+# Jacobian 定义（已修复 train_kitti.py）:
+#   固定 GT，单轴 sweep init_bias，correction = init_err - out_err
+#   J = d(correction)/d(bias)，理想 ≈ 1.0
+#
+# 实验链:
+#   F0  v32 init-invariance（consistency + continuous noise）+ 修复后的 Jacobian eval
+#   F1  F0 + jacobian_loss（训练期 SmoothL1(J,1)，weight 宜小）
+#   E1+ 再叠 Match/Corr/EPnP/FOV（shortcut 改善后再开）
+#
+# Usage:
+#   bash batch_train.sh configs/v40_gmp_paper_v20recipe_dual_gate.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+    PROJFUSION_ROOT: /mnt/drtraining/user/dahailu/code/ProjFusion
+
+  params:
+    # --- v20_v8recipe_pitch_wt3 ---
+    angle_range_deg: 5
+    trans_range: 0.15
+    eval_angle_range_deg: 5
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+    rotation_only: true
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.0"
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+    lr_schedule: step
+    warmup_epochs: 5
+    backbone_lr_scale: 0.1
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_sign_flip_prob: 0.0
+    augment_mount_jitter_prob: 0.0
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    sample_step: 2
+    max_frames_per_seq: 10000
+    early_stopping_patience: 30
+    eval_epoches: 50
+    num_epochs: 400
+    seed: 42
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    foreground: true
+    no_tensorboard: true
+
+    # --- GMP 架构 ---
+    fusion_backend: geo_match_proj
+    pc_encoder_mode: pointgpt2bev
+    native_cross: 0
+    cam2bev_mode: query
+    backbone_type: dinov2
+    backbone_variant: dinov2-small
+    freeze_backbone: 1
+    native_cross_extend_ratio: 2.5
+    projfusion_image_hw: [252, 448]
+    iterative_refine: 0
+    native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+    native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+    native_cross_pointgpt_max_depth: 60.0
+    pretrain_ckpt: null
+    no_amp: 1
+
+    # --- KPI / Gate ---
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 1
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    save_ckpt_per_epoches: 10
+    enable_dual_gate_ckpt: 0
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.30
+
+    # --- V32 init-invariance（直接打 shortcut，优先于 FOV/Match）---
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 30.0
+    tinit_dropout_prob: 0.3
+    consistency_loss_weight: 0.5
+    consistency_loss_start_epoch: 20
+    ema_consistency: 0
+    ema_decay: 0.996
+
+    # --- Jacobian 训练监督（默认关，F1 实验打开）---
+    jacobian_loss_weight: 0.0
+    jacobian_loss_start_epoch: 20
+    jacobian_loss_probe_deg: 2.0
+
+    # --- GMP 特性（默认关，E1+ 再开）---
+    appearance_loss_weight: 0.1
+    depth_loss_weight: 0.05
+    geo_loss_start_epoch: 5
+    use_match_head: 0
+    use_local_correlation: 0
+    correspondence_supervision: 0
+    correspondence_loss_weight: 0.0
+    differentiable_epnp: 0
+
+experiments:
+  # 主实验：V32 + 修复后的 Jacobian eval + GMP geo
+  - name: "v20_gmp_f0_v32_jacfix_geo"
+    description: "F0: v20 + V32 init-invariance + 修复 Jacobian eval + GMP P0a"
+    dataset: "all"
+    version: "v20_gmp_f0_v32_jacfix_geo"
+    params:
+      appearance_loss_weight: 0.1
+      depth_loss_weight: 0.05
+
+  # Jacobian 直接进 loss（小权重；v35b 证明过大易与主 loss 打架）
+  - name: "v20_gmp_f1_v32_jacloss_geo"
+    description: "F1: F0 + jacobian_loss (J→1), weight=0.1, start_ep=20"
+    dataset: "all"
+    version: "v20_gmp_f1_v32_jacloss_geo"
+    skip: true
+    skip_reason: "F0 Jacobian 仍 WEAK 时开启；先验证 F0"
+    params:
+      appearance_loss_weight: 0.1
+      depth_loss_weight: 0.05
+      jacobian_loss_weight: 0.1
+      jacobian_loss_start_epoch: 20
+      jacobian_loss_probe_deg: 2.0
+
+  - name: "v20_gmp_e1_match_corr"
+    description: "E1: F0 + Match/Corr（shortcut 改善后再叠）"
+    dataset: "all"
+    version: "v20_gmp_e1_match_corr"
+    skip: true
+    skip_reason: "F0/F1 Jacobian>0.3 后开启"
+    params:
+      appearance_loss_weight: 0.1
+      depth_loss_weight: 0.05
+      use_match_head: 1
+      use_local_correlation: 1
+      correspondence_supervision: 1
+      correspondence_loss_weight: 1.0
+
+  - name: "v20_gmp_smoke"
+    description: "2ep smoke"
+    dataset: "all"
+    version: "v20_gmp_smoke"
+    skip: true
+    skip_reason: "手动调试"
+    params:
+      num_epochs: 2
+      eval_epoches: 1
+      consistency_loss_start_epoch: 0
+      jacobian_loss_weight: 0.05
+      jacobian_loss_start_epoch: 0

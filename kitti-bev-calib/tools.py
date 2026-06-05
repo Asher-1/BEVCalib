@@ -18,7 +18,8 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
                                          distribution='uniform',
                                          per_axis_prob=0.0,
                                          curriculum_scale=1.0,
-                                         per_axis_weights=None):
+                                         per_axis_weights=None,
+                                         symmetric_perturb=False):
     """
     Vectorized batch perturbation with configurable distribution and per-axis mode.
 
@@ -27,11 +28,16 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
         angle_range_deg: float, rotation perturbation range in degrees
         trans_range: float, translation perturbation range in meters
         rotation_only: bool, if True skip translation perturbation
-        distribution: 'uniform' or 'truncated_normal'
+        distribution: 'uniform', 'truncated_normal', or 'magnitude_balanced'
         per_axis_prob: probability of perturbing a single axis only (0=disabled)
         curriculum_scale: scale factor for perturbation range (0..1 for curriculum)
         per_axis_weights: tuple of 3 floats for (roll, pitch, yaw) sampling weights
                           in per-axis mode. None = uniform. e.g. (0.5, 0.3, 0.2)
+        symmetric_perturb: if True, force half of batch positive and half negative
+
+    distribution='magnitude_balanced': sample |angle| uniformly from [0, max],
+    then assign random sign. Ensures equal representation of all magnitudes
+    including near-zero, improving zero-drift and magnitude awareness.
     """
     B = T.shape[0]
     effective_angle = angle_range_deg * curriculum_scale
@@ -42,6 +48,27 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
 
     use_per_axis = (per_axis_prob > 0) and (np.random.rand() < per_axis_prob)
 
+    def _apply_symmetric(angles_arr, n):
+        """Force exact 50/50 positive/negative split within a batch."""
+        if not symmetric_perturb or n < 2:
+            return angles_arr
+        half = n // 2
+        magnitudes = np.abs(angles_arr)
+        signs = np.ones(n)
+        signs[:half] = -1.0
+        np.random.shuffle(signs)
+        return magnitudes * signs
+
+    def _sample_angles(n):
+        if distribution == 'truncated_normal':
+            return _sample_truncated_normal(-effective_angle, effective_angle, n)
+        elif distribution == 'magnitude_balanced':
+            magnitudes = np.random.uniform(0, effective_angle, n)
+            signs = np.random.choice([-1.0, 1.0], size=n)
+            return magnitudes * signs
+        else:
+            return np.random.uniform(-effective_angle, effective_angle, n)
+
     if use_per_axis:
         rotvecs = np.zeros((B, 3))
         if per_axis_weights is not None:
@@ -50,10 +77,7 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
             axis_idx = np.random.choice(3, size=B, p=w)
         else:
             axis_idx = np.random.randint(0, 3, size=B)
-        if distribution == 'truncated_normal':
-            angles = _sample_truncated_normal(-effective_angle, effective_angle, B)
-        else:
-            angles = np.random.uniform(-effective_angle, effective_angle, B)
+        angles = _apply_symmetric(_sample_angles(B), B)
         angles_rad = np.deg2rad(angles)
         for i in range(B):
             rotvecs[i, axis_idx[i]] = angles_rad[i]
@@ -61,12 +85,7 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
     else:
         rand_axes = np.random.randn(B, 3)
         rand_axes /= np.linalg.norm(rand_axes, axis=1, keepdims=True)
-        if distribution == 'truncated_normal':
-            rand_angles = np.deg2rad(
-                _sample_truncated_normal(-effective_angle, effective_angle, B))
-        else:
-            rand_angles = np.deg2rad(
-                np.random.uniform(-effective_angle, effective_angle, B))
+        rand_angles = np.deg2rad(_apply_symmetric(_sample_angles(B), B))
         delta_rots = R.from_rotvec(rand_axes * rand_angles[:, None])
 
     new_rots = delta_rots * orig_rots

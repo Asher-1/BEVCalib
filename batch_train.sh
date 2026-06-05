@@ -47,7 +47,7 @@ BEVCalib 批量训练脚本 (配置文件驱动)
 选项:
     --dry-run           仅打印命令，不实际执行
     --force             强制重新训练，即使输出目录已存在
-    --skip-pattern RE   跳过名称匹配正则表达式的实验 (grep -E 语法)
+    --skip-pattern RE   跳过名称匹配正则表达式的实验 (grep -E 语法；覆盖 YAML global.skip_pattern)
     -h, --help          显示此帮助信息
 
 配置文件:
@@ -173,8 +173,13 @@ WAIT_TIME=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.s
 GLOBAL_FORCE_RERUN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('force_rerun', False))" 2>/dev/null)
 MAX_RETRIES=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('max_retries', 0))" 2>/dev/null)
 RETRY_DELAY=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('retry_delay', 30))" 2>/dev/null)
+GLOBAL_SKIP_PATTERN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); v=c.get('global',{}).get('skip_pattern'); print(v if v else '')" 2>/dev/null)
 MAX_RETRIES=${MAX_RETRIES:-0}
 RETRY_DELAY=${RETRY_DELAY:-30}
+# CLI --skip-pattern 优先；未指定时使用 YAML global.skip_pattern
+if [ -z "$SKIP_PATTERN" ] && [ -n "$GLOBAL_SKIP_PATTERN" ]; then
+    SKIP_PATTERN="$GLOBAL_SKIP_PATTERN"
+fi
 
 # TensorBoard 端口 (从 defaults.params.tensorboard_port 读取)
 TB_PORT=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); p=c.get('defaults',{}).get('params',{}) or {}; v=p.get('tensorboard_port'); print(v if v is not None else 6006)" 2>/dev/null)
@@ -414,6 +419,7 @@ build_train_command() {
     python3 - "$config_json" "$exp_idx" <<'PYTHON_EOF'
 import sys
 import json
+import shlex
 
 config = json.loads(sys.argv[1])
 exp_idx = int(sys.argv[2])
@@ -494,6 +500,7 @@ if params.get('weight_axis_rotation') is not None:
 OPTIM_PARAMS = [
     ('lr_schedule', '--lr_schedule'),
     ('warmup_epochs', '--warmup_epochs'),
+    ('step_size', '--step_size'),
     ('backbone_lr_scale', '--backbone_lr_scale'),
     ('cosine_T0', '--cosine_T0'),
     ('cosine_Tmult', '--cosine_Tmult'),
@@ -550,6 +557,19 @@ OPTIM_PARAMS = [
     ('min_point_utilization', '--min_point_utilization'),
     ('min_valid_ratio', '--min_valid_ratio'),
     ('enable_ckpt_eval', '--enable_ckpt_eval'),
+    ('enable_medw_eval', '--enable_medw_eval'),
+    ('enable_jacobian_eval', '--enable_jacobian_eval'),
+    ('jacobian_eval_angle_deg', '--jacobian_eval_angle_deg'),
+    ('jacobian_eval_batches', '--jacobian_eval_batches'),
+    ('jacobian_eval_n_probes', '--jacobian_eval_n_probes'),
+    ('jacobian_loss_weight', '--jacobian_loss_weight'),
+    ('jacobian_loss_start_epoch', '--jacobian_loss_start_epoch'),
+    ('jacobian_loss_probe_deg', '--jacobian_loss_probe_deg'),
+    ('jacobian_loss_interval', '--jacobian_loss_interval'),
+    ('medw_eval_max_frames', '--medw_eval_max_frames'),
+    ('enable_dual_gate_ckpt', '--enable_dual_gate_ckpt'),
+    ('dual_gate_jacobian_min', '--dual_gate_jacobian_min'),
+    ('dual_gate_medw_max', '--dual_gate_medw_max'),
     ('ddp_auto_scale', '--ddp_auto_scale'),
     ('ddp_reference_gpus', '--ddp_reference_gpus'),
     ('max_scaled_lr', '--max_scaled_lr'),
@@ -562,6 +582,11 @@ OPTIM_PARAMS = [
     ('layer_wise_lr_decay', '--layer_wise_lr_decay'),
     ('use_pitch_branch', '--use_pitch_branch'),
     ('pitch_aux_weight', '--pitch_aux_weight'),
+    ('use_dla', '--use_dla'),
+    ('use_pitch_fusion', '--use_pitch_fusion'),
+    ('use_instance_norm', '--use_instance_norm'),
+    ('use_gated_instance_norm', '--use_gated_instance_norm'),
+    ('gin_init_gate', '--gin_init_gate'),
     ('bev_instance_norm', '--bev_instance_norm'),
     ('augment_mount_jitter_prob', '--augment_mount_jitter_prob'),
     ('augment_mount_jitter_rot_sigma', '--augment_mount_jitter_rot_sigma'),
@@ -577,11 +602,122 @@ OPTIM_PARAMS = [
     ('freeze_backbone', '--freeze_backbone'),
     ('backbone_freeze_layers', '--backbone_freeze_layers'),
     ('backbone_weights', '--backbone_weights'),
+    ('tinit_dropout_prob', '--tinit_dropout_prob'),
+    ('consistency_loss_weight', '--consistency_loss_weight'),
+    ('consistency_loss_start_epoch', '--consistency_loss_start_epoch'),
+    ('progressive_angle_start', '--progressive_angle_start'),
+    ('progressive_angle_end', '--progressive_angle_end'),
+    ('progressive_warmup_epochs', '--progressive_warmup_epochs'),
+    ('ema_consistency', '--ema_consistency'),
+    ('ema_decay', '--ema_decay'),
+    ('continuous_tinit_noise', '--continuous_tinit_noise'),
+    ('continuous_noise_max_deg', '--continuous_noise_max_deg'),
+    ('correlation_fusion', '--correlation_fusion'),
+    ('cross_correlation_fusion', '--cross_correlation_fusion'),
+    ('explicit_tinit', '--explicit_tinit'),
+    ('tinit_sensitivity_weight', '--tinit_sensitivity_weight'),
+    ('iterative_refine', '--iterative_refine'),
+    ('native_cross', '--native_cross'),
+    ('native_cross_pc_groups', '--native_cross_pc_groups'),
+    ('native_cross_n_harmonic', '--native_cross_n_harmonic'),
+    ('native_cross_n_layers', '--native_cross_n_layers'),
+    ('native_cross_dual_branch', '--native_cross_dual_branch'),
+    ('native_cross_knn', '--native_cross_knn'),
+    ('native_cross_use_fps', '--native_cross_use_fps'),
+    ('native_cross_use_pointgpt', '--native_cross_use_pointgpt'),
+    ('native_cross_pointgpt_ckpt', '--native_cross_pointgpt_ckpt'),
+    ('native_cross_pointgpt_config', '--native_cross_pointgpt_config'),
+    ('native_cross_pointgpt_max_depth', '--native_cross_pointgpt_max_depth'),
+    ('native_cross_extend_ratio', '--native_cross_extend_ratio'),
+    ('fusion_backend', '--fusion_backend'),
+    ('pc_encoder_mode', '--pc_encoder_mode'),
+    ('fusion_variant', '--fusion_variant'),
+    ('deep_supervision_weight', '--deep_supervision_weight'),
+    ('gate_entropy_weight', '--gate_entropy_weight'),
+    ('bev_branch_lr_scale', '--bev_branch_lr_scale'),
+    # V40 GMP
+    ('appearance_loss_weight', '--appearance_loss_weight'),
+    ('depth_loss_weight', '--depth_loss_weight'),
+    ('geo_loss_start_epoch', '--geo_loss_start_epoch'),
+    ('use_match_head', '--use_match_head'),
+    ('use_local_correlation', '--use_local_correlation'),
+    ('correspondence_loss_weight', '--correspondence_loss_weight'),
+    ('correspondence_loss_start_epoch', '--correspondence_loss_start_epoch'),
+    ('correspondence_loss_warmup_epochs', '--correspondence_loss_warmup_epochs'),
+    ('compose_mode', '--compose_mode'),
+    ('num_correspondences', '--num_correspondences'),
+    ('match_valid_ratio_min', '--match_valid_ratio_min'),
+    ('match_disable_fallback', '--match_disable_fallback'),
+    ('match_gate_use_init_ratio', '--match_gate_use_init_ratio'),
+    ('match_confidence_threshold', '--match_confidence_threshold'),
+    ('match_corr_validity_mode', '--match_corr_validity_mode'),
+    ('match_epnp_min_points', '--match_epnp_min_points'),
+    ('match_phase_noise_max_deg', '--match_phase_noise_max_deg'),
+    ('correspondence_supervision', '--correspondence_supervision'),
+    ('differentiable_epnp', '--differentiable_epnp'),
+    ('diff_epnp_warmup_epochs', '--diff_epnp_warmup_epochs'),
+    # V42 CF-BEV-R
+    ('cf_feat_dim', '--cf_feat_dim'),
+    ('cf_n_groups', '--cf_n_groups'),
+    ('cf_knn', '--cf_knn'),
+    ('cf_corr_heads', '--cf_corr_heads'),
+    ('cf_corr_radius', '--cf_corr_radius'),
+    ('cf_num_queries', '--cf_num_queries'),
+    ('cf_encoder_layers', '--cf_encoder_layers'),
+    ('cf_decoder_layers', '--cf_decoder_layers'),
+    ('use_rocr', '--use_rocr'),
+    ('rocr_dropout', '--rocr_dropout'),
+    ('rocr_center_bias', '--rocr_center_bias'),
+    ('rocr_detach_epochs', '--rocr_detach_epochs'),
+    ('quat_norm_weight', '--quat_norm_weight'),
+    ('corr_alignment_weight', '--corr_alignment_weight'),
+    ('corr_alignment_warmup', '--corr_alignment_warmup'),
+    ('seq_consistency_weight', '--seq_consistency_weight'),
+    ('seq_consistency_start_epoch', '--seq_consistency_start_epoch'),
+    ('corr_window_mode', '--corr_window_mode'),
+    ('max_pcd_points', '--max_pcd_points'),
+    # V43: zero perturbation training
+    ('zero_perturbation_prob', '--zero_perturbation_prob'),
+    ('symmetric_perturb', '--symmetric_perturb'),
+    ('multi_range_prob', '--multi_range_prob'),
+    ('multi_range_angle', '--multi_range_angle'),
+    # V47: overcorrection penalty + magnitude head
+    ('overcorrection_penalty', '--overcorrection_penalty'),
+    ('use_magnitude_head', '--use_magnitude_head'),
+    ('magnitude_loss_weight', '--magnitude_loss_weight'),
+    # P2b: FOV crop + LiDAR sparsification
+    ('augment_fov_crop_prob', '--augment_fov_crop_prob'),
+    ('augment_fov_crop_ratio_min', '--augment_fov_crop_ratio_min'),
+    ('augment_fov_crop_ratio_max', '--augment_fov_crop_ratio_max'),
+    ('augment_lidar_sparse_prob', '--augment_lidar_sparse_prob'),
+    ('augment_lidar_sparse_lines', '--augment_lidar_sparse_lines'),
+    ('augment_lidar_vertical_fov', '--augment_lidar_vertical_fov'),
 ]
+# 仅这些 flag 必须用 --flag=value（argparse 负值 / shell 逗号转义问题）
+_EQUALS_FORM_FLAGS = {
+    '--augment_lidar_sparse_lines',
+    '--augment_lidar_vertical_fov',
+}
+
+def _cli_arg(cli_flag, val):
+    s = str(val)
+    if s.startswith('-') or cli_flag in _EQUALS_FORM_FLAGS:
+        return f"{cli_flag}={s}"
+    if ' ' in s:
+        return f"{cli_flag} {shlex.quote(s)}"
+    return f"{cli_flag} {s}"
+
 for yaml_key, cli_flag in OPTIM_PARAMS:
     val = params.get(yaml_key)
     if val is not None and str(val).strip() != '':
-        args.append(f"{cli_flag} {val}")
+        args.append(_cli_arg(cli_flag, val))
+
+if params.get('projfusion_image_hw') is not None:
+    hw = params['projfusion_image_hw']
+    if isinstance(hw, (list, tuple)):
+        args.append(f"--projfusion_image_hw {' '.join(str(x) for x in hw)}")
+    else:
+        args.append(f"--projfusion_image_hw {hw}")
 
 # pose_aware_sampling (boolean flag)
 if params.get('pose_aware_sampling') in (True, 1, '1', 'true', 'True'):
@@ -689,7 +825,10 @@ print(json.dumps({
     'dataset_dir': dataset_dir,
     'version': version,
     'zstep': zstep,
-    'angle': angle
+    'angle': angle,
+    'pretrain_ckpt': params.get('pretrain_ckpt') or '',
+    'pointgpt_ckpt': params.get('native_cross_pointgpt_ckpt') or '',
+    'resume_ckpt': params.get('resume_ckpt') if params.get('resume_ckpt') is not None else '',
 }))
 PYTHON_INFO
 )
@@ -703,6 +842,9 @@ PYTHON_INFO
     VERSION=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
     ZSTEP=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['zstep'])")
     ANGLE=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['angle'])")
+    PRETRAIN_CKPT=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pretrain_ckpt',''))")
+    POINTGPT_CKPT=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pointgpt_ckpt',''))")
+    RESUME_CKPT=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; v=json.load(sys.stdin).get('resume_ckpt',''); print('' if v is None else v)")
     
     log ""
     log "================================================================"
@@ -742,25 +884,48 @@ PYTHON_INFO
         log "  原因: 名称匹配跳过模式 '$SKIP_PATTERN'"
         continue
     fi
+
+    if [ -n "$POINTGPT_CKPT" ] && [ ! -f "$POINTGPT_CKPT" ]; then
+        SKIPPED=$((SKIPPED + 1))
+        log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
+        log "  原因: PointGPT checkpoint 不存在: $POINTGPT_CKPT"
+        continue
+    fi
+
+    if [ -n "$PRETRAIN_CKPT" ] && [ ! -f "$PRETRAIN_CKPT" ]; then
+        SKIPPED=$((SKIPPED + 1))
+        log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
+        log "  原因: pretrain_ckpt 不存在: $PRETRAIN_CKPT"
+        continue
+    fi
     
     # 检查实验是否已完成（基于 checkpoint 文件判断，兼容多机 DDP）
+    # resume_ckpt 非空时视为断点续训，不因已有 ckpt 跳过
     # Worker 节点永远不跳过 — 必须加入 DDP 集群
     # train_kitti.py saves checkpoints under {exp_dir}/{label}/checkpoint/
     _N_CKPT=0
     _EXP_CKPT_DIR=""
+    _WANTS_RESUME=0
+    if [ -n "$RESUME_CKPT" ] && [ "$RESUME_CKPT" != "null" ]; then
+        _WANTS_RESUME=1
+    fi
     if [ "$FORCE_RERUN" -eq 0 ] && [ "$_IS_MASTER" -eq 1 ] && [ -d "$EXPERIMENT_LOG_DIR" ]; then
         _N_CKPT=$(find "$EXPERIMENT_LOG_DIR" -path '*/checkpoint/*.pth' -type f 2>/dev/null | wc -l)
         if [ "$_N_CKPT" -gt 0 ]; then
             _EXP_CKPT_DIR=$(find "$EXPERIMENT_LOG_DIR" -path '*/checkpoint/*.pth' -type f 2>/dev/null | head -1 | xargs dirname)
         fi
     fi
-    if [ "$_N_CKPT" -gt 0 ]; then
+    if [ "$_N_CKPT" -gt 0 ] && [ "$_WANTS_RESUME" -eq 0 ]; then
         SKIPPED=$((SKIPPED + 1))
         log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
         log "  原因: 检测到已有 checkpoint 文件 (${_N_CKPT}个)"
         log "  路径: $_EXP_CKPT_DIR"
-        log "  如需重新训练，请删除该目录或使用 --force 参数"
+        log "  如需断点续训，请在 YAML 中设置 resume_ckpt: auto"
+        log "  如需从头重训，请删除该目录或使用 --force 参数"
         continue
+    fi
+    if [ "$_N_CKPT" -gt 0 ] && [ "$_WANTS_RESUME" -eq 1 ]; then
+        log "  断点续训: resume_ckpt=$RESUME_CKPT (${_N_CKPT}个 ckpt @ $_EXP_CKPT_DIR)"
     fi
     
     # 构建训练命令

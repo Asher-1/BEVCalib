@@ -1,0 +1,34 @@
+# v20-v8recipe-pitch-wt3 shortcut stress test (MEDW200 + inject 2,2,2)
+input_file: /mnt/drtraining/user/dahailu/data/bevcalib/bag_lists/test_v40.txt
+input_format: trips
+trips_base: /mnt/drtraining/user/dahailu/data/bevcalib/dummy_data
+
+ckpt_path: /mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data/v20/model_small_5deg_v20_v8recipe_pitch_wt3/all_training_data_scratch/checkpoint/ckpt_best_val.pth
+
+output_dir: /mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v20_pitch_wt3_shortcut
+
+max_frames: 200
+min_agg_frames: 50
+extract_buffer_multiplier: 1.2
+infer_cap_multiplier: 1.25
+incremental_extract: true
+initial_bag_groups: 3
+
+camera_name: traffic_2
+batch_size: 8
+img_h: 360
+img_w: 640
+projection_ratio: 0.05
+
+min_speed_kmh: 5.0
+max_speed_kmh: 120.0
+min_accel: -1.0
+max_accel: 2.0
+min_brightness: 25
+
+parallel: 0
+preparer_num_workers: 16
+filter_air_suspension: false
+cleanup_cache: false
+
+inject_lidar_rpy_deg: "2,2,2"

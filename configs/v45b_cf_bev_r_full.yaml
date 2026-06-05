@@ -1,0 +1,192 @@
+# V45b CF-BEV-R: Full multi-node training, InstanceNorm for S2/S3
+#
+# 16-node x 8-GPU (128 GPUs total) version of V45b
+# A/B test variant B: S1 without IN, S2/S3 with IN
+#
+# Usage:
+#   bash batch_train.sh configs/v45b_cf_bev_r_full.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 30
+  max_retries: 2
+  retry_delay: 120
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 120
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 360
+    NCCL_TIMEOUT: 14400
+    NCCL_IB_DISABLE: 0
+    NCCL_NET_GDR_LEVEL: 5
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    # drop_path_rate: CF-BEV-R 无 deformable transformer，不生效，已移除
+    head_dropout: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 16
+    ddp_auto_scale: 1
+    ddp_reference_gpus: 8
+    max_scaled_lr: 0.001
+    use_compile: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.4
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.1
+
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 15.0
+    consistency_loss_weight: 0.5
+    consistency_loss_start_epoch: 10
+    zero_perturbation_prob: 0.15
+
+    augment_mount_jitter_prob: 0.4
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.015
+    augment_intrinsic: 0.03
+    augment_intrinsic_cxcy: 0.015
+    augment_color_jitter: 0.3
+
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    max_frames_per_seq: 10000
+    foreground: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_pitch_flip_prob: 0.0
+
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 4
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: ±5° (shared foundation with V45a) =====
+  - name: "v45b_cf_bev_r_S1"
+    description: "V45b S1: ±5° no-IN, 16-node (shared foundation with V45a)"
+    dataset: "all"
+    version: "v45b_cf_bev_r_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 150
+      warmup_epochs: 10
+      lr_schedule: step
+      step_size: 50
+      early_stopping_patience: 40
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v44_cf_bev_r_S1_quick/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+      zero_perturbation_prob: 0.10
+      use_instance_norm: 0
+
+  # ===== S2: ±3° WITH InstanceNorm =====
+  - name: "v45b_cf_bev_r_S2"
+    description: "V45b S2: ±3° WITH InstanceNorm, 16-node, stronger aug"
+    dataset: "all"
+    version: "v45b_cf_bev_r_S2"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 160
+      warmup_epochs: 5
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 40
+      eval_epoches: 10
+      save_ckpt_per_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v45b_cf_bev_r_S1/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 5.0
+      zero_perturbation_prob: 0.12
+      use_instance_norm: 1
+
+  # ===== S3: ±1° WITH InstanceNorm =====
+  - name: "v45b_cf_bev_r_S3"
+    description: "V45b S3: ±1° WITH InstanceNorm, 16-node"
+    dataset: "all"
+    version: "v45b_cf_bev_r_S3"
+    params:
+      angle_range_deg: 1
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 3
+      learning_rate: 1e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 35
+      eval_epoches: 10
+      save_ckpt_per_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_3deg_v45b_cf_bev_r_S2/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.7
+      continuous_noise_max_deg: 2.0
+      zero_perturbation_prob: 0.15
+      axis_weights: "1.5,3.0,1.5"
+      use_instance_norm: 1

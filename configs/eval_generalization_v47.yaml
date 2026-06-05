@@ -1,0 +1,208 @@
+# V47 全变种泛化评估配置 (含 V45-GIN 最优基线)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v47.yaml --parallel -1 --eval_max_frames_per_seq 400
+#   python run_generalization_eval.py --config configs/eval_generalization_v47.yaml --generalization_diag --parallel -1 --eval_max_frames_per_seq 400
+#
+# 评估内容:
+#   - V45-GIN S1/S2/S3 Full (基线, 全局最优)
+#   - V47 S1/S2 Quick (默认 n_groups=128)
+#   - V47-512g S1/S2 Quick (n_groups=512)
+#   - V47-512g S1 Full (长训练)
+#   - best_dual + best_val checkpoints
+#   - generalization_diag: zero-drift / inject / shortcut / GS_medw
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v47"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v47_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 12
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+  # ===== Baselines: V45-GIN Full (全局最优) =====
+  - label: "v45-gin-S1-full-best-dual"
+    dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S1 Full 400ep baseline (MEDW=0.037°)"
+
+  - label: "v45-gin-S1-full-best-val"
+    dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S1 Full baseline best-val"
+
+  - label: "v45-gin-S2-full-best-dual"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Full 200ep baseline (MEDW=0.027°)"
+
+  - label: "v45-gin-S2-full-best-val"
+    dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S2 Full baseline best-val"
+
+  - label: "v45-gin-S3-full-best-dual"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full baseline (MEDW=0.026°)"
+
+  - label: "v45-gin-S3-full-best-val"
+    dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45 GIN S3 Full baseline best-val"
+
+  # ===== Baseline: V46 Quick (v47方案的对照基线) =====
+  - label: "v46-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick baseline (MEDW=0.048°)"
+
+  - label: "v46-S1-quick-best-val"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick baseline best-val"
+
+  # ===== V47 Quick: 默认 n_groups=128 =====
+  - label: "v47-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v47_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Quick n_groups=128 (MEDW=0.061°)"
+
+  - label: "v47-S1-quick-best-val"
+    dir_name: "model_small_5deg_v47_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Quick n_groups=128 best-val"
+
+  - label: "v47-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v47_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S2 Quick n_groups=128 (MEDW=0.043°)"
+
+  - label: "v47-S2-quick-best-val"
+    dir_name: "model_small_3deg_v47_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S2 Quick n_groups=128 best-val"
+
+  # ===== V47-512g Quick: n_groups=512 =====
+  - label: "v47-512g-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Quick n_groups=512 (MEDW=0.049°)"
+
+  - label: "v47-512g-S1-quick-best-val"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Quick n_groups=512 best-val"
+
+  - label: "v47-512g-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v47_512g_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S2 Quick n_groups=512 (MEDW=0.038°)"
+
+  - label: "v47-512g-S2-quick-best-val"
+    dir_name: "model_small_3deg_v47_512g_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S2 Quick n_groups=512 best-val"
+
+  # ===== V47-512g S1 Full: 长训练 =====
+  - label: "v47-512g-S1-full-best-dual"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Full n_groups=512 (longer training)"
+
+  - label: "v47-512g-S1-full-best-val"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Full n_groups=512 best-val"

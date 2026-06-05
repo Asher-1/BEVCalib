@@ -206,16 +206,22 @@ def make_collate_fn(target_size):
         pcs = []
         masks = []
         max_num_points = 0
-        for item in batch:
-            max_num_points = max(max_num_points, item[1].shape[0])
+        _max_pcd = getattr(collate_fn, '_max_pcd_points', 0)
         for item in batch:
             pc = item[1]
+            if _max_pcd > 0 and pc.shape[0] > _max_pcd:
+                idx = np.random.choice(pc.shape[0], _max_pcd, replace=False)
+                pc = pc[idx]
+            max_num_points = max(max_num_points, pc.shape[0])
+            pcs.append(pc)
+        padded_pcs = []
+        for pc in pcs:
             masks.append(np.concatenate([np.ones(pc.shape[0]), np.zeros(max_num_points - pc.shape[0])], axis=0))
             if pc.shape[0] < max_num_points:
                 pc = np.concatenate([pc, np.full((max_num_points - pc.shape[0], pc.shape[1]), 999999)], axis=0)
-            pcs.append(pc)
+            padded_pcs.append(pc)
 
-        return imgs, pcs, masks, gt_T_to_camera, intrinsics
+        return imgs, padded_pcs, masks, gt_T_to_camera, intrinsics
     
     return collate_fn
 
@@ -395,14 +401,61 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         'use_pitch_branch':         'pitch_branch.head.0.weight',
         'use_contrastive_extrinsic': 'contrastive_head.encoder.0.weight',
         'domain_adversarial':       'domain_classifier.classifier.0.weight',
+        'explicit_tinit':           'tinit_encoder.mlp.0.weight',
+        'native_cross':             'native_cross_head.rot_layers.0.to_q.weight',
+        'native_cross_pointgpt':    'native_cross_head.point_encoder.model.encoder.first_conv.0.weight',
     }
     if 'img_branch.bev_queries.weight' in state_dict and 'cam2bev_mode' not in ckpt_args:
         ckpt_args['cam2bev_mode'] = 'query'
         _log(f"   [auto-detect] cam2bev_mode='query' (found bev_queries in state_dict)")
+
+    # GMP (GeoMatchProjCalib) auto-detect from state_dict keys
+    if 'fusion_backend' not in ckpt_args and any(
+            k.startswith('proj_branch.') for k in state_dict):
+        ckpt_args['fusion_backend'] = 'geo_match_proj'
+        _log("   [auto-detect] fusion_backend='geo_match_proj' (found proj_branch in state_dict)")
+        if any(k.startswith('fusion_head.') for k in state_dict):
+            if 'use_match_head' not in ckpt_args:
+                ckpt_args['use_match_head'] = 1
+                _log("   [auto-detect] use_match_head=1 (found fusion_head in GMP state_dict)")
+
+    # HTCN (HybridTripleCalib) auto-detect from state_dict keys
+    if 'fusion_backend' not in ckpt_args and any(k.startswith('fusion_head.') for k in state_dict):
+        has_proj = any(k.startswith('proj_branch.') for k in state_dict)
+        has_bev_fuser = any(k.startswith('conv_fuser.') for k in state_dict)
+        if has_bev_fuser and has_proj:
+            ckpt_args['fusion_backend'] = 'hybrid_triple'
+        elif has_proj:
+            ckpt_args['fusion_backend'] = 'proj_only'
+        elif has_bev_fuser:
+            ckpt_args['fusion_backend'] = 'bev_only'
+        _log(f"   [auto-detect] fusion_backend='{ckpt_args.get('fusion_backend')}' (HTCN state_dict)")
+
+    if 'pc_encoder_mode' not in ckpt_args:
+        if any(k.startswith('pointgpt_encoder.') for k in state_dict):
+            ckpt_args['pc_encoder_mode'] = 'pointgpt2bev'
+            _log("   [auto-detect] pc_encoder_mode='pointgpt2bev'")
+        elif any(k.startswith('pc_branch.sparse_encoder.') for k in state_dict):
+            ckpt_args['pc_encoder_mode'] = 'spconv'
+            _log("   [auto-detect] pc_encoder_mode='spconv'")
+
+    if 'fusion_variant' not in ckpt_args:
+        if 'fusion_head.gate.0.weight' in state_dict:
+            ckpt_args['fusion_variant'] = 'gated'
+        elif 'fusion_head.proj_head.0.weight' in state_dict:
+            ckpt_args['fusion_variant'] = 'cascade'
+        elif 'fusion_head.bev_head.0.weight' in state_dict and 'fusion_head.proj_head.0.weight' in state_dict:
+            ckpt_args['fusion_variant'] = 'residual'
+
     for param_name, detect_key in _AUTO_DETECT_KEYS.items():
-        if detect_key in state_dict and param_name not in ckpt_args:
-            ckpt_args[param_name] = True
-            _log(f"   [auto-detect] {param_name}=True (found {detect_key} in state_dict)")
+        if detect_key in state_dict:
+            if param_name == 'native_cross_pointgpt':
+                if 'native_cross_use_pointgpt' not in ckpt_args:
+                    ckpt_args['native_cross_use_pointgpt'] = 1
+                    _log(f"   [auto-detect] native_cross_use_pointgpt=1 (found {detect_key})")
+            elif param_name not in ckpt_args:
+                ckpt_args[param_name] = True
+                _log(f"   [auto-detect] {param_name}=True (found {detect_key} in state_dict)")
 
     _STR_PARAMS = {
         'voxel_mode':     ('voxel_mode',      'hard'),
@@ -415,6 +468,9 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         'backbone_type':  ('backbone_type',    'swin'),
         'backbone_variant': ('backbone_variant', 'dinov2-small'),
         'backbone_weights': ('backbone_weights', None),
+        'fusion_backend': ('fusion_backend', 'bev'),
+        'pc_encoder_mode': ('pc_encoder_mode', 'pointgpt2bev'),
+        'fusion_variant': ('fusion_variant', 'gated'),
     }
     for key, (ckpt_key, default) in _STR_PARAMS.items():
         cli_val = getattr(args, key, None)
@@ -436,6 +492,8 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         'use_pitch_branch':         ('use_pitch_branch',         False),
         'use_contrastive_extrinsic': ('use_contrastive_extrinsic', False),
         'domain_adversarial':        ('domain_adversarial',        False),
+        'explicit_tinit':           ('explicit_tinit',           False),
+        'native_cross':             ('native_cross',             False),
     }
     for key, (ckpt_key, default) in _BOOL_PARAMS.items():
         cli_val = getattr(args, key, -1)
@@ -468,6 +526,14 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
 
     _INT_PARAMS = {
         'bev_pool_factor': ('bev_pool_factor', 0),
+        'iterative_refine': ('iterative_refine', 0),
+        'native_cross_pc_groups': ('native_cross_pc_groups', 128),
+        'native_cross_n_harmonic': ('native_cross_n_harmonic', 6),
+        'native_cross_n_layers': ('native_cross_n_layers', 1),
+        'native_cross_dual_branch': ('native_cross_dual_branch', 1),
+        'native_cross_knn': ('native_cross_knn', 8),
+        'native_cross_use_fps': ('native_cross_use_fps', 1),
+        'native_cross_use_pointgpt': ('native_cross_use_pointgpt', 0),
     }
     for key, (ckpt_key, default) in _INT_PARAMS.items():
         cli_val = getattr(args, key, -1)
@@ -476,6 +542,60 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
             sources[key] = 'cli'
         elif ckpt_key in ckpt_args:
             resolved[key] = int(ckpt_args[ckpt_key])
+            sources[key] = 'checkpoint'
+        else:
+            resolved[key] = default
+            sources[key] = 'default'
+
+    _STR_PARAMS = {
+        'native_cross_pointgpt_ckpt': ('native_cross_pointgpt_ckpt', None),
+        'native_cross_pointgpt_config': ('native_cross_pointgpt_config', None),
+    }
+    for key, (ckpt_key, default) in _STR_PARAMS.items():
+        cli_val = getattr(args, key, None)
+        if cli_val:
+            resolved[key] = cli_val
+            sources[key] = 'cli'
+        elif ckpt_key in ckpt_args and ckpt_args[ckpt_key]:
+            resolved[key] = ckpt_args[ckpt_key]
+            sources[key] = 'checkpoint'
+        else:
+            resolved[key] = default
+            sources[key] = 'default'
+
+    _FLOAT_NATIVE_PARAMS = {
+        'native_cross_pointgpt_max_depth': ('native_cross_pointgpt_max_depth', 50.0),
+        'native_cross_extend_ratio': ('native_cross_extend_ratio', 1.0),
+    }
+    for key, (ckpt_key, default) in _FLOAT_NATIVE_PARAMS.items():
+        cli_val = getattr(args, key, None)
+        if cli_val is not None:
+            resolved[key] = float(cli_val)
+            sources[key] = 'cli'
+        elif ckpt_key in ckpt_args:
+            resolved[key] = float(ckpt_args[ckpt_key])
+            sources[key] = 'checkpoint'
+        else:
+            resolved[key] = default
+            sources[key] = 'default'
+
+    if resolved.get('iterative_refine', 0) == 0 and any(
+            k.startswith('iter_head.') for k in state_dict):
+        resolved['iterative_refine'] = 3
+        sources['iterative_refine'] = 'auto-detect'
+        _log("   [auto-detect] iterative_refine=3 (found iter_head in state_dict)")
+
+    _FLOAT_PARAMS = {
+        'tinit_sensitivity_weight': ('tinit_sensitivity_weight', 0.0),
+        'deep_supervision_weight': ('deep_supervision_weight', 0.2),
+    }
+    for key, (ckpt_key, default) in _FLOAT_PARAMS.items():
+        cli_val = getattr(args, key, None)
+        if cli_val is not None:
+            resolved[key] = float(cli_val)
+            sources[key] = 'cli'
+        elif ckpt_key in ckpt_args:
+            resolved[key] = float(ckpt_args[ckpt_key])
             sources[key] = 'checkpoint'
         else:
             resolved[key] = default
@@ -503,7 +623,7 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
 
 
 def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False):
-    """Build BEVCalib model from checkpoint with auto-detected params.
+    """Build BEVCalib / HTCN model from checkpoint with auto-detected params.
 
     Returns (model, ckpt_args, resolved_params).
     """
@@ -512,31 +632,109 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
     p = _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=quiet)
 
     img_shape = (args.target_height, args.target_width)
-    model = BEVCalib(
-        deformable=p['deformable'],
-        bev_encoder=p['bev_encoder'],
-        img_shape=img_shape,
-        rotation_only=rotation_only,
-        use_mlp_head=p['use_mlp_head'],
-        bev_pool_factor=p['bev_pool_factor'],
-        use_foundation_depth=p['use_foundation_depth'],
-        depth_model_type=p['depth_model_type'],
-        fd_mode=p['fd_mode'] if p['use_foundation_depth'] else 'replace',
-        voxel_mode=p['voxel_mode'],
-        to_bev_mode=p['to_bev_mode'],
-        scatter_reduce=p['scatter_reduce'],
-        fuser_type=p['fuser_type'],
-        intrinsic_input=p['intrinsic_input'],
-        bev_instance_norm=p.get('bev_instance_norm', False),
-        use_pitch_branch=p.get('use_pitch_branch', False),
-        use_contrastive_extrinsic=p.get('use_contrastive_extrinsic', False),
-        domain_adversarial=p.get('domain_adversarial', False),
-        num_domains=p.get('num_domains', 21),
-        cam2bev_mode=p.get('cam2bev_mode', 'lss'),
-        backbone_type=p.get('backbone_type', 'swin'),
-        backbone_variant=p.get('backbone_variant', 'dinov2-small'),
-        backbone_weights=p.get('backbone_weights', None),
-    ).to(device)
+    fusion_backend = p.get('fusion_backend', 'bev')
+    from hybrid_triple_calib import HybridTripleCalib, build_calib_model
+
+    if fusion_backend in ('geo_match_proj', 'cf_bev_r') or fusion_backend in HybridTripleCalib.FUSION_BACKENDS:
+        class _EvalArgs:
+            pass
+
+        eval_args = _EvalArgs()
+        for key, val in p.items():
+            setattr(eval_args, key, val)
+        # GMP / HTCN / CF-BEV-R fields from checkpoint args (not always in resolved p)
+        for gmp_key in (
+            'use_match_head', 'use_local_correlation', 'differentiable_epnp',
+            'correspondence_loss_weight', 'correspondence_supervision',
+            'compose_mode', 'num_correspondences', 'match_valid_ratio_min',
+            'appearance_loss_weight', 'depth_loss_weight', 'geo_loss_start_epoch',
+            'native_cross_extend_ratio',
+            'cf_feat_dim', 'cf_n_groups', 'cf_knn', 'cf_corr_heads',
+            'cf_corr_radius', 'cf_num_queries', 'cf_encoder_layers',
+            'cf_decoder_layers', 'use_rocr', 'rocr_dropout', 'rocr_center_bias',
+            'rocr_detach_epochs', 'corr_alignment_weight', 'corr_alignment_warmup',
+            'corr_window_mode', 'use_pitch_branch', 'pitch_aux_weight',
+        ):
+            if gmp_key in ckpt_args and not hasattr(eval_args, gmp_key):
+                setattr(eval_args, gmp_key, ckpt_args[gmp_key])
+        eval_args.target_height = args.target_height
+        eval_args.target_width = args.target_width
+        eval_args.rotation_only = rotation_only
+        eval_args.enable_axis_loss = getattr(args, 'enable_axis_loss', 1)
+        eval_args.weight_axis_rotation = getattr(args, 'weight_axis_rotation', 0.5)
+        eval_args.axis_weights = getattr(args, 'axis_weights', '1.0,1.0,1.0')
+        eval_args.use_balanced_axis_loss = getattr(args, 'use_balanced_axis_loss', 0)
+        eval_args.use_geodesic_loss = getattr(args, 'use_geodesic_loss', 0)
+        eval_args.head_dropout = getattr(args, 'head_dropout', 0.1)
+        eval_args.freeze_backbone = getattr(args, 'freeze_backbone', 1)
+        eval_args.backbone_freeze_layers = getattr(args, 'backbone_freeze_layers', None)
+        eval_args.projfusion_image_hw = getattr(
+            args, 'projfusion_image_hw',
+            ckpt_args.get('projfusion_image_hw', [252, 448]))
+        eval_args.native_cross_pointgpt_ckpt = p.get('native_cross_pointgpt_ckpt')
+        eval_args.native_cross_pointgpt_config = p.get('native_cross_pointgpt_config')
+        eval_args.native_cross_pointgpt_max_depth = p.get('native_cross_pointgpt_max_depth', 60.0)
+        eval_args.fusion_backend = fusion_backend
+        eval_args.pc_encoder_mode = p.get('pc_encoder_mode', 'pointgpt2bev')
+        eval_args.fusion_variant = p.get('fusion_variant', 'gated')
+        eval_args.deep_supervision_weight = p.get('deep_supervision_weight', 0.2)
+        eval_args.bev_pool_factor = p.get('bev_pool_factor', 4) or 4
+        eval_args.fuser_type = p.get('fuser_type', 'diff')
+        eval_args.voxel_mode = p.get('voxel_mode', 'hard')
+        eval_args.to_bev_mode = p.get('to_bev_mode', 'concat')
+        eval_args.scatter_reduce = p.get('scatter_reduce', 'sum')
+        eval_args.iterative_refine = p.get('iterative_refine', 0)
+        eval_args.backbone_type = p.get('backbone_type', 'dinov2')
+        eval_args.backbone_variant = p.get('backbone_variant', 'dinov2-small')
+        eval_args.backbone_weights = p.get('backbone_weights', None)
+        eval_args.cam2bev_mode = 'query'
+
+        _log = (lambda *a: None) if quiet else (lambda *a: print(*a))
+        model = build_calib_model(
+            eval_args, device, img_shape, rotation_only,
+            is_main=not quiet, tprint=_log)
+    else:
+        model = BEVCalib(
+            deformable=p['deformable'],
+            bev_encoder=p['bev_encoder'],
+            img_shape=img_shape,
+            rotation_only=rotation_only,
+            use_mlp_head=p['use_mlp_head'],
+            bev_pool_factor=p['bev_pool_factor'],
+            use_foundation_depth=p['use_foundation_depth'],
+            depth_model_type=p['depth_model_type'],
+            fd_mode=p['fd_mode'] if p['use_foundation_depth'] else 'replace',
+            voxel_mode=p['voxel_mode'],
+            to_bev_mode=p['to_bev_mode'],
+            scatter_reduce=p['scatter_reduce'],
+            fuser_type=p['fuser_type'],
+            intrinsic_input=p['intrinsic_input'],
+            bev_instance_norm=p.get('bev_instance_norm', False),
+            use_pitch_branch=p.get('use_pitch_branch', False),
+            use_contrastive_extrinsic=p.get('use_contrastive_extrinsic', False),
+            domain_adversarial=p.get('domain_adversarial', False),
+            num_domains=p.get('num_domains', 21),
+            cam2bev_mode=p.get('cam2bev_mode', 'lss'),
+            backbone_type=p.get('backbone_type', 'swin'),
+            backbone_variant=p.get('backbone_variant', 'dinov2-small'),
+            backbone_weights=p.get('backbone_weights', None),
+            explicit_tinit=p.get('explicit_tinit', False),
+            tinit_sensitivity_weight=p.get('tinit_sensitivity_weight', 0.0),
+            iterative_refine=p.get('iterative_refine', 0),
+            native_cross=p.get('native_cross', False),
+            native_cross_pc_groups=p.get('native_cross_pc_groups', 128),
+            native_cross_n_harmonic=p.get('native_cross_n_harmonic', 6),
+            native_cross_n_layers=p.get('native_cross_n_layers', 1),
+            native_cross_dual_branch=p.get('native_cross_dual_branch', True),
+            native_cross_knn=p.get('native_cross_knn', 8),
+            native_cross_use_fps=p.get('native_cross_use_fps', True),
+            native_cross_use_pointgpt=bool(int(p.get('native_cross_use_pointgpt', 0) or 0)),
+            native_cross_pointgpt_ckpt=p.get('native_cross_pointgpt_ckpt'),
+            native_cross_pointgpt_config=p.get('native_cross_pointgpt_config'),
+            native_cross_pointgpt_max_depth=p.get('native_cross_pointgpt_max_depth', 50.0),
+            native_cross_extend_ratio=float(p.get('native_cross_extend_ratio', 1.0) or 1.0),
+            native_cross_iter_steps=int(getattr(args, 'native_cross_iter_steps', 0) or 0),
+        ).to(device)
 
     state_dict = _auto_permute_spconv_weights(state_dict, model)
     _adapt_model_to_checkpoint(model, state_dict, device)
@@ -570,12 +768,28 @@ def _build_eval_custom_dataset(data_folder, args):
             "eval_sample_step 与 eval_max_frames_per_seq 互斥，不可同时设置。"
             f" 当前: eval_sample_step={_ss}, eval_max_frames_per_seq={_mf}"
         )
-    return CustomDataset(
+
+    exclude_seqs_raw = getattr(args, "exclude_seqs", None)
+    exclude_set = set()
+    if exclude_seqs_raw:
+        exclude_set = {s.strip() for s in exclude_seqs_raw.split(",") if s.strip()}
+
+    ds = CustomDataset(
         data_folder=data_folder,
         auto_detect=True,
         sample_step=_ss,
         max_frames_per_seq=_mf,
     )
+
+    if exclude_set:
+        before = len(ds.all_files)
+        ds.all_files = [f for f in ds.all_files if f.split('/')[0] not in exclude_set]
+        after = len(ds.all_files)
+        print(f"[exclude_seqs] 排除 {exclude_set}: {before} → {after} 帧 (移除 {before - after} 帧)")
+        if not ds.all_files:
+            raise ValueError(f"排除序列后无剩余数据！exclude_seqs={exclude_seqs_raw}")
+
+    return ds
 
 
 def evaluate_checkpoint(args):
@@ -648,6 +862,23 @@ def evaluate_checkpoint(args):
     print(f"   Voxel: mode={_p['voxel_mode']}, scatter_reduce={_p['scatter_reduce']}, to_bev={_p['to_bev_mode']}")
     if _p['use_foundation_depth']:
         print(f"   Foundation Depth: model={_p['depth_model_type']}, mode={_p['fd_mode']}")
+
+    _num_gpus = torch.cuda.device_count()
+    _dp_model = None
+    if _num_gpus > 1 and getattr(args, 'data_parallel', False):
+        class _EvalDPWrapper(torch.nn.Module):
+            """Thin wrapper returning only T_pred for DataParallel gather."""
+            def __init__(self, inner):
+                super().__init__()
+                self.inner = inner
+            def forward(self, *a, **kw):
+                T_pred, _, _ = self.inner(*a, **kw)
+                return T_pred
+        _dp_model = torch.nn.DataParallel(_EvalDPWrapper(model))
+        _orig_bs = args.batch_size
+        args.batch_size = args.batch_size * _num_gpus
+        print(f"   DataParallel: {_num_gpus} GPUs, batch_size {_orig_bs}→{args.batch_size}")
+
     print(f"   ✓ 模型加载完成")
     
     # 加载数据集
@@ -719,6 +950,10 @@ def evaluate_checkpoint(args):
         return _eval_idx_to_seq.get(sample_idx, "unknown")
     
     collate_fn = make_collate_fn((args.target_width, args.target_height))
+    _ckpt_max_pcd = ckpt_args.get('max_pcd_points', 0) if ckpt_args else 0
+    if _ckpt_max_pcd > 0:
+        print(f"   [点云] 训练时 max_pcd_points={_ckpt_max_pcd}, 评估时不下采样 (保留全量点云用于可视化)")
+        print(f"   [点云] 模型 PointEncoder 内部有 FPS 采样, 全量输入不影响推理精度")
     val_loader = DataLoader(
         eval_dataset,
         batch_size=args.batch_size,
@@ -791,9 +1026,14 @@ def evaluate_checkpoint(args):
             post_cam2ego_T = torch.eye(4).unsqueeze(0).repeat(gt_T_to_camera_torch.shape[0], 1, 1).float().to(device)
             intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device)
             
-            T_pred, _, _ = model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
-                               post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
-            
+            masks_tensor = torch.from_numpy(np.array(masks)).float().to(device)
+            if _dp_model is not None:
+                T_pred = _dp_model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
+                                   post_cam2ego_T, intrinsic_matrix, masks=masks_tensor, out_init_loss=False)
+            else:
+                T_pred, _, _ = model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
+                                     post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+
             imgs_np = np.array(imgs)
             masks_np = np.array(masks)
             T_pred_np = T_pred.detach().cpu().numpy()
@@ -829,7 +1069,9 @@ def evaluate_checkpoint(args):
                         epoch_train_errors=ckpt_train_errors,
                         epoch_val_errors=ckpt_val_errors,
                     )
-                    vis_image_path = os.path.join(eval_dir, f"sample_{sample_idx:04d}_projection.png")
+                    _perframe_vis_dir = os.path.join(eval_dir, "perframe_projections")
+                    os.makedirs(_perframe_vis_dir, exist_ok=True)
+                    vis_image_path = os.path.join(_perframe_vis_dir, f"sample_{sample_idx:04d}.png")
                     cv2.imwrite(vis_image_path, vis_image)
                     vis_data_cache.append({
                         'sample_idx': sample_idx,
@@ -1036,18 +1278,882 @@ def evaluate_checkpoint(args):
         _generate_temporal_projections(
             vis_data_cache, T_agg_per_sample, eval_dir, rotation_only, args)
 
+    if getattr(args, 'shortcut_diag', False):
+        print(f"\n{'='*80}")
+        print("Shortcut 诊断测试")
+        print(f"{'='*80}")
+        torch.cuda.empty_cache()
+        import gc; gc.collect()
+        try:
+            from diagnose_shortcut import run_shortcut_diagnostics
+            _diag_results = run_shortcut_diagnostics(
+                model=model, val_loader=val_loader, args=args,
+                device=device, eval_dir=eval_dir,
+                rotation_only=rotation_only,
+                seq_boundaries=seq_boundaries if seq_boundaries else None,
+            )
+            _risk = _diag_results.get('risk_score', -1)
+            print(f"\n   Shortcut Risk Score: {_risk}/100 "
+                  f"({'LOW' if _risk < 30 else 'MEDIUM' if _risk < 60 else 'HIGH'})")
+        except Exception as _diag_err:
+            print(f"   [WARN] 诊断测试失败: {_diag_err}")
+            import traceback
+            traceback.print_exc()
+
+    # ========== 泛化诊断: 零漂移 + 注入扰动 + shortcut 检测 ==========
+    if getattr(args, 'generalization_diag', False) and all_T_pred:
+        print(f"\n{'='*80}")
+        print("泛化诊断 (Zero-Drift / Inject / Shortcut)")
+        print(f"{'='*80}")
+        try:
+            _gdiag = _run_generalization_diagnostics(
+                model=model if _dp_model is None else _dp_model,
+                val_loader=val_loader,
+                args=args,
+                device=device,
+                eval_dir=eval_dir,
+                rotation_only=rotation_only,
+                _eval_idx_to_seq=_eval_idx_to_seq,
+                seq_boundaries=seq_boundaries,
+                use_dp=(_dp_model is not None),
+            )
+            print(f"   泛化诊断完成, 结果保存至: {eval_dir}/generalization_diagnostics.json")
+        except Exception as _gdiag_err:
+            print(f"   [WARN] 泛化诊断失败: {_gdiag_err}")
+            import traceback
+            traceback.print_exc()
+
     _eval_elapsed = time.time() - _eval_t0
     print(f"\n✓ 评估完成！")
     print(f"   - 评估样本数: {sample_count}")
     print(f"   - 输出目录: {eval_dir}")
     print(f"   - 外参文件: {extrinsics_file}")
+    if getattr(args, 'shortcut_diag', False):
+        print(f"   - 诊断报告: {eval_dir}/diagnostics/shortcut_diagnostics_report.md")
+    if getattr(args, 'generalization_diag', False):
+        print(f"   - 泛化诊断: {eval_dir}/generalization_diagnostics.json")
     print(f"   - 总耗时: {_format_elapsed(_eval_elapsed)}")
     print("=" * 80)
 
 
+def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
+                                     rotation_only, _eval_idx_to_seq,
+                                     seq_boundaries, use_dp=False):
+    """Run comprehensive generalization diagnostic tests and save composite results.
+
+    Tests:
+      1. Zero-Drift: init_T = gt_T exactly (no perturbation), measures inherent model bias
+      2. Fixed-Inject RPY: fixed known perturbation on all 3 axes, measures correction
+      3. Per-axis Shortcut: fixed inject on each axis independently (R, P, Y)
+      4. Multi-magnitude: inject at 0.5°, 1°, 2° to test correction linearity
+
+    Also generates point cloud projection visualization for key diagnostic samples.
+
+    Returns dict with all metrics + composite GS_medw (MEDW-aggregated score).
+    """
+    inject_deg = getattr(args, 'gdiag_inject_deg', 2.0)
+    max_batches = getattr(args, 'gdiag_max_batches', 0) or args.max_batches
+    if max_batches <= 0:
+        max_batches = len(val_loader)
+
+    from scipy.spatial.transform import Rotation as _ScipyRot
+
+    vis_dir = os.path.join(eval_dir, "gdiag_projections")
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # Pre-cache batches from val_loader to avoid repeated disk I/O and tensor creation
+    _cached_batches = []
+    print(f"   Pre-caching {max_batches} batches for generalization diagnostics...")
+    _cache_t0 = time.time()
+    with torch.no_grad():
+        for batch_idx, (imgs, pcs, masks, gt_T, intrinsics) in enumerate(val_loader):
+            if batch_idx >= max_batches:
+                break
+            gt_T_np = np.array(gt_T).astype(np.float32)
+            B = gt_T_np.shape[0]
+            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+            pcs_np = np.array(pcs)[:, :, :3] if args.xyz_only > 0 else np.array(pcs)
+            pcs_t = torch.from_numpy(pcs_np).float().to(device)
+            gt_T_t = torch.from_numpy(gt_T_np).float().to(device)
+            post_T = torch.eye(4).unsqueeze(0).repeat(B, 1, 1).float().to(device)
+            K = torch.from_numpy(np.array(intrinsics)).float().to(device)
+            masks_np = np.array(masks)
+            masks_t = torch.from_numpy(masks_np).float().to(device)
+            _cached_batches.append({
+                'imgs_raw': np.array(imgs), 'pcs_np': pcs_np,
+                'gt_T_np': gt_T_np, 'B': B,
+                'resize_imgs': resize_imgs, 'pcs_t': pcs_t,
+                'gt_T_t': gt_T_t, 'post_T': post_T, 'K': K,
+                'masks': masks, 'masks_t': masks_t, 'masks_np': masks_np,
+                'intrinsics_np': np.array(intrinsics),
+            })
+    print(f"   Cached {len(_cached_batches)} batches in {time.time()-_cache_t0:.1f}s")
+
+    def _medw_aggregate_per_seq(seq_preds, seq_gts):
+        """MEDW aggregate predictions per-sequence, compute RPY errors vs GT.
+
+        Args:
+            seq_preds: dict {seq_id: [T_pred_4x4, ...]}
+            seq_gts:   dict {seq_id: [T_gt_4x4, ...]}
+        Returns:
+            dict with per-seq aggregated RPY errors and overall means.
+        """
+        seq_results = {}
+        all_roll, all_pitch, all_yaw, all_rot = [], [], [], []
+        for sid in sorted(seq_preds.keys()):
+            preds = seq_preds[sid]
+            gts = seq_gts[sid]
+            if len(preds) < 2:
+                continue
+            Rs = [p[:3, :3] for p in preds]
+            R_agg = _robust_median_rotation(Rs)
+            T_agg = np.eye(4, dtype=np.float32)
+            T_agg[:3, :3] = R_agg
+
+            gt_Rs = [g[:3, :3] for g in gts]
+            R_gt_agg = _robust_median_rotation(gt_Rs)
+            T_gt_agg = np.eye(4, dtype=np.float32)
+            T_gt_agg[:3, :3] = R_gt_agg
+
+            errs = compute_pose_errors(T_agg, T_gt_agg)
+            seq_results[sid] = {
+                'rot': errs['rot_error'], 'roll': errs['roll_error'],
+                'pitch': errs['pitch_error'], 'yaw': errs['yaw_error'],
+                'roll_signed': errs.get('roll_signed', errs['roll_error']),
+                'pitch_signed': errs.get('pitch_signed', errs['pitch_error']),
+                'yaw_signed': errs.get('yaw_signed', errs['yaw_error']),
+            }
+            all_rot.append(errs['rot_error'])
+            all_roll.append(errs['roll_error'])
+            all_pitch.append(errs['pitch_error'])
+            all_yaw.append(errs['yaw_error'])
+
+        if not all_rot:
+            return {'rot_mean': 0, 'roll_mean': 0, 'pitch_mean': 0, 'yaw_mean': 0,
+                    'max_rpy': 0, 'per_seq': {}, 'n_seqs': 0,
+                    'roll_signed_mean': 0, 'pitch_signed_mean': 0, 'yaw_signed_mean': 0}
+        all_roll_s = [seq_results[s].get('roll_signed', 0) for s in sorted(seq_results)]
+        all_pitch_s = [seq_results[s].get('pitch_signed', 0) for s in sorted(seq_results)]
+        all_yaw_s = [seq_results[s].get('yaw_signed', 0) for s in sorted(seq_results)]
+        return {
+            'rot_mean': float(np.mean(all_rot)),
+            'roll_mean': float(np.mean(all_roll)),
+            'pitch_mean': float(np.mean(all_pitch)),
+            'yaw_mean': float(np.mean(all_yaw)),
+            'max_rpy': float(np.mean([max(seq_results[s]['roll'], seq_results[s]['pitch'], seq_results[s]['yaw'])
+                                      for s in sorted(seq_results)])),
+            'rot_std': float(np.std(all_rot)),
+            'roll_signed_mean': float(np.mean(all_roll_s)),
+            'pitch_signed_mean': float(np.mean(all_pitch_s)),
+            'yaw_signed_mean': float(np.mean(all_yaw_s)),
+            'per_seq': seq_results,
+            'n_seqs': len(all_rot),
+        }
+
+    def _run_single_pass(angle_range=0.0, fixed_inject_rpy=None, use_identity=False,
+                         label="", seed=42, save_vis_samples=0):
+        """Run one forward pass over cached batches with given perturbation settings.
+
+        Collects per-frame T_pred grouped by sequence, then uses MEDW (robust
+        median in axis-angle space) to aggregate per-sequence before computing
+        errors against GT. This matches the real deployment pipeline where
+        multi-frame aggregation is always used for calibration.
+
+        fixed_inject_rpy: RPY perturbation in LiDAR frame (X=fwd/Roll, Y=left/Pitch,
+        Z=up/Yaw). Applied via RIGHT-multiply so that the resulting error decomposes
+        correctly in the LiDAR RPY convention used by evaluate_sensor_extrinsic.
+        """
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        seq_preds = {}
+        seq_gts = {}
+        seq_inits = {}
+        n_total = 0
+        vis_saved = 0
+        vis_interval = max(1, len(_cached_batches) // max(save_vis_samples, 1)) if save_vis_samples > 0 else 0
+        with torch.no_grad():
+            for batch_idx, cb in enumerate(_cached_batches):
+                gt_T_np = cb['gt_T_np']
+                B = cb['B']
+
+                if use_identity:
+                    init_T_np = gt_T_np.copy()
+                elif fixed_inject_rpy is not None:
+                    rpy_rad = np.deg2rad(fixed_inject_rpy)
+                    dR = _ScipyRot.from_euler('xyz', rpy_rad).as_matrix().astype(np.float32)
+                    init_T_np = gt_T_np.copy()
+                    for bi in range(B):
+                        init_T_np[bi, :3, :3] = gt_T_np[bi, :3, :3] @ dR
+                else:
+                    init_T_np, _, _ = generate_single_perturbation_from_T(
+                        gt_T_np,
+                        angle_range_deg=angle_range,
+                        trans_range=0.0,
+                        rotation_only=True,
+                        distribution=getattr(args, 'perturb_distribution', 'uniform'),
+                        per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                    )
+
+                init_T_t = torch.from_numpy(init_T_np.astype(np.float32)).float().to(device)
+
+                if use_dp:
+                    T_pred = model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
+                                   init_T_t, cb['post_T'], cb['K'],
+                                   masks=cb['masks_t'], out_init_loss=False)
+                else:
+                    T_pred, _, _ = model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
+                                         init_T_t, cb['post_T'], cb['K'],
+                                         masks=cb['masks'], out_init_loss=False)
+                T_pred_np = T_pred.detach().cpu().numpy()
+
+                for i in range(B):
+                    sample_idx = n_total + i
+                    seq_id = _eval_idx_to_seq.get(sample_idx, 'unk')
+                    seq_preds.setdefault(seq_id, []).append(T_pred_np[i])
+                    seq_gts.setdefault(seq_id, []).append(gt_T_np[i])
+                    if fixed_inject_rpy is not None:
+                        seq_inits.setdefault(seq_id, []).append(init_T_np[i])
+
+                    if save_vis_samples > 0 and vis_saved < save_vis_samples and vis_interval > 0 and batch_idx % vis_interval == 0 and i == 0:
+                        try:
+                            vis_image = visualize_batch_projection(
+                                images=cb['imgs_raw'][i:i+1],
+                                points_batch=cb['pcs_np'][i:i+1],
+                                init_T_batch=init_T_np[i:i+1],
+                                gt_T_batch=gt_T_np[i:i+1],
+                                pred_T_batch=T_pred_np[i:i+1],
+                                K_batch=cb['intrinsics_np'][i:i+1],
+                                masks=cb['masks_np'][i:i+1],
+                                num_samples=1,
+                                max_points=args.vis_points,
+                                point_radius=args.vis_point_radius,
+                                rotation_only=rotation_only,
+                                phase=f"GDiag-{label}",
+                                epoch=-1,
+                            )
+                            vis_path = os.path.join(vis_dir, f"{label}_sample_{sample_idx:04d}.png")
+                            cv2.imwrite(vis_path, vis_image)
+                            vis_saved += 1
+                        except Exception:
+                            pass
+
+                n_total += B
+
+        agg = _medw_aggregate_per_seq(seq_preds, seq_gts)
+        result = {
+            'n_samples': n_total,
+            'n_seqs': agg['n_seqs'],
+            'rot_mean': agg['rot_mean'],
+            'rot_std': agg.get('rot_std', 0),
+            'roll_mean': agg['roll_mean'],
+            'pitch_mean': agg['pitch_mean'],
+            'yaw_mean': agg['yaw_mean'],
+            'max_rpy': agg['max_rpy'],
+            'roll_signed_mean': agg.get('roll_signed_mean', 0),
+            'pitch_signed_mean': agg.get('pitch_signed_mean', 0),
+            'yaw_signed_mean': agg.get('yaw_signed_mean', 0),
+        }
+        if agg.get('per_seq'):
+            result['per_seq'] = agg['per_seq']
+
+        if fixed_inject_rpy is not None and seq_inits:
+            inj_agg = _medw_aggregate_per_seq(seq_inits, seq_gts)
+            all_inj, all_res, all_rec = [], [], []
+            all_roll_res, all_pitch_res, all_yaw_res = [], [], []
+            for sid in sorted(set(agg.get('per_seq', {}).keys()) & set(inj_agg.get('per_seq', {}).keys())):
+                injected = inj_agg['per_seq'][sid]['rot']
+                residual = agg['per_seq'][sid]['rot']
+                recovery = (injected - residual) / injected * 100 if injected > 1e-6 else 100.0
+                all_inj.append(injected)
+                all_res.append(residual)
+                all_rec.append(recovery)
+                all_roll_res.append(agg['per_seq'][sid]['roll'])
+                all_pitch_res.append(agg['per_seq'][sid]['pitch'])
+                all_yaw_res.append(agg['per_seq'][sid]['yaw'])
+            if all_inj:
+                result['inject'] = {
+                    'mean_injected': float(np.mean(all_inj)),
+                    'mean_residual': float(np.mean(all_res)),
+                    'mean_recovery_pct': float(np.mean(all_rec)),
+                    'median_recovery_pct': float(np.median(all_rec)),
+                    'roll_residual': float(np.mean(all_roll_res)),
+                    'pitch_residual': float(np.mean(all_pitch_res)),
+                    'yaw_residual': float(np.mean(all_yaw_res)),
+                }
+        return result
+
+    results = {}
+
+    # Test 1: Zero-Drift (init_T = gt_T exactly)
+    print(f"\n   [1/3] Zero-Drift test (init = GT, no perturbation)...")
+    t0 = time.time()
+    results['zero_drift'] = _run_single_pass(
+        use_identity=True, label="zero-drift", seed=42, save_vis_samples=3)
+    print(f"   Zero-drift: rot_mean={results['zero_drift']['rot_mean']:.4f}° "
+          f"max_rpy={results['zero_drift']['max_rpy']:.4f}° "
+          f"({time.time()-t0:.1f}s)")
+
+    # Test 2: Fixed-Inject RPY (known perturbation on all axes)
+    print(f"\n   [2/3] Fixed-Inject test (inject={inject_deg}° on all RPY)...")
+    t0 = time.time()
+    results['fixed_inject'] = _run_single_pass(
+        fixed_inject_rpy=[inject_deg, inject_deg, inject_deg],
+        label="inject-all", seed=42, save_vis_samples=3)
+    inj = results['fixed_inject'].get('inject', {})
+    print(f"   Fixed-inject: residual={inj.get('mean_residual', -1):.4f}° "
+          f"recovery={inj.get('mean_recovery_pct', -1):.1f}% "
+          f"({time.time()-t0:.1f}s)")
+
+    # Test 3+4: Per-axis Shortcut (R/P/Y) + Multi-magnitude (0.5°, 1.0°) + Neg-inject
+    # Batched: run all 6 configs in a SINGLE forward pass by stacking along batch dim
+    # This replaces 6 separate passes → 1 pass (total: 3 passes for entire gdiag)
+    _batched_configs = [
+        ("sc-R",       [inject_deg, 0.0, 0.0]),
+        ("sc-P",       [0.0, inject_deg, 0.0]),
+        ("sc-Y",       [0.0, 0.0, inject_deg]),
+        ("mag-0.5",    [0.5, 0.5, 0.5]),
+        ("mag-1.0",    [1.0, 1.0, 1.0]),
+        ("neg-inject", [-inject_deg, -inject_deg, -inject_deg]),
+    ]
+    _MAX_CONFIGS_PER_PASS = getattr(args, 'gdiag_configs_per_pass', 3)
+    gpu_mem = -1
+    try:
+        gpu_mem = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+        if gpu_mem < 48:
+            _MAX_CONFIGS_PER_PASS = min(_MAX_CONFIGS_PER_PASS, 2)
+        if gpu_mem < 32:
+            _MAX_CONFIGS_PER_PASS = 1
+    except Exception:
+        pass
+    n_configs = len(_batched_configs)
+    n_sub = (n_configs + _MAX_CONFIGS_PER_PASS - 1) // _MAX_CONFIGS_PER_PASS
+    print(f"\n   [3/3] Batched: {n_configs} tests in {n_sub} sub-pass(es) "
+          f"(max {_MAX_CONFIGS_PER_PASS} per pass{f', GPU ~{gpu_mem:.0f}GB' if gpu_mem > 0 else ''})...")
+    t0 = time.time()
+    _batched_seq_preds = {cfg[0]: {} for cfg in _batched_configs}
+    _batched_seq_gts = {cfg[0]: {} for cfg in _batched_configs}
+    _batched_seq_inits = {cfg[0]: {} for cfg in _batched_configs}
+    _batched_cumulative_offset = 0
+    with torch.no_grad():
+        for batch_idx, cb in enumerate(_cached_batches):
+            gt_T_np = cb['gt_T_np']
+            B = cb['B']
+            _sub_idx = 0
+            while _sub_idx < n_configs:
+                sub_cfgs = _batched_configs[_sub_idx:_sub_idx + _MAX_CONFIGS_PER_PASS]
+                n_sub_c = len(sub_cfgs)
+                stacked_imgs = cb['resize_imgs'].repeat(n_sub_c, 1, 1, 1)
+                stacked_pcs = cb['pcs_t'].repeat(n_sub_c, 1, 1)
+                stacked_gt = cb['gt_T_t'].repeat(n_sub_c, 1, 1)
+                stacked_post = cb['post_T'].repeat(n_sub_c, 1, 1)
+                stacked_K = cb['K'].repeat(n_sub_c, 1, 1)
+                if use_dp:
+                    stacked_masks = cb['masks_t'].repeat(n_sub_c, 1, 1)
+                else:
+                    masks_list = cb['masks']
+                    stacked_masks_raw = masks_list * n_sub_c
+
+                all_init_T = []
+                for cfg_label, rpy in sub_cfgs:
+                    rpy_rad = np.deg2rad(rpy)
+                    dR = _ScipyRot.from_euler('xyz', rpy_rad).as_matrix().astype(np.float32)
+                    init_np = gt_T_np.copy()
+                    for bi in range(B):
+                        init_np[bi, :3, :3] = gt_T_np[bi, :3, :3] @ dR
+                    all_init_T.append(init_np)
+                stacked_init_np = np.concatenate(all_init_T, axis=0)
+                stacked_init_t = torch.from_numpy(stacked_init_np).float().to(device)
+
+                try:
+                    if use_dp:
+                        T_pred_all = model(stacked_imgs, stacked_pcs, stacked_gt,
+                                           stacked_init_t, stacked_post, stacked_K,
+                                           masks=stacked_masks, out_init_loss=False)
+                    else:
+                        T_pred_all, _, _ = model(stacked_imgs, stacked_pcs, stacked_gt,
+                                                 stacked_init_t, stacked_post, stacked_K,
+                                                 masks=stacked_masks_raw, out_init_loss=False)
+                except RuntimeError as _oom_e:
+                    if 'out of memory' in str(_oom_e).lower() and n_sub_c > 1:
+                        del stacked_imgs, stacked_pcs, stacked_gt, stacked_post, stacked_K, stacked_init_t
+                        if use_dp:
+                            del stacked_masks
+                        torch.cuda.empty_cache()
+                        _MAX_CONFIGS_PER_PASS = max(1, n_sub_c - 1)
+                        print(f"   [OOM] Reducing configs per pass to {_MAX_CONFIGS_PER_PASS}, retrying...")
+                        continue
+                    raise
+                T_pred_all_np = T_pred_all.detach().cpu().numpy()
+                del stacked_imgs, stacked_pcs, stacked_gt, stacked_post, stacked_K, stacked_init_t, T_pred_all
+                torch.cuda.empty_cache()
+
+                for ci, (cfg_label, rpy) in enumerate(sub_cfgs):
+                    cfg_pred = T_pred_all_np[ci*B:(ci+1)*B]
+                    cfg_init = stacked_init_np[ci*B:(ci+1)*B]
+                    for i in range(B):
+                        sample_idx = _batched_cumulative_offset + i
+                        seq_id = _eval_idx_to_seq.get(sample_idx, 'unk')
+                        _batched_seq_preds[cfg_label].setdefault(seq_id, []).append(cfg_pred[i])
+                        _batched_seq_gts[cfg_label].setdefault(seq_id, []).append(gt_T_np[i])
+                        _batched_seq_inits[cfg_label].setdefault(seq_id, []).append(cfg_init[i])
+                _sub_idx += n_sub_c
+            _batched_cumulative_offset += B
+
+    def _assemble_result(cfg_label):
+        """MEDW-aggregate per-sequence predictions, then compute errors vs GT."""
+        sp = _batched_seq_preds[cfg_label]
+        sg = _batched_seq_gts[cfg_label]
+        si = _batched_seq_inits[cfg_label]
+        agg = _medw_aggregate_per_seq(sp, sg)
+        n_total = sum(len(v) for v in sp.values())
+        r = {
+            'n_samples': n_total,
+            'n_seqs': agg['n_seqs'],
+            'rot_mean': agg['rot_mean'],
+            'rot_std': agg.get('rot_std', 0),
+            'roll_mean': agg['roll_mean'],
+            'pitch_mean': agg['pitch_mean'],
+            'yaw_mean': agg['yaw_mean'],
+            'max_rpy': agg['max_rpy'],
+            'roll_signed_mean': agg.get('roll_signed_mean', 0),
+            'pitch_signed_mean': agg.get('pitch_signed_mean', 0),
+            'yaw_signed_mean': agg.get('yaw_signed_mean', 0),
+        }
+        if agg.get('per_seq'):
+            r['per_seq'] = agg['per_seq']
+        if si:
+            inj_agg = _medw_aggregate_per_seq(si, sg)
+            all_inj, all_res, all_rec = [], [], []
+            all_roll_res, all_pitch_res, all_yaw_res = [], [], []
+            for sid in sorted(set(agg.get('per_seq', {}).keys()) & set(inj_agg.get('per_seq', {}).keys())):
+                injected = inj_agg['per_seq'][sid]['rot']
+                residual = agg['per_seq'][sid]['rot']
+                recovery = (injected - residual) / injected * 100 if injected > 1e-6 else 100.0
+                all_inj.append(injected)
+                all_res.append(residual)
+                all_rec.append(recovery)
+                all_roll_res.append(agg['per_seq'][sid]['roll'])
+                all_pitch_res.append(agg['per_seq'][sid]['pitch'])
+                all_yaw_res.append(agg['per_seq'][sid]['yaw'])
+            if all_inj:
+                r['inject'] = {
+                    'mean_injected': float(np.mean(all_inj)),
+                    'mean_residual': float(np.mean(all_res)),
+                    'mean_recovery_pct': float(np.mean(all_rec)),
+                    'median_recovery_pct': float(np.median(all_rec)),
+                    'roll_residual': float(np.mean(all_roll_res)),
+                    'pitch_residual': float(np.mean(all_pitch_res)),
+                    'yaw_residual': float(np.mean(all_yaw_res)),
+                }
+        return r
+
+    shortcut_results = {}
+    axis_key_map = {"Roll": "roll_residual", "Pitch": "pitch_residual", "Yaw": "yaw_residual"}
+    for axis_name, cfg_label in [("Roll", "sc-R"), ("Pitch", "sc-P"), ("Yaw", "sc-Y")]:
+        res = _assemble_result(cfg_label)
+        sc_inj = res.get('inject', {})
+        axis_residual = sc_inj.get(axis_key_map[axis_name], -1)
+        axis_recovery = ((inject_deg - axis_residual) / inject_deg * 100
+                         if inject_deg > 1e-6 and axis_residual >= 0 else -1)
+        res['axis_specific_recovery'] = axis_recovery
+        res['axis_residual'] = axis_residual
+        shortcut_results[axis_name.lower()] = res
+        print(f"     {axis_name}: axis_res={axis_residual:.4f}° "
+              f"axis_rec={axis_recovery:.1f}% "
+              f"total_rec={sc_inj.get('mean_recovery_pct', -1):.1f}%")
+    results['shortcut_per_axis'] = shortcut_results
+
+    multi_mag = {}
+    fi_inj = results['fixed_inject'].get('inject', {})
+    multi_mag[str(inject_deg)] = {
+        'rot_mean': results['fixed_inject']['rot_mean'],
+        'residual': fi_inj.get('mean_residual', -1),
+        'recovery_pct': fi_inj.get('mean_recovery_pct', -1),
+    }
+    for mag, cfg_label in [(0.5, "mag-0.5"), (1.0, "mag-1.0")]:
+        res = _assemble_result(cfg_label)
+        mg_inj = res.get('inject', {})
+        multi_mag[str(mag)] = {
+            'rot_mean': res['rot_mean'],
+            'residual': mg_inj.get('mean_residual', -1),
+            'recovery_pct': mg_inj.get('mean_recovery_pct', -1),
+        }
+        print(f"     {mag}°: residual={mg_inj.get('mean_residual', -1):.4f}° "
+              f"recovery={mg_inj.get('mean_recovery_pct', -1):.1f}%")
+    results['multi_magnitude'] = multi_mag
+
+    results['neg_inject'] = _assemble_result("neg-inject")
+    neg_inj = results['neg_inject'].get('inject', {})
+    print(f"     Neg-inject: residual={neg_inj.get('mean_residual', -1):.4f}° "
+          f"recovery={neg_inj.get('mean_recovery_pct', -1):.1f}%")
+    print(f"   Batched all-in-one: {time.time()-t0:.1f}s total (3 shortcut + 2 multimag + neg)")
+
+    # Cross-axis leakage: when injecting one axis, do other axes leak?
+    _zd_rpy_for_leak = [results['zero_drift']['roll_mean'],
+                        results['zero_drift']['pitch_mean'],
+                        results['zero_drift']['yaw_mean']]
+    cross_leakage = {}
+    axis_map = {'roll': 0, 'pitch': 1, 'yaw': 2}
+    for axis in ['roll', 'pitch', 'yaw']:
+        sc = shortcut_results.get(axis, {})
+        other_axes = [a for a in ['roll', 'pitch', 'yaw'] if a != axis]
+        leakages = []
+        for oa in other_axes:
+            sc_other = sc.get(f'{oa}_mean', 0)
+            zd_other = _zd_rpy_for_leak[axis_map[oa]]
+            leakages.append(max(0, sc_other - zd_other))
+        cross_leakage[axis] = {
+            'mean_leakage_deg': float(np.mean(leakages)),
+            'max_leakage_deg': float(np.max(leakages)),
+        }
+    results['cross_axis_leakage'] = cross_leakage
+
+    # Prediction Independence: does the model's output change with injection magnitude?
+    # A genuine corrector's signed prediction shifts toward GT as injection increases.
+    # A pure shortcutter always predicts at the same point (signed pred ≈ ZD) regardless.
+    # We measure this by comparing signed RPY means across ZD, 0.5°, 1.0°, inject_deg.
+    zd_signed_rpy = [results['zero_drift'].get('roll_signed_mean', 0),
+                     results['zero_drift'].get('pitch_signed_mean', 0),
+                     results['zero_drift'].get('yaw_signed_mean', 0)]
+    pred_independence = {}
+    for axis_i, axis in enumerate(['roll', 'pitch', 'yaw']):
+        signed_zd = zd_signed_rpy[axis_i]
+        signed_preds = [signed_zd]
+        magnitudes = [0.0]
+        for mag_s, cfg_label in [('0.5', 'mag-0.5'), ('1.0', 'mag-1.0'),
+                                  (str(inject_deg), None)]:
+            if cfg_label:
+                src = _batched_seq_preds.get(cfg_label, {})
+            else:
+                src = None
+            if cfg_label and src:
+                r = _assemble_result(cfg_label)
+                signed_preds.append(r.get(f'{axis}_signed_mean',
+                                          r.get(f'{axis}_mean', signed_zd)))
+            elif cfg_label is None:
+                signed_preds.append(results['fixed_inject'].get(
+                    f'{axis}_signed_mean',
+                    results['fixed_inject'].get(f'{axis}_mean', signed_zd)))
+            magnitudes.append(float(mag_s))
+        if len(signed_preds) >= 2:
+            pred_range = max(signed_preds) - min(signed_preds)
+            independence = min(1.0, pred_range / inject_deg) if inject_deg > 0 else 0.0
+            pred_independence[axis] = {
+                'pred_range_deg': float(pred_range),
+                'independence': float(independence),
+                'is_shortcut': pred_range < 0.05,
+            }
+        else:
+            pred_independence[axis] = {'pred_range_deg': 0, 'independence': 0, 'is_shortcut': True}
+    overall_indep = float(np.mean([pred_independence[a]['independence'] for a in ['roll', 'pitch', 'yaw']]))
+    any_shortcut = any(pred_independence[a]['is_shortcut'] for a in ['roll', 'pitch', 'yaw'])
+    if overall_indep > 0.3:
+        verdict = "GENUINE"
+    elif overall_indep > 0.1:
+        verdict = "PARTIAL"
+    else:
+        verdict = "SHORTCUT"
+    pred_independence['overall_independence'] = overall_indep
+    pred_independence['verdict'] = verdict
+    pred_independence['per_axis'] = {a: pred_independence.pop(a) for a in ['roll', 'pitch', 'yaw']}
+    results['prediction_independence'] = pred_independence
+
+    # === GS_medw: Generalization Score based on MEDW aggregation ===
+    #
+    # All sub-scores are computed from MEDW-aggregated per-sequence results.
+    # This aligns with real deployment where multi-frame aggregation is always used.
+    #
+    # 4 sub-scores normalized to [0, 1], lower = better:
+    #   S1: Zero-Drift   = MEDW max(R,P,Y) / 0.3° (deployment bias floor)
+    #   S2: Correction    = (MEDW residual - zero_drift) / inject_magnitude, avg for 0.5° and 1.0°
+    #   S3: Shortcut      = 1 - mean(genuine per-axis recovery) / 100%
+    #   S4: Consistency   = asymmetry × 0.6 + magnitude_sensitivity × 0.4
+
+    n_seqs_zd = results['zero_drift'].get('n_seqs', 0)
+    if n_seqs_zd == 0:
+        print(f"\n   [WARN] n_seqs=0 for zero-drift — no valid sequences, GS_medw marked invalid.")
+        results['composite'] = {
+            'GS_medw': -1.0,
+            'valid': False,
+            'reason': 'n_seqs=0, no valid sequence data for generalization diagnostics',
+        }
+        return results
+
+    zd_max_rpy = results['zero_drift']['max_rpy']
+    zd_rot_mean = results['zero_drift']['rot_mean']
+    zd_rpy = [results['zero_drift']['roll_mean'],
+              results['zero_drift']['pitch_mean'],
+              results['zero_drift']['yaw_mean']]
+    zd_signed = [results['zero_drift'].get('roll_signed_mean', 0),
+                 results['zero_drift'].get('pitch_signed_mean', 0),
+                 results['zero_drift'].get('yaw_signed_mean', 0)]
+
+    s1_zd = min(1.0, zd_max_rpy / 0.3)
+
+    inj = results['fixed_inject'].get('inject', {})
+    fi_recovery = inj.get('mean_recovery_pct', 0)
+
+    def _direction_aware_zd_deduction(raw_resid, inject_magnitude, zd_signed_vals,
+                                       injected_axes=None):
+        """Compute genuine residual by deducting the ZD projection onto injection direction.
+
+        For multi-axis inject (+m, +m, +m), the injection direction unit vector is
+        (1/sqrt(3), 1/sqrt(3), 1/sqrt(3)).  The ZD component along this direction is
+        dot(zd, inj_hat) = sum(zd_i) / sqrt(3).  When positive, this fraction of ZD
+        inflates the geodesic residual; we deduct it (clamped to [0, raw_resid]).
+
+        For single-axis inject (+m, 0, 0), inj_hat = (1, 0, 0), projection = zd_roll.
+
+        Args:
+            injected_axes: optional bool mask [True, True, True] for 3-axis,
+                           [True, False, False] for roll-only, etc.
+                           Defaults to all-axes-injected.
+        """
+        n = len(zd_signed_vals)
+        if n <= 0 or inject_magnitude <= 0:
+            return raw_resid
+        if injected_axes is None:
+            injected_axes = [True] * n
+        n_axes = sum(injected_axes)
+        if n_axes <= 0:
+            return raw_resid
+        inj_hat = [(1.0 / np.sqrt(n_axes) if injected_axes[i] else 0.0)
+                    for i in range(n)]
+        zd_proj = sum(z * h for z, h in zip(zd_signed_vals, inj_hat))
+        deduction = max(0, zd_proj)
+        deduction = min(deduction, raw_resid)
+        return max(0, raw_resid - deduction)
+
+    small_genuine_resids = []
+    for m in ['0.5', '1.0']:
+        if m in multi_mag:
+            raw_resid = multi_mag[m].get('residual', -1)
+            recovery = multi_mag[m].get('recovery_pct', -999)
+            if raw_resid >= 0 and recovery > -100:
+                actual_inject_geo = raw_resid / (1.0 - recovery / 100.0) if recovery < 99.9 else raw_resid * 10
+                genuine_resid = _direction_aware_zd_deduction(
+                    raw_resid, float(m), zd_signed)
+                small_genuine_resids.append(genuine_resid / max(actual_inject_geo, 1e-6))
+    if small_genuine_resids:
+        s2_corr = min(1.0, np.mean(small_genuine_resids))
+    else:
+        fi_injected = inj.get('mean_injected', inject_deg)
+        raw_fi = inj.get('mean_residual', fi_injected)
+        genuine_fi = _direction_aware_zd_deduction(raw_fi, inject_deg, zd_signed)
+        s2_corr = min(1.0, genuine_fi / max(fi_injected, 1e-6))
+
+    per_axis_recoveries = []
+    per_axis_genuine = {}
+    axis_idx = {'roll': 0, 'pitch': 1, 'yaw': 2}
+    for axis in ['roll', 'pitch', 'yaw']:
+        sc_res = shortcut_results.get(axis, {})
+        raw_rec = sc_res.get('axis_specific_recovery', 0)
+        per_axis_recoveries.append(raw_rec)
+        ax_residual = sc_res.get('axis_residual', inject_deg)
+        if ax_residual < 0:
+            per_axis_genuine[axis] = {
+                'raw_recovery_pct': -1,
+                'genuine_recovery_pct': -1,
+                'shortcut_proportion_pct': 0,
+                'zd_signed_deg': float(zd_signed[axis_idx[axis]]),
+                'zd_deduction_deg': 0,
+            }
+            continue
+        ax_zd_signed = zd_signed[axis_idx[axis]]
+        ax_zd_deduction = max(0, ax_zd_signed) if inject_deg > 0 else max(0, -ax_zd_signed)
+        ax_genuine_residual = max(0, ax_residual - ax_zd_deduction)
+        ax_genuine_correction = max(0, inject_deg - ax_genuine_residual)
+        ax_raw_correction = max(0, inject_deg - ax_residual)
+        per_axis_genuine[axis] = {
+            'raw_recovery_pct': raw_rec,
+            'genuine_recovery_pct': float(ax_genuine_correction / inject_deg * 100) if inject_deg > 0 else 0,
+            'shortcut_proportion_pct': float(min(ax_zd_deduction, ax_raw_correction) / max(ax_raw_correction, 1e-6) * 100) if ax_raw_correction > 0 else 0,
+            'zd_signed_deg': float(ax_zd_signed),
+            'zd_deduction_deg': float(ax_zd_deduction),
+        }
+    genuine_per_axis = [per_axis_genuine[a]['genuine_recovery_pct'] for a in ['roll', 'pitch', 'yaw']
+                        if per_axis_genuine[a]['genuine_recovery_pct'] >= 0]
+    s3_shortcut = 1.0 - min(1.0, np.mean(genuine_per_axis) / 100.0) if genuine_per_axis else 1.0
+
+    pos_res_raw = inj.get('mean_residual', inject_deg)
+    neg_inj = results['neg_inject'].get('inject', {})
+    neg_res_raw = neg_inj.get('mean_residual', inject_deg)
+    pos_res_genuine = _direction_aware_zd_deduction(pos_res_raw, inject_deg, zd_signed)
+    neg_zd_signed = [-z for z in zd_signed]
+    neg_res_genuine = _direction_aware_zd_deduction(neg_res_raw, inject_deg, neg_zd_signed)
+    asymmetry = min(1.0, abs(pos_res_genuine - neg_res_genuine) / inject_deg) if inject_deg > 0 else 0.0
+
+    mag_keys_sorted = sorted(multi_mag.keys(), key=float)
+    mag_residuals = [multi_mag[m]['residual'] for m in mag_keys_sorted]
+    mag_perturbations = [float(m) for m in mag_keys_sorted]
+    if len(mag_residuals) >= 2:
+        residual_spread = mag_residuals[-1] - mag_residuals[0]
+        perturb_spread = mag_perturbations[-1] - mag_perturbations[0]
+        mag_sensitivity = min(1.0, max(0, residual_spread) / max(perturb_spread, 0.01))
+    else:
+        mag_sensitivity = 0.5
+    s4_consistency = min(1.0, asymmetry * 0.6 + mag_sensitivity * 0.4)
+
+    w_medw = [0.40, 0.30, 0.15, 0.15]
+    sub_medw_names = ['zero_drift', 'correction', 'shortcut', 'consistency']
+    sub_medw = [s1_zd, s2_corr, s3_shortcut, s4_consistency]
+    gs_medw = sum(w_medw[i] * sub_medw[i] for i in range(4))
+
+    fi_rot_mean = inj.get('mean_residual', inject_deg)
+    fi_injected_geo = inj.get('mean_injected', inject_deg)
+    genuine_fi_residual = _direction_aware_zd_deduction(fi_rot_mean, inject_deg, zd_signed)
+    genuine_correction = fi_injected_geo - genuine_fi_residual
+    genuine_recovery_pct = (genuine_correction / fi_injected_geo * 100) if fi_injected_geo > 1e-6 else 0
+    zd_deduction_total = fi_rot_mean - genuine_fi_residual
+    raw_correction = fi_injected_geo - fi_rot_mean
+    shortcut_proportion = (min(zd_deduction_total, max(raw_correction, 0))
+                           / max(raw_correction, 1e-6) * 100) if raw_correction > 0 else 0
+
+    shortcut_risk_detail = {}
+    for axis in ['roll', 'pitch', 'yaw']:
+        genuine_rec = per_axis_genuine[axis]['genuine_recovery_pct']
+        if genuine_rec < 0:
+            risk = "N/A"
+        elif inject_deg >= 0.5 and genuine_rec < 30:
+            risk = "HIGH"
+        elif inject_deg >= 0.5 and genuine_rec < 50:
+            risk = "MEDIUM"
+        elif genuine_rec >= 70:
+            risk = "LOW"
+        else:
+            risk = "ACCEPTABLE"
+        shortcut_risk_detail[axis] = risk
+    worst_risk = "LOW"
+    for r in shortcut_risk_detail.values():
+        if r == "N/A":
+            continue
+        if r == "HIGH":
+            worst_risk = "HIGH"
+            break
+        elif r == "MEDIUM" and worst_risk not in ("HIGH",):
+            worst_risk = "MEDIUM"
+        elif r == "ACCEPTABLE" and worst_risk not in ("HIGH", "MEDIUM"):
+            worst_risk = "ACCEPTABLE"
+    results['shortcut_risk'] = worst_risk
+    results['shortcut_risk_detail'] = shortcut_risk_detail
+
+    results['composite'] = {
+        'GS_medw': float(gs_medw),
+        'aggregation': 'MEDW (robust median per-sequence)',
+        'sub_scores': dict(zip(sub_medw_names, [float(s) for s in sub_medw])),
+        'weights': dict(zip(sub_medw_names, w_medw)),
+        'raw': {
+            'zero_drift_max_rpy': float(zd_max_rpy),
+            'zero_drift_rot_mean': float(zd_rot_mean),
+            'zero_drift_rpy': zd_rpy,
+            'zero_drift_signed_rpy': [float(s) for s in zd_signed],
+            'inject_residual_deg': float(inj.get('mean_residual', -1)),
+            'recovery_pct': float(fi_recovery),
+            'genuine_recovery_pct': float(genuine_recovery_pct),
+            'shortcut_proportion_pct': float(shortcut_proportion),
+            'per_axis_recovery': {
+                'roll': float(per_axis_recoveries[0]),
+                'pitch': float(per_axis_recoveries[1]),
+                'yaw': float(per_axis_recoveries[2]),
+            },
+            'per_axis_genuine_recovery': per_axis_genuine,
+            'asymmetry_deg': float(abs(pos_res_genuine - neg_res_genuine)),
+            'asymmetry_raw_deg': float(abs(pos_res_raw - neg_res_raw)),
+            'magnitude_sensitivity': float(mag_sensitivity),
+            'multi_mag_residuals': mag_residuals,
+            'multi_mag_perturbations': mag_perturbations,
+            'cross_axis_leakage': cross_leakage,
+            'n_seqs_evaluated': results['zero_drift'].get('n_seqs', 0),
+            'inject_deg': float(inject_deg),
+        },
+    }
+
+    print(f"\n   === GS_medw (MEDW-aggregated Generalization Score) ===")
+    print(f"   GS_medw = {gs_medw:.4f} (lower=better, all metrics based on MEDW per-seq aggregation)")
+    print(f"     S1 Zero-Drift:  {s1_zd:.4f} (w={w_medw[0]}) [MEDW max_rpy={zd_max_rpy:.4f}°]")
+    print(f"     S2 Correction:  {s2_corr:.4f} (w={w_medw[1]}) [direction-aware genuine_resid/inject_mag]")
+    print(f"     S3 Shortcut:    {s3_shortcut:.4f} (w={w_medw[2]}) [genuine per-axis recovery]")
+    print(f"     S4 Consistency: {s4_consistency:.4f} (w={w_medw[3]}) [asym={asymmetry:.3f}×0.6 magsens={mag_sensitivity:.3f}×0.4]")
+    print(f"   --- Genuine Recovery (MEDW) ---")
+    print(f"     Total recovery: {fi_recovery:.1f}%  Genuine: {genuine_recovery_pct:.1f}%  Shortcut: {shortcut_proportion:.1f}%")
+    for axis in ['roll', 'pitch', 'yaw']:
+        pg = per_axis_genuine[axis]
+        print(f"     {axis:5s}: raw={pg['raw_recovery_pct']:.1f}% genuine={pg['genuine_recovery_pct']:.1f}% shortcut={pg['shortcut_proportion_pct']:.1f}%")
+    print(f"   Shortcut Risk: {worst_risk} (R:{shortcut_risk_detail['roll']} P:{shortcut_risk_detail['pitch']} Y:{shortcut_risk_detail['yaw']})")
+    for axis in ['roll', 'pitch', 'yaw']:
+        cl = cross_leakage[axis]
+        print(f"     Cross-leak {axis:5s}: mean={cl['mean_leakage_deg']:.4f}° max={cl['max_leakage_deg']:.4f}°")
+
+    # Generate summary visualization chart
+    try:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+        # Chart 1: Multi-magnitude recovery curve
+        mags = sorted(multi_mag.keys(), key=float)
+        mag_vals = [float(m) for m in mags]
+        residuals = [multi_mag[m]['residual'] for m in mags]
+        recoveries = [multi_mag[m]['recovery_pct'] for m in mags]
+        ax1 = axes[0]
+        ax1.plot(mag_vals, residuals, 'o-', color='#e74c3c', linewidth=2, markersize=8, label='Residual (°)')
+        ax1.plot(mag_vals, mag_vals, '--', color='gray', alpha=0.5, label='Identity (no correction)')
+        ax1.set_xlabel('Injected Perturbation (°)')
+        ax1.set_ylabel('Residual Error (°)')
+        ax1.set_title('Correction Capability vs Magnitude')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Chart 2: Per-axis shortcut recovery
+        axis_names = ['Roll', 'Pitch', 'Yaw']
+        ax2 = axes[1]
+        colors = ['#3498db', '#e74c3c', '#2ecc71']
+        bars = ax2.bar(axis_names, per_axis_recoveries, color=colors, alpha=0.8)
+        ax2.axhline(y=70, color='green', linestyle='--', alpha=0.5, label='Good (70%)')
+        ax2.axhline(y=50, color='orange', linestyle='--', alpha=0.5, label='Medium (50%)')
+        ax2.axhline(y=30, color='red', linestyle='--', alpha=0.5, label='Poor (30%)')
+        ax2.set_ylabel('Recovery %')
+        ax2.set_title('Per-Axis Shortcut Recovery')
+        ax2.set_ylim(0, 105)
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        for bar, val in zip(bars, per_axis_recoveries):
+            ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 1,
+                     f'{val:.1f}%', ha='center', va='bottom', fontsize=10)
+
+        # Chart 3: GS_medw sub-score breakdown (bar chart)
+        chart_labels = ['ZeroDrift', 'Correction', 'Shortcut', 'Consistency']
+        ax3 = axes[2]
+        bar_colors = ['#9b59b6', '#e74c3c', '#e67e22', '#1abc9c']
+        bars3 = ax3.barh(chart_labels, sub_medw, color=bar_colors, alpha=0.8)
+        ax3.set_xlim(0, 1.05)
+        ax3.set_xlabel('Penalty Score (0=best, 1=worst)')
+        ax3.set_title(f'GS_medw Breakdown ({gs_medw:.4f})')
+        ax3.grid(True, alpha=0.3)
+        for bar, val, wt in zip(bars3, sub_medw, w_medw):
+            ax3.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height()/2.,
+                     f'{val:.3f} (w={wt})', ha='left', va='center', fontsize=9)
+
+        plt.tight_layout()
+        chart_path = os.path.join(eval_dir, "gdiag_summary.png")
+        plt.savefig(chart_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"   ✓ gdiag_summary.png saved")
+    except Exception as _chart_err:
+        print(f"   [WARN] Chart generation failed: {_chart_err}")
+
+    out_path = os.path.join(eval_dir, "generalization_diagnostics.json")
+    with open(out_path, 'w') as f:
+        json.dump(results, f, indent=2)
+
+    return results
+
+
 def _average_rotation_svd(R_list):
     """Average rotation matrices using SVD projection to nearest SO(3)."""
+    if len(R_list) == 0:
+        return np.eye(3)
     R_mean = np.mean(R_list, axis=0)
+    if R_mean.ndim < 2:
+        return np.eye(3)
     U, _, Vt = np.linalg.svd(R_mean)
     d = np.linalg.det(U @ Vt)
     S = np.diag([1, 1, d])
@@ -1106,6 +2212,8 @@ def _estimate_per_axis_bias(all_T_pred, all_T_gt, sample_sequences,
         seq_pred = T_pred_arr[mask]
         seq_gt = T_gt_arr[mask]
         n = len(seq_pred)
+        if n == 0:
+            continue
         n_calib = max(1, int(n * calib_ratio))
         for i in range(n_calib):
             R_pred = seq_pred[i][:3, :3]
@@ -3355,6 +4463,21 @@ def main():
                        help="TTA: number of fine-tuning steps per sequence (default: 10)")
     parser.add_argument("--tta_lr", type=float, default=1e-5,
                        help="TTA: learning rate for adaptation (default: 1e-5)")
+    parser.add_argument("--shortcut_diag", action='store_true', default=False,
+                       help="Run shortcut-learning diagnostics (fixed-bias, invariance, "
+                            "identity detector, ablation, GradCAM)")
+    parser.add_argument("--generalization_diag", action='store_true', default=False,
+                       help="Run generalization diagnostics: zero-drift (no perturbation), "
+                            "fixed-inject (known 2° perturbation), and shortcut resistance tests. "
+                            "Outputs generalization_diagnostics.json with MEDW-aggregated GS_medw score.")
+    parser.add_argument("--gdiag_inject_deg", type=float, default=2.0,
+                       help="Injection magnitude for generalization_diag fixed-inject test (default: 2.0°)")
+    parser.add_argument("--gdiag_max_batches", type=int, default=0,
+                       help="Max batches for generalization_diag sub-tests (0=same as main eval)")
+    parser.add_argument("--native_cross_iter_steps", type=int, default=0,
+                       help="V36 native_cross: iterative_inference steps at eval (0=single, 3=recommended)")
+    parser.add_argument("--exclude_seqs", type=str, default=None,
+                       help="逗号分隔的序列ID列表，评估时跳过这些序列 (例如: seq07,seq12)")
 
     args = parser.parse_args()
 

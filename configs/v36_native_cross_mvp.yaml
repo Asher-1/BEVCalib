@@ -26,8 +26,8 @@ defaults:
     angle_range_deg: 5
     trans_range: 0.15
 
-    batch_size: 16
-    learning_rate: 2e-4
+    batch_size: 12
+    learning_rate: 1e-4
 
     use_ddp: true
     ddp_gpus: 8
@@ -55,7 +55,7 @@ defaults:
     lr_schedule: cosine_warm_restarts
     cosine_T0: 30
     cosine_Tmult: 2
-    warmup_epochs: 3
+    warmup_epochs: 5
     backbone_lr_scale: 0.0
     backbone_warmup_epochs: 0
     layer_wise_lr_decay: 1.0
@@ -123,5 +123,12 @@ experiments:
       native_cross: 1
       native_cross_pc_groups: 128
       native_cross_n_harmonic: 6
+      native_cross_n_layers: 1
+      native_cross_dual_branch: 1
+      native_cross_knn: 8
+      native_cross_use_fps: 1
       explicit_tinit: 0
+      learning_rate: 1e-4
+      warmup_epochs: 5
+      batch_size: 12
       fuser_type: "diff"

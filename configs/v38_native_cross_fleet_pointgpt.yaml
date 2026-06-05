@@ -1,0 +1,239 @@
+# V38: 结构性修复 v37 MEDW/step 密度问题 + Fleet PointGPT L20
+#
+# 相对 v37 的核心变更:
+#   - batch_size=128/GPU → global BS=1024
+#   - max_frames=4000, 400 epochs (Arm4 ±5° fine-tune 100ep)
+#   - learning_rate=2e-4 @ BS1024（v37 同 batch 用 4e-4；1e-4 偏保守）
+#   - native_cross_pointgpt_ckpt=fleet_pointgpt_L20.pth (16384 pts, 256 groups, 60m)
+#   - calib head scratch（Arm1）；Arm4 紧随 Arm1 自动 ±5° fine-tune
+#
+# 启动:
+#   bash batch_train.sh configs/v38_native_cross_fleet_pointgpt.yaml
+#
+# Skip 控制（均在 YAML / batch_train.sh，无需 wrapper 脚本）:
+#   - 实验级 skip: true（Arm2/Arm3 消融默认跳过）
+#   - global.skip_pattern: CLI --skip-pattern 未指定时生效
+#
+# 多机 DDP: 在 defaults.params 或实验 params 中设置 nnodes / node_rank / master_addr
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+  skip_pattern: "warmstart|kitti"
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+    PROJFUSION_ROOT: /mnt/drtraining/user/dahailu/code/ProjFusion
+
+  params:
+    angle_range_deg: 10
+    trans_range: 0.15
+
+    batch_size: 128
+    learning_rate: 2e-4
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    node_rank: null
+    master_addr: null
+    master_port: null
+    ddp_auto_scale: 0
+
+    use_compile: false
+    no_amp: 1
+    rotation_only: true
+    enable_vis: 0
+    enable_ckpt_eval: 0
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,1.0,1.0"
+    use_balanced_axis_loss: 1
+
+    use_mlp_head: 0
+    use_geodesic_loss: 0
+
+    drop_path_rate: 0.15
+    head_dropout: 0.15
+
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 40
+    cosine_Tmult: 2
+    warmup_epochs: 10
+    backbone_lr_scale: 0.0
+    backbone_warmup_epochs: 0
+    layer_wise_lr_decay: 1.0
+
+    use_pitch_branch: 0
+    pitch_aux_weight: 0.0
+    bev_instance_norm: 0
+    use_contrastive_extrinsic: 0
+    contrastive_weight: 0.0
+
+    augment_mount_jitter_prob: 0.5
+    augment_mount_jitter_rot_sigma: 3.0
+    augment_mount_jitter_trans_sigma: 0.01
+
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    per_axis_weights: null
+
+    augment_pitch_sign_flip_prob: 0.15
+    augment_pitch_flip_prob: 0.20
+    augment_pitch_flip_max_deg: 3.0
+    augment_color_jitter: 0.15
+    augment_pc_jitter: 0.02
+    augment_pc_dropout: 0.05
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+
+    max_frames_per_seq: 4000
+    num_epochs: 400
+    save_ckpt_per_epoches: 50
+    step_size: 80
+
+    early_stopping_patience: 0
+    eval_epoches: 20
+
+    seed: 42
+    grad_accum_steps: 1
+
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+
+    fuser_type: "diff"
+    cam_drop_prob: 0.0
+    cam_drop_mode: "zero"
+
+    foreground: true
+
+    domain_adversarial: 0
+    domain_adversarial_weight: 0.0
+    num_domains: 0
+
+experiments:
+  # P0 主实验: fleet PointGPT L20 + scratch calib head
+  - name: "v38_native_cross_fleet_pointgpt_L20"
+    description: "V38: fleet PointGPT L20, BS1024, max_frames=4000, scratch head, ±10deg"
+    dataset: "all"
+    version: "v38_native_cross_fleet_pointgpt_L20"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      native_cross: 1
+      native_cross_pc_groups: 256
+      native_cross_n_harmonic: 6
+      native_cross_n_layers: 1
+      native_cross_dual_branch: 1
+      native_cross_use_pointgpt: 1
+      native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+      native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+      native_cross_pointgpt_max_depth: 60.0
+      native_cross_extend_ratio: 2.5
+      explicit_tinit: 0
+      pretrain_ckpt: null
+      resume_ckpt: null
+      fuser_type: "diff"
+
+  # P0 对照: fleet L20 + warm-start 自 v37 best val（验证局部最优假设）
+  - name: "v38_native_cross_fleet_pointgpt_L20_warmstart"
+    description: "V38 ablation: fleet PointGPT L20 + warm-start v37 best val"
+    dataset: "all"
+    version: "v38_native_cross_fleet_pointgpt_L20_warmstart"
+    skip: true
+    skip_reason: "Ablation arm; remove skip or drop global.skip_pattern to run"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      native_cross: 1
+      native_cross_pc_groups: 256
+      native_cross_n_harmonic: 6
+      native_cross_n_layers: 1
+      native_cross_dual_branch: 1
+      native_cross_use_pointgpt: 1
+      native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+      native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+      native_cross_pointgpt_max_depth: 60.0
+      native_cross_extend_ratio: 2.5
+      explicit_tinit: 0
+      pretrain_ckpt: /mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data/model_small_10deg_v37_native_cross_pointgpt_long/all_training_data_scratch/checkpoint/ckpt_best_val.pth
+      resume_ckpt: null
+      fuser_type: "diff"
+
+  # P1 基线: KITTI PointGPT + scratch（与 fleet 对照）
+  - name: "v38_native_cross_kitti_pointgpt"
+    description: "V38 ablation: KITTI PointGPT + scratch, same step budget"
+    dataset: "all"
+    version: "v38_native_cross_kitti_pointgpt"
+    skip: true
+    skip_reason: "Ablation arm; remove skip or drop global.skip_pattern to run"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      native_cross: 1
+      native_cross_pc_groups: 128
+      native_cross_n_harmonic: 6
+      native_cross_n_layers: 1
+      native_cross_dual_branch: 1
+      native_cross_use_pointgpt: 1
+      pretrain_ckpt: null
+      resume_ckpt: null
+      fuser_type: "diff"
+
+  # P0 Stage-2: ±5° fine-tune，batch_train 在 Arm1 完成后自动执行
+  - name: "v38_native_cross_fleet_pointgpt_L20_finetune_5deg"
+    description: "V38b: fleet L20, ±5deg fine-tune from Arm1 ckpt_best_val, LR=5e-5, 100ep"
+    dataset: "all"
+    version: "v38_native_cross_fleet_pointgpt_L20_finetune_5deg"
+    params:
+      cam2bev_mode: "query"
+      backbone_type: "dinov2"
+      backbone_variant: "dinov2-small"
+      freeze_backbone: 1
+      backbone_freeze_layers: "0:-2"
+      native_cross: 1
+      native_cross_pc_groups: 256
+      native_cross_n_harmonic: 6
+      native_cross_n_layers: 1
+      native_cross_dual_branch: 1
+      native_cross_use_pointgpt: 1
+      native_cross_pointgpt_ckpt: /mnt/drtraining/user/dahailu/code/ProjFusion/pretrained/fleet_pointgpt_L20.pth
+      native_cross_pointgpt_config: /mnt/drtraining/user/dahailu/code/ProjFusion/cfg/pointgpt/finetune_fleet_L20.yaml
+      native_cross_pointgpt_max_depth: 60.0
+      native_cross_extend_ratio: 2.5
+      explicit_tinit: 0
+      pretrain_ckpt: /mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data/model_small_10deg_v38_native_cross_fleet_pointgpt_L20/all_training_data_scratch/checkpoint/ckpt_best_val.pth
+      resume_ckpt: null
+      angle_range_deg: 5
+      trans_range: 0.15
+      learning_rate: 5e-5
+      warmup_epochs: 5
+      cosine_T0: 25
+      num_epochs: 100
+      save_ckpt_per_epoches: 25
+      eval_epoches: 10
+      fuser_type: "diff"

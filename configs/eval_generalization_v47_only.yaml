@@ -1,0 +1,113 @@
+# V47 全变种泛化评估配置 (含 V45-GIN 最优基线)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v47.yaml --parallel -1 --eval_max_frames_per_seq 400
+#   python run_generalization_eval.py --config configs/eval_generalization_v47.yaml --generalization_diag --parallel -1 --eval_max_frames_per_seq 400
+#
+# 评估内容:
+#   - V45-GIN S1/S2/S3 Full (基线, 全局最优)
+#   - V47 S1/S2 Quick (默认 n_groups=128)
+#   - V47-512g S1/S2 Quick (n_groups=512)
+#   - V47-512g S1 Full (长训练)
+#   - best_dual + best_val checkpoints
+#   - generalization_diag: zero-drift / inject / shortcut / GS_medw
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v47_only"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v47_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 12
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+
+  # ===== Baseline: V46 Quick (v47方案的对照基线) =====
+  - label: "v46-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick baseline (MEDW=0.048°)"
+
+  - label: "v46-S1-quick-best-val"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick baseline best-val"
+
+  # ===== V47-512g S1 Full: 长训练 =====
+  - label: "v47-512g-S1-full-best-dual"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Full n_groups=512 (longer training)"
+
+  - label: "v47-512g-S1-full-best-val"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Full n_groups=512 best-val"
+
+
+  # ===== V45c Quick: V45b + cf_n_groups=256 =====
+  - label: "v45c-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 (5° + double spatial res)"
+
+  - label: "v45c-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 best-val"
+
+  - label: "v45c-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S2 n_groups=256 + IN (3° fine-tune)"
+
+  - label: "v45c-S2-quick-best-val"
+    dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S2 n_groups=256 + IN best-val"

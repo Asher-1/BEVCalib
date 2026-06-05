@@ -1,0 +1,192 @@
+# V42 CF-BEV-R: CalibFormer-aligned Rotation-only Calibration
+# Design: docs/V42_CF_BEV_DESIGN.md
+#
+# Four-stage progressive training:
+#   S1: ±10° (80ep) → S2: ±5° (150ep) → S3: ±3° (100ep) → S4: ±1° (70ep)
+# Each stage pretrained from previous stage's ckpt_best_medw_axis.pth
+#
+# Usage:
+#   bash batch_train.sh configs/v42_cf_bev_r.yaml
+#
+# Gate criteria (G3):
+#   test MEDW200 max(R,P,Y) < 0.10° AND Jacobian min(R,P,Y) > 0.85
+#
+# !!!! HARDCODE WARNING (V45 才修复的问题) !!!!
+# 以下参数在 cf_bev_r_calib.py 中被硬编码覆盖，YAML 值未被实际使用:
+#   weight_axis_rotation: YAML=0.5 → 实际=0.3 (cf_bev_r_calib.py:116)
+#   axis_weights (S3): YAML="2.0,2.0,2.0" → 实际=(1.0,4.0,1.0) (cf_bev_r_calib.py:117)
+#   head_dropout: 未在 YAML 中设置 → 实际=0.1 (cf_bev_r_calib.py:120,201,237)
+#   quat_norm_weight: YAML=0.5 → 实际=0.5 (恰好一致，但未从 args 读取)
+# 下面的 defaults 值已修正为实际生效值 (ACTUAL_EFFECTIVE)
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    # --- CF-BEV-R architecture ---
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # CF-BEV-R specific
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    # Backbone: Swin-Tiny (NOT DINOv2 — see §8)
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+
+    # --- Training common ---
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # --- Loss ---
+    # ACTUAL_EFFECTIVE: enable_axis_loss 始终 True (硬编码), weight_axis_rotation 实际=0.3 (非 YAML 的 0.5)
+    enable_axis_loss: true          # 硬编码始终 True
+    weight_axis_rotation: 0.3      # ACTUAL: 硬编码 0.3 (YAML 写 0.5 但被覆盖)
+    axis_weights: "1.0,4.0,1.0"   # ACTUAL: 硬编码 (1,4,1), S3 的 YAML "2,2,2" 被忽略
+    use_geodesic_loss: 0            # 硬编码始终 False
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5          # 恰好一致，但实际未从 args 读取
+    seq_consistency_weight: 0.1
+    head_dropout: 0.1              # ACTUAL: 硬编码 0.1 (YAML 中未设置)
+
+    # --- Anti-shortcut (§9) ---
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 15.0
+    consistency_loss_weight: 0.5
+    consistency_loss_start_epoch: 10
+
+    # --- Data ---
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    max_frames_per_seq: 500
+    foreground: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_mount_jitter_prob: 0.0
+    augment_intrinsic: 0.0
+
+    # --- Eval / Gate ---
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 20
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: ±5° full convergence (deployment domain) =====
+  - name: "v42_cf_bev_r_S1_quick"
+    description: "S1: ±5° full convergence, learn corr+RoCR, anti-shortcut AS5"
+    dataset: "all"
+    version: "v42_cf_bev_r_S1_quick"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 5
+      lr_schedule: step
+      step_size: 40
+      early_stopping_patience: 35
+      eval_epoches: 10
+      pretrain_ckpt: null
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+
+  # ===== S2: ±3° MEDW fine-tune =====
+  - name: "v42_cf_bev_r_S2_quick"
+    description: "S2: ±3° MEDW fine-tune, enable seq_consistency, Pitch prob=0.5"
+    dataset: "all"
+    version: "v42_cf_bev_r_S2_quick"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 3
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 30
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v42_cf_bev_r_S1_quick/all_training_data_scratch/checkpoint/ckpt_best_medw.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 8.0
+
+  # ===== S3: ±1° precision sprint =====
+  - name: "v42_cf_bev_r_S3_quick"
+    description: "S3: ±1° precision sprint, target G3(test max(R,P,Y)<0.10°)"
+    dataset: "all"
+    version: "v42_cf_bev_r_S3_quick"
+    params:
+      angle_range_deg: 1
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 80
+      warmup_epochs: 2
+      learning_rate: 1e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 25
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_3deg_v42_cf_bev_r_S2_quick/all_training_data_scratch/checkpoint/ckpt_best_medw.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.7
+      continuous_noise_max_deg: 5.0
+      axis_weights: "1.0,4.0,1.0"   # ACTUAL: YAML 写 "2.0,2.0,2.0" 但被硬编码覆盖

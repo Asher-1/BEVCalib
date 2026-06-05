@@ -1,0 +1,88 @@
+# V42 CF-BEV-R + V20 baseline 泛化评估配置
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v42.yaml
+#   python run_generalization_eval.py --config configs/eval_generalization_v42.yaml --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v42"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+
+models:
+  - label: "v42-S1-best-medw"
+    dir_name: "model_small_5deg_v42_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V42 S1 best-medw (5° training, MEDW=0.113°)"
+
+  - label: "v42-S2-best-dual"
+    dir_name: "model_small_3deg_v42_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V42 S2 dual-gate best (MEDW=0.046°)"
+
+  - label: "v42-S3-best-dual"
+    dir_name: "model_small_1deg_v42_cf_bev_r_S3_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V42 S3 dual-gate best (MEDW=0.041°)"
+
+  - label: "v42-32n-S1-best-dual"
+    dir_name: "model_small_5deg_v42_cf_bev_r_32n_S1"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V42 32-node S1 (5° training, 256 GPUs)"
+
+  - label: "v42-ablation-svd-e2e-S2"
+    dir_name: "model_small_3deg_v42_ablation_svd_e2e_S2"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V42 SVD E2E ablation S2 (rocr_detach=0)"
+
+  - label: "v42-ablation-svd-detach-S2"
+    dir_name: "model_small_3deg_v42_ablation_svd_detach_S2"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V42 SVD Detach ablation S2 (rocr_detach=999)"
+
+  - label: "v20-v8recipe-pitch-wt3"
+    dir_name: "v20/model_small_5deg_v20_v8recipe_pitch_wt3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    mode_desc: "V20 baseline (MEDW=0.646° on old test_data)"

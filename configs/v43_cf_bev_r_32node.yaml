@@ -1,0 +1,163 @@
+# V43 CF-BEV-R: 32-Node x 8-GPU (L20 48GB) Multi-Node Training
+# V43 improvements over V42:
+#   - Zero-perturbation training (identity mapping)
+#   - Progressive anti-shortcut relaxation
+#   - Balanced axis_weights (less Pitch overfit, more Yaw)
+#
+# NOTE: S1 uses V42 32n-S1 checkpoint as pretrain (already converged)
+#       Only S2/S3 apply V43 training strategy changes
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 30
+  max_retries: 2
+  retry_delay: 120
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 120
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 360
+    NCCL_TIMEOUT: 14400
+    NCCL_IB_DISABLE: 0
+    NCCL_NET_GDR_LEVEL: 5
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 32
+    ddp_auto_scale: 1
+    ddp_reference_gpus: 8
+    max_scaled_lr: 0.001
+    use_compile: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.0,3.0,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.1
+
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 15.0
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    consistency_loss_weight: 0.5
+    consistency_loss_start_epoch: 10
+    zero_perturbation_prob: 0.0
+
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    max_frames_per_seq: 10000
+    foreground: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_color_jitter: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_mount_jitter_prob: 0.0
+    augment_intrinsic: 0.0
+
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 4
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S2: ±3° from V42-32n-S1 checkpoint =====
+  - name: "v43_cf_bev_r_32n_S2"
+    description: "V43-S2: ±3° from V42-32n-S1, zero-perturb + reduced AS"
+    dataset: "all"
+    version: "v43_cf_bev_r_32n_S2"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 160
+      warmup_epochs: 5
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 40
+      eval_epoches: 10
+      save_ckpt_per_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v42_cf_bev_r_32n_S1/all_training_data_scratch/checkpoint/ckpt_best_medw.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      rocr_dropout: 0.2
+      rocr_center_bias: 0.2
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 5.0
+      zero_perturbation_prob: 0.08
+
+  # ===== S3: ±1° precision sprint =====
+  - name: "v43_cf_bev_r_32n_S3"
+    description: "V43-S3: ±1° precision, minimal AS, 10% zero-perturb"
+    dataset: "all"
+    version: "v43_cf_bev_r_32n_S3"
+    params:
+      angle_range_deg: 1
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 3
+      learning_rate: 1e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 35
+      eval_epoches: 10
+      save_ckpt_per_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_3deg_v43_cf_bev_r_32n_S2/all_training_data_scratch/checkpoint/ckpt_best_medw.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      rocr_dropout: 0.1
+      rocr_center_bias: 0.0
+      seq_consistency_start_epoch: 0
+      per_axis_prob: 0.7
+      continuous_noise_max_deg: 2.0
+      zero_perturbation_prob: 0.10
+      axis_weights: "1.5,2.5,2.0"

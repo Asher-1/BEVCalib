@@ -13,6 +13,7 @@ import os
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from collections import deque
 
@@ -27,11 +28,17 @@ class BEVCalibInference(nn.Module):
     Strips loss computation and returns the predicted LiDAR->Camera transform.
     """
 
-    def __init__(self, model, max_attn_tokens=0):
+    def __init__(self, model, max_attn_tokens=0, is_gmp=False):
         super().__init__()
         self.model = model
+        self.is_gmp = is_gmp
+        self.disable_amp = is_gmp
         self.rotation_only = model.rotation_only
         self.intrinsic_input = getattr(model, 'intrinsic_input', False)
+        self.correlation_fusion = getattr(model, 'correlation_fusion', False)
+        self.explicit_tinit = getattr(model, 'explicit_tinit', False)
+        self.iterative_refine = getattr(model, 'iterative_refine', 0)
+        self.native_cross = getattr(model, 'native_cross', False)
         self.max_attn_tokens = max_attn_tokens
 
     @torch.no_grad()
@@ -47,8 +54,20 @@ class BEVCalibInference(nn.Module):
         Returns:
             pred_T:  (B, 4, 4)  predicted LiDAR->Camera transform
         """
+        if self.is_gmp:
+            return self._forward_gmp(
+                img, pc, init_T_to_camera, post_cam2ego_T, cam_intrinsic)
+
         m = self.model
         B = img.shape[0]
+
+        if hasattr(m, 'point_encoder') and hasattr(m, 'local_corr'):
+            return self._forward_cf_bev_r(
+                img, pc, init_T_to_camera, cam_intrinsic)
+
+        if self.native_cross:
+            return self._forward_native_cross(
+                img, pc, init_T_to_camera, cam_intrinsic)
 
         img_ = img.unsqueeze(1)
         init_ = init_T_to_camera.unsqueeze(1)
@@ -64,39 +83,51 @@ class BEVCalibInference(nn.Module):
         pc_perm = pc.permute(0, 2, 1).contiguous()
         pc_bev_feats = m.pc_branch(pc_perm)
 
-        x = m.conv_fuser(cam_bev_feats, pc_bev_feats)
-        if m.bev_encoder_use:
-            x = m.bev_encoder(x)
-        x = x + m.pose_embed
-
-        if m.deformable:
-            x = m.deformable_transformer(x)
-            _B, C, H, W = x.shape
-            x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
-            bev_mask = cam_bev_mask.reshape(_B, H * W).float().unsqueeze(-1)
-            x = (x * bev_mask).sum(dim=1) / bev_mask.sum(dim=1).clamp(min=1)
+        if self.correlation_fusion:
+            x = m.spatial_corr_fuser(cam_bev_feats, pc_bev_feats)
         else:
-            _B, C, H, W = x.shape
-            if hasattr(m, 'bev_pool_factor') and m.bev_pool_factor > 1:
-                pf = m.bev_pool_factor
-                x = nn.functional.avg_pool2d(x, pf)
-                cam_bev_mask = nn.functional.max_pool2d(
-                    cam_bev_mask.reshape(_B, 1, H, W).float(), pf).squeeze(1)
-                _, _, H, W = x.shape
-            x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
-            bev_mask_f = cam_bev_mask.reshape(_B, H * W).float()
+            x = m.conv_fuser(cam_bev_feats, pc_bev_feats)
+            if m.bev_encoder_use:
+                x = m.bev_encoder(x)
+            x = x + m.pose_embed
 
-            seq_len = H * W
-            max_tok = self.max_attn_tokens
-            if 0 < max_tok < seq_len:
-                _, pack_idx = torch.topk(bev_mask_f, k=max_tok, dim=1, sorted=False)
-                x = torch.gather(x, 1, pack_idx.unsqueeze(-1).expand(-1, -1, C))
-                bev_mask_f = torch.gather(bev_mask_f, 1, pack_idx)
+            if m.deformable:
+                x = m.deformable_transformer(x)
+                _B, C, H, W = x.shape
+                x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
+                bev_mask = cam_bev_mask.reshape(_B, H * W).float().unsqueeze(-1)
+                x = (x * bev_mask).sum(dim=1) / bev_mask.sum(dim=1).clamp(min=1)
+            else:
+                _B, C, H, W = x.shape
+                if hasattr(m, 'bev_pool_factor') and m.bev_pool_factor > 1:
+                    pf = m.bev_pool_factor
+                    x = nn.functional.avg_pool2d(x, pf)
+                    cam_bev_mask = nn.functional.max_pool2d(
+                        cam_bev_mask.reshape(_B, 1, H, W).float(), pf).squeeze(1)
+                    _, _, H, W = x.shape
+                x = x.permute(0, 2, 3, 1).reshape(_B, H * W, C)
+                bev_mask_f = cam_bev_mask.reshape(_B, H * W).float()
 
-            padding_mask = (1.0 - bev_mask_f) * (-1e4)
-            x = m.transformer(x, src_key_padding_mask=padding_mask)
-            valid_mask = bev_mask_f.unsqueeze(-1)
-            x = (x * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
+                seq_len = H * W
+                max_tok = self.max_attn_tokens
+                if 0 < max_tok < seq_len:
+                    _, pack_idx = torch.topk(bev_mask_f, k=max_tok, dim=1, sorted=False)
+                    x = torch.gather(x, 1, pack_idx.unsqueeze(-1).expand(-1, -1, C))
+                    bev_mask_f = torch.gather(bev_mask_f, 1, pack_idx)
+
+                padding_mask = (1.0 - bev_mask_f) * (-1e4)
+                x = m.transformer(x, src_key_padding_mask=padding_mask)
+                valid_mask = bev_mask_f.unsqueeze(-1)
+                x = (x * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
+
+        if self.iterative_refine > 0:
+            iter_preds = m.iter_head(x, init_T_to_camera)
+            translation, rotation = iter_preds[-1]
+            return self._compose_gt_T(translation, rotation, init_T_to_camera)
+
+        if self.explicit_tinit:
+            tinit_feat = m.tinit_encoder(init_T_to_camera)
+            x = torch.cat([x, tinit_feat], dim=-1)
 
         if self.intrinsic_input:
             K = cam_intrinsic  # (B, 3, 3)
@@ -110,7 +141,50 @@ class BEVCalibInference(nn.Module):
         else:
             translation = torch.zeros(B, 3, device=x.device)
         rotation = m.rotation_pred(x)
+        return self._compose_gt_T(translation, rotation, init_T_to_camera)
 
+    def _forward_gmp(self, img, pc, init_T_to_camera, post_cam2ego_T, cam_intrinsic):
+        """V40 GeoMatchProjCalib inference: gt_T is unused for t_expected."""
+        with torch.cuda.amp.autocast(enabled=False):
+            t_expected, _, _ = self.model(
+                img.float(),
+                pc.float(),
+                init_T_to_camera.float(),
+                init_T_to_camera.float(),
+                post_cam2ego_T.float(),
+                cam_intrinsic.float(),
+                masks=None,
+                out_init_loss=False,
+            )
+        return t_expected
+
+    def _forward_cf_bev_r(self, img, pc, init_T_to_camera, cam_intrinsic):
+        """V42 CF-BEV-R inference: use model._core_forward for pure inference."""
+        m = self.model
+        if cam_intrinsic.dim() == 2:
+            cam_intrinsic = cam_intrinsic.unsqueeze(0).expand(img.shape[0], -1, -1)
+        max_pcd = getattr(self, '_max_pcd_points', 16384)
+        if max_pcd > 0 and pc.shape[1] > max_pcd:
+            idx = torch.randperm(pc.shape[1], device=pc.device)[:max_pcd]
+            pc = pc[:, idx]
+        with torch.cuda.amp.autocast(enabled=False):
+            result = m._core_forward(
+                img.float(), pc.float(),
+                init_T_to_camera.float(), cam_intrinsic.float(),
+                rocr_detach=True,
+            )
+        rot_q = result['rotation']
+        from losses.quat_tools import batch_quat2mat
+        T_pred = batch_quat2mat(rot_q)
+        with torch.cuda.amp.autocast(enabled=False):
+            T_gt_expected = torch.matmul(
+                torch.linalg.inv(T_pred.float()), init_T_to_camera.float())
+        T_gt_expected = T_gt_expected.clone()
+        T_gt_expected[:, :3, 3] = init_T_to_camera[:, :3, 3]
+        return T_gt_expected
+
+    def _compose_gt_T(self, translation, rotation, init_T_to_camera):
+        """Compose predicted correction into LiDAR->Camera GT transform."""
         from losses.quat_tools import batch_quat2mat, batch_tvector2mat
         T_pred = batch_tvector2mat(translation)
         R_pred = batch_quat2mat(rotation)
@@ -126,6 +200,47 @@ class BEVCalibInference(nn.Module):
             T_gt_expected[:, :3, 3] = init_T_to_camera[:, :3, 3]
 
         return T_gt_expected
+
+    def _forward_native_cross(self, img, pc, init_T_to_camera, cam_intrinsic):
+        """V36 native cross-attention inference path."""
+        m = self.model
+        B, _, img_h, img_w = img.shape
+        patch_size = 14
+
+        if cam_intrinsic.dim() == 4:
+            cam_intrinsic = cam_intrinsic.squeeze(1)
+
+        pad_h = (patch_size - img_h % patch_size) % patch_size
+        pad_w = (patch_size - img_w % patch_size) % patch_size
+        if pad_h > 0 or pad_w > 0:
+            img = F.pad(img, (0, pad_w, 0, pad_h), mode='reflect')
+        img_h_pad, img_w_pad = img.shape[2], img.shape[3]
+        feat_h = img_h_pad // patch_size
+        feat_w = img_w_pad // patch_size
+
+        backbone = m.dino_encoder.backbone
+        tokens = backbone(img)
+        if tokens.dim() == 3 and tokens.shape[1] == feat_h * feat_w + 1:
+            img_feat = tokens[:, 1:, :]
+        else:
+            img_feat = tokens[:, 1:, :]
+
+        rotation, translation = m.native_cross_head(
+            img_feat=img_feat,
+            pcd=pc,
+            T_init=init_T_to_camera,
+            cam_intrinsic=cam_intrinsic,
+            img_h=img_h_pad, img_w=img_w_pad,
+            feat_h=feat_h, feat_w=feat_w,
+            mask=None,
+        )
+        n_iter = getattr(m, 'native_cross_iter_steps', 0)
+        if n_iter > 0:
+            return m.native_cross_head.iterative_inference(
+                img_feat, pc, init_T_to_camera, cam_intrinsic,
+                img_h_pad, img_w_pad, feat_h, feat_w,
+                n_iters=n_iter, mask=None)
+        return self._compose_gt_T(translation, rotation, init_T_to_camera)
 
 
 class TemporalCalibrationAggregator:
@@ -678,6 +793,85 @@ def prepare_for_drinfer_export(wrapper, img_shape=(360, 640)):
     return wrapper
 
 
+def _detect_fusion_backend(state_dict, ckpt_args):
+    backend = ckpt_args.get('fusion_backend')
+    if backend:
+        return backend
+    if any(k.startswith('proj_branch.') for k in state_dict):
+        if any(k.startswith('match_head.') for k in state_dict):
+            return 'geo_match_proj'
+        if any(k.startswith('fusion_head.bev_head.') for k in state_dict):
+            return 'hybrid_triple'
+        return 'proj_only'
+    return 'bev'
+
+
+def _build_gmp_model_from_ckpt(ckpt, device, img_shape, rotation_only):
+    """Build GeoMatchProjCalib from checkpoint args (V40 GMP)."""
+    from hybrid_triple_calib import build_calib_model
+
+    ckpt_args = ckpt.get('args', {}) or {}
+    state = ckpt.get('model_state_dict', ckpt)
+
+    class _EvalArgs:
+        pass
+
+    eval_args = _EvalArgs()
+    for key, val in ckpt_args.items():
+        setattr(eval_args, key, val)
+    eval_args.fusion_backend = 'geo_match_proj'
+    eval_args.target_height = img_shape[0]
+    eval_args.target_width = img_shape[1]
+    if not hasattr(eval_args, 'axis_weights'):
+        eval_args.axis_weights = '1.0,1.0,1.0'
+    if not hasattr(eval_args, 'projfusion_image_hw'):
+        eval_args.projfusion_image_hw = [252, 448]
+    if not hasattr(eval_args, 'enable_axis_loss'):
+        eval_args.enable_axis_loss = 1
+    if not hasattr(eval_args, 'weight_axis_rotation'):
+        eval_args.weight_axis_rotation = 0.5
+    if not hasattr(eval_args, 'use_balanced_axis_loss'):
+        eval_args.use_balanced_axis_loss = 0
+    if not hasattr(eval_args, 'use_geodesic_loss'):
+        eval_args.use_geodesic_loss = 0
+    if not hasattr(eval_args, 'head_dropout'):
+        eval_args.head_dropout = 0.15
+    if not hasattr(eval_args, 'iterative_refine'):
+        eval_args.iterative_refine = 0
+    if not hasattr(eval_args, 'native_cross_extend_ratio'):
+        eval_args.native_cross_extend_ratio = 2.0
+    if not hasattr(eval_args, 'native_cross_pointgpt_max_depth'):
+        eval_args.native_cross_pointgpt_max_depth = 60.0
+    if not hasattr(eval_args, 'compose_mode'):
+        eval_args.compose_mode = 'match_then_refine'
+    if not hasattr(eval_args, 'correspondence_supervision'):
+        eval_args.correspondence_supervision = 1
+    if not hasattr(eval_args, 'match_valid_ratio_min'):
+        eval_args.match_valid_ratio_min = 0.3
+
+    print(f"[load] GMP model: proj_hw={eval_args.projfusion_image_hw}, "
+          f"iter={eval_args.iterative_refine}, "
+          f"match={getattr(eval_args, 'use_match_head', 0)}, "
+          f"corr={getattr(eval_args, 'use_local_correlation', 0)}")
+
+    model = build_calib_model(
+        eval_args, device, img_shape, rotation_only, is_main=True)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing:
+        print(f"[load] WARNING: missing keys ({len(missing)}): {missing[:5]}"
+              f"{'...' if len(missing) > 5 else ''}")
+    if unexpected:
+        loss_keys = [k for k in unexpected if 'loss_fn' in k]
+        non_loss = [k for k in unexpected if 'loss_fn' not in k]
+        if loss_keys:
+            print(f"[load] Skipped {len(loss_keys)} loss-only keys")
+        if non_loss:
+            print(f"[load] WARNING: unexpected keys ({len(non_loss)}): "
+                  f"{non_loss[:5]}{'...' if len(non_loss) > 5 else ''}")
+    model.eval()
+    return model
+
+
 def _adapt_proj_heads_to_checkpoint(model, state_dict, device):
     """Adapt ProjectionHead and SpconvToDenseBEV dimensions to match checkpoint.
 
@@ -753,28 +947,56 @@ def load_bevcalib_inference(
         wrapper: BEVCalibInference on the specified device
         epoch:   training epoch of the checkpoint
     """
-    from bev_calib import BEVCalib
-
     ckpt = torch.load(ckpt_path, map_location="cpu")
     state = ckpt.get("model_state_dict", ckpt)
     ckpt_args = ckpt.get('args', {})
-    if use_mlp_head is None:
-        use_mlp_head = _detect_use_mlp_head(state)
-        print(f"[load] Auto-detected use_mlp_head={use_mlp_head}")
+    fusion_backend = _detect_fusion_backend(state, ckpt_args)
 
     if rotation_only is None:
         if 'rotation_only' in ckpt:
             rotation_only = bool(ckpt['rotation_only'])
         elif 'optimize_translation' in ckpt:
             rotation_only = not ckpt['optimize_translation']
+        elif 'rotation_only' in ckpt_args:
+            rotation_only = bool(ckpt_args['rotation_only'])
         else:
-            ckpt_args_ro = ckpt.get('args', {})
-            if 'rotation_only' in ckpt_args_ro:
-                rotation_only = bool(ckpt_args_ro['rotation_only'])
-            else:
-                has_trans = any('translation_pred' in k for k in state.keys())
-                rotation_only = not has_trans
+            has_trans = any('translation_pred' in k for k in state.keys())
+            rotation_only = not has_trans
         print(f"[load] Auto-detected rotation_only={rotation_only}")
+
+    if fusion_backend == 'geo_match_proj':
+        model = _build_gmp_model_from_ckpt(
+            ckpt, device, img_shape, rotation_only)
+        epoch = ckpt.get("epoch", -1)
+        wrapper = BEVCalibInference(
+            model, max_attn_tokens=max_attn_tokens, is_gmp=True).to(device).eval()
+        return wrapper, epoch
+
+    if fusion_backend == 'cf_bev_r':
+        from hybrid_triple_calib import build_calib_model
+        class _Args:
+            pass
+        ea = _Args()
+        for k, v in ckpt_args.items():
+            setattr(ea, k, v)
+        ea.rotation_only = rotation_only
+        model = build_calib_model(ea, device, img_shape, rotation_only,
+                                  is_main=True, tprint=print)
+        _load_result = model.load_state_dict(state, strict=False)
+        if _load_result.missing_keys:
+            print(f"[load cf_bev_r] missing keys: {_load_result.missing_keys[:5]}...")
+        epoch = ckpt.get("epoch", -1)
+        wrapper = BEVCalibInference(
+            model, max_attn_tokens=max_attn_tokens, is_gmp=False).to(device).eval()
+        wrapper._max_pcd_points = ckpt_args.get('max_pcd_points', 16384)
+        print(f"[load] CF-BEV-R model loaded (epoch={epoch}, max_pcd={wrapper._max_pcd_points})")
+        return wrapper, epoch
+
+    from bev_calib import BEVCalib
+
+    if use_mlp_head is None:
+        use_mlp_head = _detect_use_mlp_head(state)
+        print(f"[load] Auto-detected use_mlp_head={use_mlp_head}")
 
     _intrinsic_input = ckpt_args.get('intrinsic_input', False)
     _fuser_type = ckpt_args.get('fuser_type', 'concat')
@@ -793,6 +1015,22 @@ def load_bevcalib_inference(
           f"{', intrinsic_input=True' if _intrinsic_input else ''}")
     _domain_adv = ckpt_args.get('domain_adversarial', False)
     _cam2bev = ckpt_args.get('cam2bev_mode', 'lss')
+    _correlation_fusion = ckpt_args.get('correlation_fusion', False)
+    _cross_correlation_fusion = ckpt_args.get('cross_correlation_fusion', False)
+    _explicit_tinit = bool(int(ckpt_args.get('explicit_tinit', 0)))
+    _iterative_refine = int(ckpt_args.get('iterative_refine', 0))
+    if _iterative_refine == 0 and any(k.startswith('iter_head.') for k in state):
+        _iterative_refine = 3
+        print("[load] Auto-detected iterative_refine=3 from iter_head weights in checkpoint")
+    if _cross_correlation_fusion:
+        _correlation_fusion = True
+        print(f"[load] Detected cross_correlation_fusion=True from checkpoint args")
+    elif _correlation_fusion:
+        print(f"[load] Detected correlation_fusion=True from checkpoint args")
+    if _explicit_tinit:
+        print(f"[load] Detected explicit_tinit=True from checkpoint args")
+    if _iterative_refine > 0:
+        print(f"[load] Detected iterative_refine={_iterative_refine} from checkpoint args")
     model = BEVCalib(
         deformable=deformable,
         bev_encoder=bev_encoder,
@@ -809,6 +1047,10 @@ def load_bevcalib_inference(
         backbone_variant=backbone_variant,
         domain_adversarial=_domain_adv,
         cam2bev_mode=_cam2bev,
+        correlation_fusion=_correlation_fusion,
+        cross_correlation_fusion=_cross_correlation_fusion,
+        explicit_tinit=_explicit_tinit,
+        iterative_refine=_iterative_refine,
     )
 
     _adapt_proj_heads_to_checkpoint(model, state, device)
