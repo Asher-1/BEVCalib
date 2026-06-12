@@ -533,6 +533,16 @@ while [[ $# -gt 0 ]]; do
             USE_GATED_INSTANCE_NORM="$2"; shift 2 ;;
         --gin_init_gate)
             GIN_INIT_GATE="$2"; shift 2 ;;
+        --gin_channels)
+            GIN_CHANNELS="$2"; shift 2 ;;
+        --pitch_vertical_bands)
+            PITCH_VERTICAL_BANDS="$2"; shift 2 ;;
+        --gin_gate_reg_target)
+            GIN_GATE_REG_TARGET="$2"; shift 2 ;;
+        --gin_gate_reg_weight)
+            GIN_GATE_REG_WEIGHT="$2"; shift 2 ;;
+        --multi_scale_perturb)
+            MULTI_SCALE_PERTURB="$2"; shift 2 ;;
         --correlation_fusion)
             CORRELATION_FUSION="$2"; shift 2 ;;
         --cross_correlation_fusion)
@@ -1336,6 +1346,11 @@ OPTIM_FLAGS=""
 [ -n "$ZERO_PERTURBATION_PROB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --zero_perturbation_prob $ZERO_PERTURBATION_PROB"
 [ -n "$USE_GATED_INSTANCE_NORM" ] && OPTIM_FLAGS="$OPTIM_FLAGS --use_gated_instance_norm $USE_GATED_INSTANCE_NORM"
 [ -n "$GIN_INIT_GATE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --gin_init_gate $GIN_INIT_GATE"
+[ -n "$GIN_CHANNELS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --gin_channels $GIN_CHANNELS"
+[ -n "$PITCH_VERTICAL_BANDS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --pitch_vertical_bands $PITCH_VERTICAL_BANDS"
+[ -n "$GIN_GATE_REG_TARGET" ] && OPTIM_FLAGS="$OPTIM_FLAGS --gin_gate_reg_target $GIN_GATE_REG_TARGET"
+[ -n "$GIN_GATE_REG_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --gin_gate_reg_weight $GIN_GATE_REG_WEIGHT"
+[ -n "$MULTI_SCALE_PERTURB" ] && OPTIM_FLAGS="$OPTIM_FLAGS --multi_scale_perturb $MULTI_SCALE_PERTURB"
 [ -n "$CORRELATION_FUSION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --correlation_fusion $CORRELATION_FUSION"
 [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
 [ -n "$EXPLICIT_TINIT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --explicit_tinit $EXPLICIT_TINIT"

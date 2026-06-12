@@ -90,9 +90,11 @@ class PoseQueryDecoder(nn.Module):
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
         use_magnitude_head: bool = False,
+        pool_mode: str = "mean",
     ):
         super().__init__()
         self.use_magnitude_head = use_magnitude_head
+        self.pool_mode = pool_mode
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
@@ -105,6 +107,13 @@ class PoseQueryDecoder(nn.Module):
             layer_norm_eps=1e-5,
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+
+        if pool_mode == "attention":
+            self.attn_pool = nn.Sequential(
+                nn.Linear(d_model, d_model // 4),
+                nn.Tanh(),
+                nn.Linear(d_model // 4, 1),
+            )
 
         mid_dim = d_model // 2
         self.quat_head = nn.Sequential(
@@ -147,7 +156,12 @@ class PoseQueryDecoder(nn.Module):
             If use_magnitude_head=True:  tuple of (delta_q (B,4), mag_pred (B,1)).
         """
         decoded = self.decoder(tgt=pose_queries, memory=memory)
-        pooled = decoded.mean(dim=1)
+        if self.pool_mode == "attention":
+            attn_logits = self.attn_pool(decoded).squeeze(-1)
+            attn_weights = F.softmax(attn_logits, dim=1).unsqueeze(-1)
+            pooled = (decoded * attn_weights).sum(dim=1)
+        else:
+            pooled = decoded.mean(dim=1)
         delta_q = self.quat_head(pooled)
         delta_q = F.normalize(delta_q, dim=-1)
 
@@ -183,6 +197,7 @@ class CorrTransformerHead(nn.Module):
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
         use_magnitude_head: bool = False,
+        pool_mode: str = "mean",
     ):
         super().__init__()
         self.corr_encoder = SwinCorrEncoder(
@@ -199,6 +214,7 @@ class CorrTransformerHead(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             use_magnitude_head=use_magnitude_head,
+            pool_mode=pool_mode,
         )
 
     def forward(

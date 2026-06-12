@@ -447,6 +447,16 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         elif 'fusion_head.bev_head.0.weight' in state_dict and 'fusion_head.proj_head.0.weight' in state_dict:
             ckpt_args['fusion_variant'] = 'residual'
 
+    # V53 DP-Head / ADIR auto-detect from state_dict keys
+    if any(k.startswith('dp_head.') for k in state_dict):
+        if not ckpt_args.get('use_dp_head'):
+            ckpt_args['use_dp_head'] = 1
+            _log("   [auto-detect] use_dp_head=1 (found dp_head in state_dict)")
+    if any(k.startswith('adir_refiner.') for k in state_dict):
+        if not ckpt_args.get('use_adir'):
+            ckpt_args['use_adir'] = 1
+            _log("   [auto-detect] use_adir=1 (found adir_refiner in state_dict)")
+
     for param_name, detect_key in _AUTO_DETECT_KEYS.items():
         if detect_key in state_dict:
             if param_name == 'native_cross_pointgpt':
@@ -622,6 +632,33 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
     return resolved
 
 
+def _infer_pitch_vertical_bands_from_ckpt(ckpt_args, state_dict, quiet=False):
+    """Infer pitch_vertical_bands when older checkpoints omit it in args.
+
+    FrontViewPitchBranch img_encoder input dim = cf_feat_dim * bands (bands>1)
+    or cf_feat_dim (bands==1). Default build uses bands=3, which breaks
+    checkpoints trained with bands=1 (common for v45c/v47).
+    """
+    _log = (lambda *a: None) if quiet else (lambda *a: print(*a))
+    if ckpt_args.get('pitch_vertical_bands') is not None:
+        return ckpt_args
+
+    pitch_key = 'pitch_branch.img_encoder.0.weight'
+    if pitch_key not in state_dict:
+        return ckpt_args
+
+    feat_dim = int(ckpt_args.get('cf_feat_dim', 256) or 256)
+    in_dim = int(state_dict[pitch_key].shape[1])
+    if feat_dim <= 0 or in_dim < feat_dim or in_dim % feat_dim != 0:
+        return ckpt_args
+
+    inferred = max(1, in_dim // feat_dim)
+    ckpt_args['pitch_vertical_bands'] = inferred
+    _log(f"   [auto-detect] pitch_vertical_bands={inferred} "
+         f"(from {pitch_key} in_dim={in_dim}, cf_feat_dim={feat_dim})")
+    return ckpt_args
+
+
 def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False):
     """Build BEVCalib / HTCN model from checkpoint with auto-detected params.
 
@@ -629,6 +666,10 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
     """
     state_dict = checkpoint['model_state_dict']
     ckpt_args = checkpoint.get('args', {})
+    cli_pvb = getattr(args, 'pitch_vertical_bands', None)
+    if cli_pvb is not None:
+        ckpt_args['pitch_vertical_bands'] = int(cli_pvb)
+    ckpt_args = _infer_pitch_vertical_bands_from_ckpt(ckpt_args, state_dict, quiet=quiet)
     p = _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=quiet)
 
     img_shape = (args.target_height, args.target_width)
@@ -654,6 +695,12 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
             'cf_decoder_layers', 'use_rocr', 'rocr_dropout', 'rocr_center_bias',
             'rocr_detach_epochs', 'corr_alignment_weight', 'corr_alignment_warmup',
             'corr_window_mode', 'use_pitch_branch', 'pitch_aux_weight',
+            'use_pitch_fusion', 'use_dla', 'use_instance_norm',
+            'use_gated_instance_norm', 'gin_init_gate', 'gin_channels',
+            'gin_gate_reg_target', 'pitch_vertical_bands',
+            'use_magnitude_head', 'decoder_pool_mode',
+            'use_dp_head', 'route_loss_weight', 'zero_drift_loss_weight',
+            'use_adir', 'adir_steps', 'adir_max_step_deg',
         ):
             if gmp_key in ckpt_args and not hasattr(eval_args, gmp_key):
                 setattr(eval_args, gmp_key, ckpt_args[gmp_key])
@@ -880,6 +927,25 @@ def evaluate_checkpoint(args):
         print(f"   DataParallel: {_num_gpus} GPUs, batch_size {_orig_bs}→{args.batch_size}")
 
     print(f"   ✓ 模型加载完成")
+
+    model_recovery = None
+    _dp_model_recovery = None
+    if getattr(args, 'deploy_gate', False) and getattr(args, 'ckpt_path_recovery', None):
+        print(f"\n2b. 加载 Recovery checkpoint (deploy gate)...")
+        print(f"   {args.ckpt_path_recovery}")
+        ckpt_rec = torch.load(args.ckpt_path_recovery, map_location=device)
+        model_recovery, _, _ = _build_model_from_ckpt(
+            args, ckpt_rec, device, rotation_only)
+        if _num_gpus > 1 and getattr(args, 'data_parallel', False):
+            class _EvalDPWrapperRec(torch.nn.Module):
+                def __init__(self, inner):
+                    super().__init__()
+                    self.inner = inner
+                def forward(self, *a, **kw):
+                    T_pred, _, _ = self.inner(*a, **kw)
+                    return T_pred
+            _dp_model_recovery = torch.nn.DataParallel(_EvalDPWrapperRec(model_recovery))
+        print(f"   ✓ Recovery 模型加载完成 (gate_deg={getattr(args, 'deploy_gate_deg', 1.5)}°)")
     
     # 加载数据集
     print(f"\n3. 加载数据集...")
@@ -1316,8 +1382,15 @@ def evaluate_checkpoint(args):
                 _eval_idx_to_seq=_eval_idx_to_seq,
                 seq_boundaries=seq_boundaries,
                 use_dp=(_dp_model is not None),
+                model_recovery=(
+                    model_recovery if _dp_model_recovery is None else _dp_model_recovery
+                ) if getattr(args, 'deploy_gate', False) else None,
+                deploy_gate_routing=getattr(args, 'deploy_gate', False),
             )
-            print(f"   泛化诊断完成, 结果保存至: {eval_dir}/generalization_diagnostics.json")
+            _gdiag_out = ("generalization_diagnostics_gate.json"
+                          if getattr(args, 'deploy_gate', False) and model_recovery is not None
+                          else "generalization_diagnostics.json")
+            print(f"   泛化诊断完成, 结果保存至: {eval_dir}/{_gdiag_out}")
         except Exception as _gdiag_err:
             print(f"   [WARN] 泛化诊断失败: {_gdiag_err}")
             import traceback
@@ -1338,7 +1411,8 @@ def evaluate_checkpoint(args):
 
 def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                                      rotation_only, _eval_idx_to_seq,
-                                     seq_boundaries, use_dp=False):
+                                     seq_boundaries, use_dp=False,
+                                     model_recovery=None, deploy_gate_routing=False):
     """Run comprehensive generalization diagnostic tests and save composite results.
 
     Tests:
@@ -1347,10 +1421,18 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
       3. Per-axis Shortcut: fixed inject on each axis independently (R, P, Y)
       4. Multi-magnitude: inject at 0.5°, 1°, 2° to test correction linearity
 
+    When deploy_gate_routing=True and model_recovery is set:
+      - Zero-Drift → primary model (MEDW / 小扰动路径)
+      - All inject / shortcut / multi-mag tests → model_recovery (Recovery 路径)
+
     Also generates point cloud projection visualization for key diagnostic samples.
 
     Returns dict with all metrics + composite GS_medw (MEDW-aggregated score).
     """
+    def _pick_model(for_inject=False):
+        if deploy_gate_routing and model_recovery is not None and for_inject:
+            return model_recovery
+        return model
     inject_deg = getattr(args, 'gdiag_inject_deg', 2.0)
     max_batches = getattr(args, 'gdiag_max_batches', 0) or args.max_batches
     if max_batches <= 0:
@@ -1451,18 +1533,18 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         }
 
     def _run_single_pass(angle_range=0.0, fixed_inject_rpy=None, use_identity=False,
-                         label="", seed=42, save_vis_samples=0):
-        """Run one forward pass over cached batches with given perturbation settings.
+                         label="", seed=42, save_vis_samples=0, for_inject=False):
+        """Run a single forward pass over cached batches with given perturbation settings.
 
         Collects per-frame T_pred grouped by sequence, then uses MEDW (robust
         median in axis-angle space) to aggregate per-sequence before computing
-        errors against GT. This matches the real deployment pipeline where
-        multi-frame aggregation is always used for calibration.
+        errors against GT.
 
         fixed_inject_rpy: RPY perturbation in LiDAR frame (X=fwd/Roll, Y=left/Pitch,
         Z=up/Yaw). Applied via RIGHT-multiply so that the resulting error decomposes
         correctly in the LiDAR RPY convention used by evaluate_sensor_extrinsic.
         """
+        active_model = _pick_model(for_inject=for_inject)
         np.random.seed(seed)
         torch.manual_seed(seed)
         seq_preds = {}
@@ -1494,14 +1576,15 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                         per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
                     )
 
+                original_init_T_np = init_T_np.copy()
                 init_T_t = torch.from_numpy(init_T_np.astype(np.float32)).float().to(device)
 
                 if use_dp:
-                    T_pred = model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
+                    T_pred = active_model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
                                    init_T_t, cb['post_T'], cb['K'],
                                    masks=cb['masks_t'], out_init_loss=False)
                 else:
-                    T_pred, _, _ = model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
+                    T_pred, _, _ = active_model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
                                          init_T_t, cb['post_T'], cb['K'],
                                          masks=cb['masks'], out_init_loss=False)
                 T_pred_np = T_pred.detach().cpu().numpy()
@@ -1512,7 +1595,7 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                     seq_preds.setdefault(seq_id, []).append(T_pred_np[i])
                     seq_gts.setdefault(seq_id, []).append(gt_T_np[i])
                     if fixed_inject_rpy is not None:
-                        seq_inits.setdefault(seq_id, []).append(init_T_np[i])
+                        seq_inits.setdefault(seq_id, []).append(original_init_T_np[i])
 
                     if save_vis_samples > 0 and vis_saved < save_vis_samples and vis_interval > 0 and batch_idx % vis_interval == 0 and i == 0:
                         try:
@@ -1588,7 +1671,8 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
     print(f"\n   [1/3] Zero-Drift test (init = GT, no perturbation)...")
     t0 = time.time()
     results['zero_drift'] = _run_single_pass(
-        use_identity=True, label="zero-drift", seed=42, save_vis_samples=3)
+        use_identity=True, label="zero-drift", seed=42, save_vis_samples=3,
+        for_inject=False)
     print(f"   Zero-drift: rot_mean={results['zero_drift']['rot_mean']:.4f}° "
           f"max_rpy={results['zero_drift']['max_rpy']:.4f}° "
           f"({time.time()-t0:.1f}s)")
@@ -1598,7 +1682,8 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
     t0 = time.time()
     results['fixed_inject'] = _run_single_pass(
         fixed_inject_rpy=[inject_deg, inject_deg, inject_deg],
-        label="inject-all", seed=42, save_vis_samples=3)
+        label="inject-all", seed=42, save_vis_samples=3,
+        for_inject=True)
     inj = results['fixed_inject'].get('inject', {})
     print(f"   Fixed-inject: residual={inj.get('mean_residual', -1):.4f}° "
           f"recovery={inj.get('mean_recovery_pct', -1):.1f}% "
@@ -1664,13 +1749,14 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                 stacked_init_np = np.concatenate(all_init_T, axis=0)
                 stacked_init_t = torch.from_numpy(stacked_init_np).float().to(device)
 
+                batched_model = _pick_model(for_inject=True)
                 try:
                     if use_dp:
-                        T_pred_all = model(stacked_imgs, stacked_pcs, stacked_gt,
+                        T_pred_all = batched_model(stacked_imgs, stacked_pcs, stacked_gt,
                                            stacked_init_t, stacked_post, stacked_K,
                                            masks=stacked_masks, out_init_loss=False)
                     else:
-                        T_pred_all, _, _ = model(stacked_imgs, stacked_pcs, stacked_gt,
+                        T_pred_all, _, _ = batched_model(stacked_imgs, stacked_pcs, stacked_gt,
                                                  stacked_init_t, stacked_post, stacked_K,
                                                  masks=stacked_masks_raw, out_init_loss=False)
                 except RuntimeError as _oom_e:
@@ -2080,6 +2166,7 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         pg = per_axis_genuine[axis]
         print(f"     {axis:5s}: raw={pg['raw_recovery_pct']:.1f}% genuine={pg['genuine_recovery_pct']:.1f}% shortcut={pg['shortcut_proportion_pct']:.1f}%")
     print(f"   Shortcut Risk: {worst_risk} (R:{shortcut_risk_detail['roll']} P:{shortcut_risk_detail['pitch']} Y:{shortcut_risk_detail['yaw']})")
+
     for axis in ['roll', 'pitch', 'yaw']:
         cl = cross_leakage[axis]
         print(f"     Cross-leak {axis:5s}: mean={cl['mean_leakage_deg']:.4f}° max={cl['max_leakage_deg']:.4f}°")
@@ -2140,9 +2227,28 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
     except Exception as _chart_err:
         print(f"   [WARN] Chart generation failed: {_chart_err}")
 
-    out_path = os.path.join(eval_dir, "generalization_diagnostics.json")
+    if deploy_gate_routing and model_recovery is not None:
+        results['deploy_gate'] = {
+            'enabled': True,
+            'gate_deg': getattr(args, 'deploy_gate_deg', 1.5),
+            'routing': {
+                'zero_drift': 'primary',
+                'inject_tests': 'recovery',
+            },
+            'ckpt_primary': getattr(args, 'ckpt_path', None),
+            'ckpt_recovery': getattr(args, 'ckpt_path_recovery', None),
+        }
+
+    out_name = ("generalization_diagnostics_gate.json"
+                if deploy_gate_routing and model_recovery is not None
+                else "generalization_diagnostics.json")
+    out_path = os.path.join(eval_dir, out_name)
     with open(out_path, 'w') as f:
         json.dump(results, f, indent=2)
+    if out_name != "generalization_diagnostics.json":
+        legacy_path = os.path.join(eval_dir, "generalization_diagnostics.json")
+        with open(legacy_path, 'w') as f:
+            json.dump(results, f, indent=2)
 
     return results
 
@@ -4478,6 +4584,14 @@ def main():
                        help="V36 native_cross: iterative_inference steps at eval (0=single, 3=recommended)")
     parser.add_argument("--exclude_seqs", type=str, default=None,
                        help="逗号分隔的序列ID列表，评估时跳过这些序列 (例如: seq07,seq12)")
+    parser.add_argument("--pitch_vertical_bands", type=int, default=None,
+                       help="FrontViewPitchBranch 垂直分带数 (None=从checkpoint自动推断)")
+    parser.add_argument("--deploy_gate", action='store_true', default=False,
+                       help="双 ckpt 门控 gdiag: ZD→primary, Inject→recovery")
+    parser.add_argument("--ckpt_path_recovery", type=str, default=None,
+                       help="Recovery ckpt path for --deploy_gate inject routing")
+    parser.add_argument("--deploy_gate_deg", type=float, default=1.5,
+                       help="Deploy gate threshold in degrees (default: 1.5)")
 
     args = parser.parse_args()
 

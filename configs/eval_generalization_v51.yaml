@@ -1,0 +1,99 @@
+# V51 泛化评估配置
+#
+# 主评估: v51a 双目标 loss (zero_drift + jacobian)
+# 对照: v50a / v49b / v45c-S1
+#
+# 用法:
+#   bash run_v51_final_eval.sh
+#   bash run_v51_final_eval.sh --report-only
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v51"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v51_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 12
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+
+  # ================================================================
+  #  V51a 双目标 loss (Phase A 主实验)
+  # ================================================================
+
+  - label: "v51a-dual-loss-full-best-dual"
+    dir_name: "model_small_5deg_v51a_dual_loss_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V51a: zero_drift+jacobian loss, best-dual @ ep41 MEDW=0.024°"
+    pitch_vertical_bands: 5
+
+  - label: "v51a-dual-loss-full-best-val"
+    dir_name: "model_small_5deg_v51a_dual_loss_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V51a: zero_drift+jacobian loss best-val"
+    pitch_vertical_bands: 5
+
+  - label: "v51a-dual-loss-full-ep150"
+    dir_name: "model_small_5deg_v51a_dual_loss_S1_full"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V51a: final epoch 150 checkpoint"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  对照组 (v50 / v49 / v45)
+  # ================================================================
+
+  - label: "v50a-optuna-no-cons-full-best-dual"
+    dir_name: "model_small_5deg_v50a_optuna_no_cons_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50a: 直接前序 (无 dual loss)"
+    pitch_vertical_bands: 5
+
+  - label: "v49b-no-cons-best-dual"
+    dir_name: "model_small_5deg_v49b_no_cons_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V49b: MEDW400 部署最优对照"
+    pitch_vertical_bands: 3
+
+  - label: "v45c-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1: Genuine Recovery 最高对照"
+    pitch_vertical_bands: 1

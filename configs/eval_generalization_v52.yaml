@@ -1,0 +1,266 @@
+# V52 全量泛化评估配置 (Phase A + Phase 3)
+#
+# Phase A: v52a / v52b
+# Phase 3: v52ab / v52a-S1-v2 / v52c-multimag
+# 对照: v51a / v50a / v49b / v45c-S1
+#
+# 用法:
+#   bash run_v52_final_eval.sh
+#   bash run_v52_final_eval.sh --report-only
+#   bash run_v52_final_eval.sh --precheck-only
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v52_all"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v52_generalization_all"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+
+  # ================================================================
+  #  V52a Stage 2 — 部署主候选 (S1→S2 链式训练产出)
+  # ================================================================
+
+  - label: "v52a-S2-full-best-val"
+    dir_name: "model_small_5deg_v52a_S2_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52a-S2: ZD ramp + jac guard, val最优 (部署 MEDW 优先)"
+    pitch_vertical_bands: 5
+
+  - label: "v52a-S2-full-best-jacobian"
+    dir_name: "model_small_5deg_v52a_S2_full"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52a-S2: Recovery 护栏最优 (Genuine Rec 优先)"
+    pitch_vertical_bands: 5
+
+  - label: "v52a-S2-full-best-dual"
+    dir_name: "model_small_5deg_v52a_S2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_jacobian.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52a-S2: dual gate (MEDW+Jacobian 联合)"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  V52a Stage 1 — Recovery 基线 (无 ZD 微调)
+  # ================================================================
+
+  - label: "v52a-S1-full-best-val"
+    dir_name: "model_small_5deg_v52a_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52a-S1: Recovery base only (100ep, 无 ZD)"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  V52b — inject_recovery 单阶段
+  # ================================================================
+
+  - label: "v52b-full-best-val"
+    dir_name: "model_small_5deg_v52b_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52b: inject_recovery loss, val最优"
+    pitch_vertical_bands: 5
+
+  - label: "v52b-full-best-jacobian"
+    dir_name: "model_small_5deg_v52b_full"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52b: Jacobian 最优 ckpt"
+    pitch_vertical_bands: 5
+
+  - label: "v52b-full-best-dual"
+    dir_name: "model_small_5deg_v52b_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_jacobian.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52b: dual gate"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  V52ab Phase 3 — S1(inject+jac) → S2(轻 ZD)
+  # ================================================================
+
+  - label: "v52ab-S1-full-best-val"
+    dir_name: "model_small_5deg_v52ab_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52ab-S1: v52a-S1 + inject(0.4)+jac, Phase3"
+    pitch_vertical_bands: 5
+
+  - label: "v52ab-S2-full-best-val"
+    dir_name: "model_small_5deg_v52ab_S2_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52ab-S2: 轻 ZD ramp 0.2→0.5, 部署 MEDW 优先"
+    pitch_vertical_bands: 5
+
+  - label: "v52ab-S2-full-best-jacobian"
+    dir_name: "model_small_5deg_v52ab_S2_full"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52ab-S2: Recovery 护栏 (jac≥0.80 早停)"
+    pitch_vertical_bands: 5
+
+  - label: "v52ab-S2-full-best-dual"
+    dir_name: "model_small_5deg_v52ab_S2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_jacobian.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52ab-S2: dual gate"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  V52a-S1-v2 — v51a pretrain + jacobian Recovery
+  # ================================================================
+
+  - label: "v52a-S1-v2-full-best-val"
+    dir_name: "model_small_5deg_v52a_S1_v2_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_jacobian.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52a-S1-v2: v51a MEDW锚点 + jac Recovery"
+    pitch_vertical_bands: 5
+
+  - label: "v52a-S1-v2-full-best-dual"
+    dir_name: "model_small_5deg_v52a_S1_v2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_jacobian.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52a-S1-v2: dual gate"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  V52c — multi-mag inject + 小角度采样加权
+  # ================================================================
+
+  - label: "v52c-multimag-full-best-val"
+    dir_name: "model_small_5deg_v52c_multimag_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52c: inject(0.5) + multi_scale 0.35/0.35/0.30"
+    pitch_vertical_bands: 5
+
+  - label: "v52c-multimag-full-best-jacobian"
+    dir_name: "model_small_5deg_v52c_multimag_full"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52c: Jacobian 最优 ckpt"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  历史对照 (v51 / v50 / v49 / v45)
+  # ================================================================
+
+  - label: "v51a-dual-loss-full-best-dual"
+    dir_name: "model_small_5deg_v51a_dual_loss_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V51a: MEDW400=0.188° 对照 (Recovery 29%)"
+    pitch_vertical_bands: 5
+
+  - label: "v50a-optuna-no-cons-full-best-dual"
+    dir_name: "model_small_5deg_v50a_optuna_no_cons_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50a: Recovery 57% / MEDW400=0.263° 对照"
+    pitch_vertical_bands: 5
+
+  - label: "v49b-no-cons-best-dual"
+    dir_name: "model_small_5deg_v49b_no_cons_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V49b: MEDW400=0.196° 对照"
+    pitch_vertical_bands: 3
+
+  - label: "v45c-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c: Genuine Recovery 75% 对照"
+    pitch_vertical_bands: 1

@@ -44,6 +44,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S1 baseline (no IN, MEDW=0.058°, bag=0.369°)"
+    pitch_vertical_bands: 1
 
   - label: "v44-S1-best-val"
     dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
@@ -53,6 +54,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S1 best-val baseline"
+    pitch_vertical_bands: 1
 
   # ===== V45a Quick: No IN, stronger aug+reg =====
   - label: "v45a-S1-quick-best-dual"
@@ -64,6 +66,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45a S1 no-IN ablation (5° + stronger aug)"
+    pitch_vertical_bands: 1
 
   - label: "v45a-S1-quick-best-val"
     dir_name: "model_small_5deg_v45a_cf_bev_r_S1_quick"
@@ -73,6 +76,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45a S1 no-IN best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45a-S2-quick-best-dual"
     dir_name: "model_small_3deg_v45a_cf_bev_r_S2_quick"
@@ -83,6 +87,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45a S2 no-IN (3° fine-tune)"
+    pitch_vertical_bands: 1
 
   - label: "v45a-S2-quick-best-val"
     dir_name: "model_small_3deg_v45a_cf_bev_r_S2_quick"
@@ -92,6 +97,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45a S2 no-IN best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45a-S3-quick-best-dual"
     dir_name: "model_small_1deg_v45a_cf_bev_r_S3_quick"
@@ -102,6 +108,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45a S3 no-IN (1° precision)"
+    pitch_vertical_bands: 1
 
   - label: "v45a-S3-quick-best-val"
     dir_name: "model_small_1deg_v45a_cf_bev_r_S3_quick"
@@ -111,6 +118,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45a S3 no-IN best-val"
+    pitch_vertical_bands: 1
 
   # ===== V45b Quick: S1 no-IN, S2/S3 with IN =====
   - label: "v45b-S1-quick-best-dual"
@@ -122,6 +130,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S1 no-IN (shared with V45a S1)"
+    pitch_vertical_bands: 1
 
   - label: "v45b-S1-quick-best-val"
     dir_name: "model_small_5deg_v45b_cf_bev_r_S1_quick"
@@ -131,6 +140,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S1 best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45b-S2-quick-best-dual"
     dir_name: "model_small_3deg_v45b_cf_bev_r_S2_quick"
@@ -141,6 +151,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S2 with-IN (3° fine-tune + IN divergence from V45a)"
+    pitch_vertical_bands: 1
 
   - label: "v45b-S2-quick-best-val"
     dir_name: "model_small_3deg_v45b_cf_bev_r_S2_quick"
@@ -150,6 +161,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S2 with-IN best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45b-S3-quick-best-dual"
     dir_name: "model_small_1deg_v45b_cf_bev_r_S3_quick"
@@ -160,6 +172,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S3 with-IN (1° precision)"
+    pitch_vertical_bands: 1
 
   - label: "v45b-S3-quick-best-val"
     dir_name: "model_small_1deg_v45b_cf_bev_r_S3_quick"
@@ -169,6 +182,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S3 with-IN best-val"
+    pitch_vertical_bands: 1
 
   # ===== V45c Quick: V45b + cf_n_groups=256 =====
   - label: "v45c-S1-quick-best-dual"
@@ -180,6 +194,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S1 n_groups=256 (5° + double spatial res)"
+    pitch_vertical_bands: 1
 
   - label: "v45c-S1-quick-best-val"
     dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
@@ -189,6 +204,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S1 n_groups=256 best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45c-S2-quick-best-dual"
     dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
@@ -199,6 +215,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S2 n_groups=256 + IN (3° fine-tune)"
+    pitch_vertical_bands: 1
 
   - label: "v45c-S2-quick-best-val"
     dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
@@ -208,6 +225,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S2 n_groups=256 + IN best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45c-S3-quick-best-dual"
     dir_name: "model_small_1deg_v45c_cf_bev_r_S3_quick"
@@ -218,6 +236,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S3 n_groups=256 + IN (1° precision)"
+    pitch_vertical_bands: 1
 
   - label: "v45c-S3-quick-best-val"
     dir_name: "model_small_1deg_v45c_cf_bev_r_S3_quick"
@@ -227,6 +246,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S3 n_groups=256 + IN best-val"
+    pitch_vertical_bands: 1
 
   # ===== V45c S1 (non-quick, longer training) =====
   - label: "v45c-S1-best-dual"
@@ -238,6 +258,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S1 n_groups=256 (150ep, longer training)"
+    pitch_vertical_bands: 1
 
   - label: "v45c-S1-best-val"
     dir_name: "model_small_5deg_v45c_cf_bev_r_S1"
@@ -247,6 +268,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45c S1 n_groups=256 (150ep) best-val"
+    pitch_vertical_bands: 1
 
   # ===== V45 GIN Full: Long-training Gated Instance Norm =====
   - label: "v45-gin-S1-full-best-dual"
@@ -258,6 +280,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S1 Full 400ep (MEDW=0.037°)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S1-full-best-val"
     dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_full"
@@ -267,6 +290,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S1 Full 400ep best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S2-full-best-dual"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
@@ -277,6 +301,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Full 200ep (MEDW=0.027°, 全局最优S2)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S2-full-best-val"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
@@ -286,6 +311,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Full 200ep best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-full-best-dual"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -296,6 +322,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full 150ep best-dual (MEDW=0.026°, Jac=0.987)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-full-best-val"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -305,6 +332,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full 150ep best-val (ValRot=0.10°)"
+    pitch_vertical_bands: 1
 
   # ===== V45 GIN Quick: Gated Instance Norm =====
   - label: "v45-gin-S1-quick-best-dual"
@@ -316,6 +344,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S1 Quick dual-gate best (5° + GIN)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S1-quick-best-val"
     dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_quick"
@@ -325,6 +354,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S1 Quick best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S2-quick-best-dual"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_quick"
@@ -335,6 +365,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Quick dual-gate best (3° fine-tune + GIN)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S2-quick-best-val"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_quick"
@@ -344,6 +375,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Quick best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-quick-best-dual"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_quick"
@@ -354,6 +386,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Quick dual-gate best (1° precision + GIN)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-quick-best-val"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_quick"
@@ -363,3 +396,4 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Quick best-val"
+    pitch_vertical_bands: 1

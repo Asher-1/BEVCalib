@@ -41,6 +41,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S1 Full 400ep baseline (MEDW=0.037°)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S1-full-best-val"
     dir_name: "model_small_5deg_v45_gin_cf_bev_r_S1_full"
@@ -50,6 +51,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S1 Full baseline best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S2-full-best-dual"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
@@ -60,6 +62,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Full 200ep baseline (MEDW=0.027°)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S2-full-best-val"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
@@ -69,6 +72,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Full baseline best-val"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-full-best-dual"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -79,6 +83,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full baseline (MEDW=0.026°)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-full-best-val"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -88,6 +93,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full baseline best-val"
+    pitch_vertical_bands: 1
 
   # ===== Baseline: V46 Quick (v47方案的对照基线) =====
   - label: "v46-S1-quick-best-dual"
@@ -99,6 +105,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S1 Quick baseline (MEDW=0.048°)"
+    pitch_vertical_bands: 1
 
   - label: "v46-S1-quick-best-val"
     dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
@@ -108,6 +115,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S1 Quick baseline best-val"
+    pitch_vertical_bands: 1
 
   # ===== V47 Quick: 默认 n_groups=128 =====
   - label: "v47-S1-quick-best-dual"
@@ -119,6 +127,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S1 Quick n_groups=128 (MEDW=0.061°)"
+    pitch_vertical_bands: 1
 
   - label: "v47-S1-quick-best-val"
     dir_name: "model_small_5deg_v47_cf_bev_r_S1_quick"
@@ -128,6 +137,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S1 Quick n_groups=128 best-val"
+    pitch_vertical_bands: 1
 
   - label: "v47-S2-quick-best-dual"
     dir_name: "model_small_3deg_v47_cf_bev_r_S2_quick"
@@ -138,6 +148,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S2 Quick n_groups=128 (MEDW=0.043°)"
+    pitch_vertical_bands: 1
 
   - label: "v47-S2-quick-best-val"
     dir_name: "model_small_3deg_v47_cf_bev_r_S2_quick"
@@ -147,6 +158,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S2 Quick n_groups=128 best-val"
+    pitch_vertical_bands: 1
 
   # ===== V47-512g Quick: n_groups=512 =====
   - label: "v47-512g-S1-quick-best-dual"
@@ -158,6 +170,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S1 Quick n_groups=512 (MEDW=0.049°)"
+    pitch_vertical_bands: 1
 
   - label: "v47-512g-S1-quick-best-val"
     dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_quick"
@@ -167,6 +180,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S1 Quick n_groups=512 best-val"
+    pitch_vertical_bands: 1
 
   - label: "v47-512g-S2-quick-best-dual"
     dir_name: "model_small_3deg_v47_512g_cf_bev_r_S2_quick"
@@ -177,6 +191,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S2 Quick n_groups=512 (MEDW=0.038°)"
+    pitch_vertical_bands: 1
 
   - label: "v47-512g-S2-quick-best-val"
     dir_name: "model_small_3deg_v47_512g_cf_bev_r_S2_quick"
@@ -186,6 +201,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S2 Quick n_groups=512 best-val"
+    pitch_vertical_bands: 1
 
   # ===== V47-512g S1 Full: 长训练 =====
   - label: "v47-512g-S1-full-best-dual"
@@ -197,6 +213,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S1 Full n_groups=512 (longer training)"
+    pitch_vertical_bands: 1
 
   - label: "v47-512g-S1-full-best-val"
     dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_full"
@@ -206,3 +223,4 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V47 S1 Full n_groups=512 best-val"
+    pitch_vertical_bands: 1

@@ -254,16 +254,22 @@ class FrontViewPitchBranch(nn.Module):
     Both flows are fused via gated attention before final Pitch regression.
     """
 
-    def __init__(self, z_feat_dim, img_feat_dim=128, hidden_dim=128):
+    def __init__(self, z_feat_dim, img_feat_dim=128, hidden_dim=128,
+                 use_vertical_bands=False, n_vertical_bands=3):
         super().__init__()
+        self.use_vertical_bands = use_vertical_bands
+        self.n_vertical_bands = n_vertical_bands
+
         self.z_encoder = nn.Sequential(
             nn.Linear(z_feat_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(0.1),
         )
+
+        actual_img_dim = img_feat_dim * n_vertical_bands if use_vertical_bands else img_feat_dim
         self.img_encoder = nn.Sequential(
-            nn.Linear(img_feat_dim, hidden_dim),
+            nn.Linear(actual_img_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(0.1),
@@ -291,11 +297,43 @@ class FrontViewPitchBranch(nn.Module):
         return self.head(fused)
 
     @staticmethod
-    def compute_loss(pitch_pred, gt_T_to_camera):
-        R_gt = gt_T_to_camera[:, :3, :3].float()
-        sy = torch.sqrt(R_gt[:, 0, 0] ** 2 + R_gt[:, 1, 0] ** 2)
-        pitch_gt = torch.atan2(-R_gt[:, 2, 0], sy)
-        return F.smooth_l1_loss(pitch_pred.squeeze(-1), pitch_gt)
+    def compute_loss(pitch_pred, gt_T_to_camera, init_T_to_camera=None):
+        """Pitch aux loss: supervise pitch DELTA (perturbation), not absolute pitch.
+
+        When init_T is provided, target = pitch(R_init @ R_gt^T) which is the
+        pitch component of the perturbation the model needs to correct.
+        Falls back to absolute pitch supervision when init_T is None.
+        """
+        if init_T_to_camera is not None:
+            R_gt = gt_T_to_camera[:, :3, :3].float()
+            R_init = init_T_to_camera[:, :3, :3].float()
+            R_delta = R_init @ R_gt.transpose(1, 2)
+            sy = torch.sqrt(R_delta[:, 0, 0] ** 2 + R_delta[:, 1, 0] ** 2)
+            pitch_delta_gt = torch.atan2(-R_delta[:, 2, 0], sy)
+            return F.smooth_l1_loss(pitch_pred.squeeze(-1), pitch_delta_gt)
+        else:
+            R_gt = gt_T_to_camera[:, :3, :3].float()
+            sy = torch.sqrt(R_gt[:, 0, 0] ** 2 + R_gt[:, 1, 0] ** 2)
+            pitch_gt = torch.atan2(-R_gt[:, 2, 0], sy)
+            return F.smooth_l1_loss(pitch_pred.squeeze(-1), pitch_gt)
+
+    @staticmethod
+    def vertical_band_pool(F_rgb_flat, feat_h, feat_w, n_bands=3):
+        """Pool image features by vertical bands to preserve height structure.
+
+        Instead of global average pooling that destroys vertical information,
+        split the feature map into n_bands horizontal strips and pool each.
+        Returns (B, n_bands * D) preserving top/middle/bottom distinctions.
+        """
+        B, HW, D = F_rgb_flat.shape
+        F_2d = F_rgb_flat.view(B, feat_h, feat_w, D)
+        band_h = feat_h // n_bands
+        bands = []
+        for i in range(n_bands):
+            start = i * band_h
+            end = (i + 1) * band_h if i < n_bands - 1 else feat_h
+            bands.append(F_2d[:, start:end].mean(dim=(1, 2)))
+        return torch.cat(bands, dim=-1)
 
 
 class ContrastiveExtrinsicHead(nn.Module):

@@ -1,0 +1,49 @@
+# V49 Optuna Trial#32 单独泛化评估配置
+#
+# 用途: 补跑 v49_optuna_best_t32 泛化评估（不重新评估 v48_all 其他模型）
+# 输出目录与 v48_all 相同，便于 report_only 统一生成对比报告
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v49_optuna_t32.yaml --parallel 2 --eval_max_frames_per_seq 400 --generalization_diag
+#   python run_generalization_eval.py --config configs/eval_generalization_v48_all.yaml --report_only
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v48_all"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v48_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+
+  - label: "v49-optuna-t32-full-best-dual"
+    dir_name: "model_small_5deg_v49_optuna_best_t32_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V49 Optuna Trial#32 full (Epoch121 MEDW=0.0334°)"
+    pitch_vertical_bands: 5
+
+  - label: "v49-optuna-t32-full-best-val"
+    dir_name: "model_small_5deg_v49_optuna_best_t32_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V49 Optuna Trial#32 full best-val (Epoch41)"
+    pitch_vertical_bands: 5

@@ -597,10 +597,70 @@ while [[ $# -gt 0 ]]; do
             CONTINUOUS_NOISE_MAX_DEG="$2"; shift 2 ;;
         --zero_perturbation_prob)
             ZERO_PERTURBATION_PROB="$2"; shift 2 ;;
+        --zero_drift_loss_weight)
+            ZERO_DRIFT_LOSS_WEIGHT="$2"; shift 2 ;;
+        --zero_drift_loss_weight_start)
+            ZERO_DRIFT_LOSS_WEIGHT_START="$2"; shift 2 ;;
+        --zero_drift_loss_ramp_epochs)
+            ZERO_DRIFT_LOSS_RAMP_EPOCHS="$2"; shift 2 ;;
+        --zero_drift_loss_start_epoch)
+            ZERO_DRIFT_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --zero_drift_dedicated_ratio)
+            ZERO_DRIFT_DEDICATED_RATIO="$2"; shift 2 ;;
+        --enable_jacobian_gate_ckpt)
+            ENABLE_JACOBIAN_GATE_CKPT="$2"; shift 2 ;;
+        --jacobian_early_stop_min)
+            JACOBIAN_EARLY_STOP_MIN="$2"; shift 2 ;;
+        --jacobian_early_stop_patience)
+            JACOBIAN_EARLY_STOP_PATIENCE="$2"; shift 2 ;;
+        --inject_recovery_loss_weight)
+            INJECT_RECOVERY_LOSS_WEIGHT="$2"; shift 2 ;;
+        --inject_recovery_loss_start_epoch)
+            INJECT_RECOVERY_LOSS_START_EPOCH="$2"; shift 2 ;;
+        --inject_recovery_magnitude_deg)
+            INJECT_RECOVERY_MAGNITUDE_DEG="$2"; shift 2 ;;
+        --inject_recovery_dedicated_ratio)
+            INJECT_RECOVERY_DEDICATED_RATIO="$2"; shift 2 ;;
+        --use_mgda)
+            USE_MGDA="$2"; shift 2 ;;
+        --mgda_start_epoch)
+            MGDA_START_EPOCH="$2"; shift 2 ;;
+        --mgda_include_inject)
+            MGDA_INCLUDE_INJECT="$2"; shift 2 ;;
+        --use_dp_head)
+            USE_DP_HEAD="$2"; shift 2 ;;
+        --dp_gate_deg)
+            DP_GATE_DEG="$2"; shift 2 ;;
+        --route_loss_weight)
+            ROUTE_LOSS_WEIGHT="$2"; shift 2 ;;
+        --use_jacg)
+            USE_JACG="$2"; shift 2 ;;
+        --jacg_hidden_dim)
+            JACG_HIDDEN_DIM="$2"; shift 2 ;;
+        --bias_path_in_norm)
+            BIAS_PATH_IN_NORM="$2"; shift 2 ;;
+        --recovery_path_layer_norm)
+            RECOVERY_PATH_LAYER_NORM="$2"; shift 2 ;;
+        --use_adir)
+            USE_ADIR="$2"; shift 2 ;;
+        --adir_steps)
+            ADIR_STEPS="$2"; shift 2 ;;
+        --adir_max_step_deg)
+            ADIR_MAX_STEP_DEG="$2"; shift 2 ;;
         --use_gated_instance_norm)
             USE_GATED_INSTANCE_NORM="$2"; shift 2 ;;
         --gin_init_gate)
             GIN_INIT_GATE="$2"; shift 2 ;;
+        --gin_channels)
+            GIN_CHANNELS="$2"; shift 2 ;;
+        --pitch_vertical_bands)
+            PITCH_VERTICAL_BANDS="$2"; shift 2 ;;
+        --gin_gate_reg_target)
+            GIN_GATE_REG_TARGET="$2"; shift 2 ;;
+        --gin_gate_reg_weight)
+            GIN_GATE_REG_WEIGHT="$2"; shift 2 ;;
+        --multi_scale_perturb)
+            MULTI_SCALE_PERTURB="$2"; shift 2 ;;
         --correlation_fusion)
             CORRELATION_FUSION="$2"; shift 2 ;;
         --cross_correlation_fusion)
@@ -1363,8 +1423,38 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$CONTINUOUS_TINIT_NOISE" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_tinit_noise $CONTINUOUS_TINIT_NOISE"
     [ -n "$CONTINUOUS_NOISE_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_noise_max_deg $CONTINUOUS_NOISE_MAX_DEG"
     [ -n "$ZERO_PERTURBATION_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_perturbation_prob $ZERO_PERTURBATION_PROB"
+    [ -n "$ZERO_DRIFT_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_weight $ZERO_DRIFT_LOSS_WEIGHT"
+    [ -n "$ZERO_DRIFT_LOSS_WEIGHT_START" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_weight_start $ZERO_DRIFT_LOSS_WEIGHT_START"
+    [ -n "$ZERO_DRIFT_LOSS_RAMP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_ramp_epochs $ZERO_DRIFT_LOSS_RAMP_EPOCHS"
+    [ -n "$ZERO_DRIFT_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_start_epoch $ZERO_DRIFT_LOSS_START_EPOCH"
+    [ -n "$ZERO_DRIFT_DEDICATED_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_dedicated_ratio $ZERO_DRIFT_DEDICATED_RATIO"
+    [ -n "$ENABLE_JACOBIAN_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_jacobian_gate_ckpt $ENABLE_JACOBIAN_GATE_CKPT"
+    [ -n "$JACOBIAN_EARLY_STOP_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_early_stop_min $JACOBIAN_EARLY_STOP_MIN"
+    [ -n "$JACOBIAN_EARLY_STOP_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_early_stop_patience $JACOBIAN_EARLY_STOP_PATIENCE"
+    [ -n "$INJECT_RECOVERY_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_loss_weight $INJECT_RECOVERY_LOSS_WEIGHT"
+    [ -n "$INJECT_RECOVERY_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_loss_start_epoch $INJECT_RECOVERY_LOSS_START_EPOCH"
+    [ -n "$INJECT_RECOVERY_MAGNITUDE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_magnitude_deg $INJECT_RECOVERY_MAGNITUDE_DEG"
+    [ -n "$INJECT_RECOVERY_DEDICATED_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_dedicated_ratio $INJECT_RECOVERY_DEDICATED_RATIO"
+    [ -n "$USE_MGDA" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mgda $USE_MGDA"
+    [ -n "$MGDA_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_start_epoch $MGDA_START_EPOCH"
+    [ -n "$MGDA_INCLUDE_INJECT" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_include_inject $MGDA_INCLUDE_INJECT"
+    [ -n "$USE_DP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_dp_head $USE_DP_HEAD"
+    [ -n "$DP_GATE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --dp_gate_deg $DP_GATE_DEG"
+    [ -n "$ROUTE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_loss_weight $ROUTE_LOSS_WEIGHT"
+    [ -n "$USE_JACG" ] && OPTIM_ARGS="$OPTIM_ARGS --use_jacg $USE_JACG"
+    [ -n "$JACG_HIDDEN_DIM" ] && OPTIM_ARGS="$OPTIM_ARGS --jacg_hidden_dim $JACG_HIDDEN_DIM"
+    [ -n "$BIAS_PATH_IN_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --bias_path_in_norm $BIAS_PATH_IN_NORM"
+    [ -n "$RECOVERY_PATH_LAYER_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --recovery_path_layer_norm $RECOVERY_PATH_LAYER_NORM"
+    [ -n "$USE_ADIR" ] && OPTIM_ARGS="$OPTIM_ARGS --use_adir $USE_ADIR"
+    [ -n "$ADIR_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_steps $ADIR_STEPS"
+    [ -n "$ADIR_MAX_STEP_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_max_step_deg $ADIR_MAX_STEP_DEG"
     [ -n "$USE_GATED_INSTANCE_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --use_gated_instance_norm $USE_GATED_INSTANCE_NORM"
     [ -n "$GIN_INIT_GATE" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_init_gate $GIN_INIT_GATE"
+    [ -n "$GIN_CHANNELS" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_channels $GIN_CHANNELS"
+    [ -n "$PITCH_VERTICAL_BANDS" ] && OPTIM_ARGS="$OPTIM_ARGS --pitch_vertical_bands $PITCH_VERTICAL_BANDS"
+    [ -n "$GIN_GATE_REG_TARGET" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_gate_reg_target $GIN_GATE_REG_TARGET"
+    [ -n "$GIN_GATE_REG_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_gate_reg_weight $GIN_GATE_REG_WEIGHT"
+    [ -n "$MULTI_SCALE_PERTURB" ] && OPTIM_ARGS="$OPTIM_ARGS --multi_scale_perturb $MULTI_SCALE_PERTURB"
     [ -n "$CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --correlation_fusion $CORRELATION_FUSION"
     [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
     [ -n "$EXPLICIT_TINIT" ] && OPTIM_ARGS="$OPTIM_ARGS --explicit_tinit $EXPLICIT_TINIT"
@@ -1615,8 +1705,38 @@ else
     [ -n "$CONTINUOUS_TINIT_NOISE" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_tinit_noise $CONTINUOUS_TINIT_NOISE"
     [ -n "$CONTINUOUS_NOISE_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --continuous_noise_max_deg $CONTINUOUS_NOISE_MAX_DEG"
     [ -n "$ZERO_PERTURBATION_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_perturbation_prob $ZERO_PERTURBATION_PROB"
+    [ -n "$ZERO_DRIFT_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_weight $ZERO_DRIFT_LOSS_WEIGHT"
+    [ -n "$ZERO_DRIFT_LOSS_WEIGHT_START" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_weight_start $ZERO_DRIFT_LOSS_WEIGHT_START"
+    [ -n "$ZERO_DRIFT_LOSS_RAMP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_ramp_epochs $ZERO_DRIFT_LOSS_RAMP_EPOCHS"
+    [ -n "$ZERO_DRIFT_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_loss_start_epoch $ZERO_DRIFT_LOSS_START_EPOCH"
+    [ -n "$ZERO_DRIFT_DEDICATED_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --zero_drift_dedicated_ratio $ZERO_DRIFT_DEDICATED_RATIO"
+    [ -n "$ENABLE_JACOBIAN_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_jacobian_gate_ckpt $ENABLE_JACOBIAN_GATE_CKPT"
+    [ -n "$JACOBIAN_EARLY_STOP_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_early_stop_min $JACOBIAN_EARLY_STOP_MIN"
+    [ -n "$JACOBIAN_EARLY_STOP_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --jacobian_early_stop_patience $JACOBIAN_EARLY_STOP_PATIENCE"
+    [ -n "$INJECT_RECOVERY_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_loss_weight $INJECT_RECOVERY_LOSS_WEIGHT"
+    [ -n "$INJECT_RECOVERY_LOSS_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_loss_start_epoch $INJECT_RECOVERY_LOSS_START_EPOCH"
+    [ -n "$INJECT_RECOVERY_MAGNITUDE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_magnitude_deg $INJECT_RECOVERY_MAGNITUDE_DEG"
+    [ -n "$INJECT_RECOVERY_DEDICATED_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_dedicated_ratio $INJECT_RECOVERY_DEDICATED_RATIO"
+    [ -n "$USE_MGDA" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mgda $USE_MGDA"
+    [ -n "$MGDA_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_start_epoch $MGDA_START_EPOCH"
+    [ -n "$MGDA_INCLUDE_INJECT" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_include_inject $MGDA_INCLUDE_INJECT"
+    [ -n "$USE_DP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_dp_head $USE_DP_HEAD"
+    [ -n "$DP_GATE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --dp_gate_deg $DP_GATE_DEG"
+    [ -n "$ROUTE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_loss_weight $ROUTE_LOSS_WEIGHT"
+    [ -n "$USE_JACG" ] && OPTIM_ARGS="$OPTIM_ARGS --use_jacg $USE_JACG"
+    [ -n "$JACG_HIDDEN_DIM" ] && OPTIM_ARGS="$OPTIM_ARGS --jacg_hidden_dim $JACG_HIDDEN_DIM"
+    [ -n "$BIAS_PATH_IN_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --bias_path_in_norm $BIAS_PATH_IN_NORM"
+    [ -n "$RECOVERY_PATH_LAYER_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --recovery_path_layer_norm $RECOVERY_PATH_LAYER_NORM"
+    [ -n "$USE_ADIR" ] && OPTIM_ARGS="$OPTIM_ARGS --use_adir $USE_ADIR"
+    [ -n "$ADIR_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_steps $ADIR_STEPS"
+    [ -n "$ADIR_MAX_STEP_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_max_step_deg $ADIR_MAX_STEP_DEG"
     [ -n "$USE_GATED_INSTANCE_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --use_gated_instance_norm $USE_GATED_INSTANCE_NORM"
     [ -n "$GIN_INIT_GATE" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_init_gate $GIN_INIT_GATE"
+    [ -n "$GIN_CHANNELS" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_channels $GIN_CHANNELS"
+    [ -n "$PITCH_VERTICAL_BANDS" ] && OPTIM_ARGS="$OPTIM_ARGS --pitch_vertical_bands $PITCH_VERTICAL_BANDS"
+    [ -n "$GIN_GATE_REG_TARGET" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_gate_reg_target $GIN_GATE_REG_TARGET"
+    [ -n "$GIN_GATE_REG_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --gin_gate_reg_weight $GIN_GATE_REG_WEIGHT"
+    [ -n "$MULTI_SCALE_PERTURB" ] && OPTIM_ARGS="$OPTIM_ARGS --multi_scale_perturb $MULTI_SCALE_PERTURB"
     [ -n "$CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --correlation_fusion $CORRELATION_FUSION"
     [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
     [ -n "$EXPLICIT_TINIT" ] && OPTIM_ARGS="$OPTIM_ARGS --explicit_tinit $EXPLICIT_TINIT"

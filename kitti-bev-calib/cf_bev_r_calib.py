@@ -37,30 +37,75 @@ from losses.corr_alignment_loss import compute_projection_v42
 
 
 class GatedInstanceNorm(nn.Module):
-    """Gated Instance Normalization (V45).
+    """Gated Instance Normalization (V45) with optional Partial GIN (V48).
 
     Learns per-channel gate to balance IN (domain removal) and identity (domain preservation).
-    gate ≈ 0 → full IN (cross-domain generalization)
-    gate ≈ 1 → bypass IN (within-domain consistency)
+    gate ≈ 0 → full IN (cross-domain generalization, lower ZD)
+    gate ≈ 1 → bypass IN (within-domain consistency, better recovery)
+
+    Partial GIN (V48): when gin_channels < channels, only the first gin_channels
+    go through GIN; the remaining channels use LayerNorm to preserve perturbation
+    sensitivity for better recovery while the GIN portion controls zero-drift.
     """
 
-    def __init__(self, channels: int, init_gate: float = 0.5):
+    def __init__(self, channels: int, init_gate: float = 0.5,
+                 gin_channels: int = 0, gate_reg_target: float = 0.0):
         super().__init__()
-        self.in_norm = nn.InstanceNorm2d(channels, affine=True)
+        self.channels = channels
+        self.gin_channels = gin_channels if gin_channels > 0 else channels
+        self.bypass_channels = channels - self.gin_channels
+        self.gate_reg_target = gate_reg_target
+
+        self.in_norm = nn.InstanceNorm2d(self.gin_channels, affine=True)
         self.gate_fc = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(channels, channels // 4),
             nn.ReLU(inplace=True),
-            nn.Linear(channels // 4, channels),
+            nn.Linear(channels // 4, self.gin_channels),
             nn.Sigmoid(),
         )
         nn.init.constant_(self.gate_fc[-2].bias, -math.log(1.0 / init_gate - 1.0))
 
+        if self.bypass_channels > 0:
+            self.bypass_norm = nn.LayerNorm(self.bypass_channels)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_normed = self.in_norm(x)
+        if self.bypass_channels <= 0:
+            x_normed = self.in_norm(x)
+            gate = self.gate_fc(x).unsqueeze(-1).unsqueeze(-1)
+            self._last_gate_stats = {
+                "mean": gate.detach().mean().item(),
+                "std": gate.detach().std().item(),
+                "min": gate.detach().min().item(),
+                "max": gate.detach().max().item(),
+            }
+            return x * gate + x_normed * (1 - gate)
+
+        x_gin = x[:, :self.gin_channels]
+        x_bypass = x[:, self.gin_channels:]
+
+        x_gin_normed = self.in_norm(x_gin)
         gate = self.gate_fc(x).unsqueeze(-1).unsqueeze(-1)
-        return x * gate + x_normed * (1 - gate)
+        self._last_gate_stats = {
+            "mean": gate.detach().mean().item(),
+            "std": gate.detach().std().item(),
+            "min": gate.detach().min().item(),
+            "max": gate.detach().max().item(),
+        }
+        x_gin_out = x_gin * gate + x_gin_normed * (1 - gate)
+
+        x_bypass_out = self.bypass_norm(x_bypass.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+        return torch.cat([x_gin_out, x_bypass_out], dim=1)
+
+    def gate_reg_loss(self) -> torch.Tensor:
+        """Regularization loss to prevent gate from collapsing to extremes."""
+        if self.gate_reg_target <= 0:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        gate_bias = self.gate_fc[-2].bias
+        gate_vals = torch.sigmoid(gate_bias)
+        return ((gate_vals - self.gate_reg_target) ** 2).mean()
 
 
 class CFBevRCalib(nn.Module):
@@ -87,6 +132,8 @@ class CFBevRCalib(nn.Module):
         use_instance_norm: enable Instance Normalization for domain alignment (V44 Phase 2).
         use_gated_instance_norm: enable Gated IN for V45 (overrides use_instance_norm).
         gin_init_gate: initial gate value for GIN (0.5 = balanced).
+        gin_channels: channels to apply GIN to (0 = all). V48 Partial GIN uses gin_channels < feat_dim.
+        gin_gate_reg_target: regularization target for gate values (0 = disabled).
     """
 
     def __init__(
@@ -112,6 +159,8 @@ class CFBevRCalib(nn.Module):
         use_instance_norm: bool = False,
         use_gated_instance_norm: bool = False,
         gin_init_gate: float = 0.5,
+        gin_channels: int = 0,
+        gin_gate_reg_target: float = 0.0,
         enable_axis_loss: bool = True,
         weight_axis_rotation: float = 0.3,
         axis_weights: Tuple[float, ...] = (1.0, 4.0, 1.0),
@@ -119,6 +168,17 @@ class CFBevRCalib(nn.Module):
         weight_quat_norm: float = 0.5,
         head_dropout: float = 0.1,
         use_magnitude_head: bool = False,
+        pitch_vertical_bands: int = 3,
+        decoder_pool_mode: str = "mean",
+        use_dp_head: bool = False,
+        dp_gate_deg: float = 1.5,
+        route_loss_weight: float = 0.0,
+        use_jacg: bool = True,
+        jacg_hidden_dim: int = 64,
+        bias_path_in_norm: bool = True,
+        use_adir: bool = False,
+        adir_steps: int = 2,
+        adir_max_step_deg: float = 1.0,
     ):
         super().__init__()
         self.img_shape = img_shape
@@ -168,8 +228,16 @@ class CFBevRCalib(nn.Module):
             )
 
         if use_gated_instance_norm:
-            self.feat_in = GatedInstanceNorm(feat_dim, init_gate=gin_init_gate)
-            print(f"[CFBevRCalib] Gated Instance Norm enabled (D={feat_dim}, init_gate={gin_init_gate})")
+            self.feat_in = GatedInstanceNorm(
+                feat_dim, init_gate=gin_init_gate,
+                gin_channels=gin_channels, gate_reg_target=gin_gate_reg_target)
+            gin_ch = gin_channels if gin_channels > 0 else feat_dim
+            bypass_ch = feat_dim - gin_ch
+            if bypass_ch > 0:
+                print(f"[CFBevRCalib] Partial GIN enabled: {gin_ch}/{feat_dim} channels GIN, "
+                      f"{bypass_ch} channels LayerNorm (init_gate={gin_init_gate})")
+            else:
+                print(f"[CFBevRCalib] Gated Instance Norm enabled (D={feat_dim}, init_gate={gin_init_gate})")
         elif use_instance_norm:
             self.feat_in = nn.Sequential(
                 nn.InstanceNorm2d(feat_dim, affine=True),
@@ -238,13 +306,47 @@ class CFBevRCalib(nn.Module):
             dim_feedforward=feat_dim * 4,
             dropout=head_dropout,
             use_magnitude_head=self.use_magnitude_head,
+            pool_mode=decoder_pool_mode,
         )
 
+        self.use_dp_head = use_dp_head
+        self.route_loss_weight = route_loss_weight
+        self.dp_head = None
+        if use_dp_head:
+            from modules.dp_pose_head import DPPoseHead
+            self.dp_head = DPPoseHead(
+                recovery_head=self.corr_head,
+                feat_dim=feat_dim,
+                gate_deg=dp_gate_deg,
+                use_jacg=use_jacg,
+                jacg_hidden_dim=jacg_hidden_dim,
+                bias_path_in_norm=bias_path_in_norm,
+                head_dropout=head_dropout,
+            )
+            print(f"[CFBevRCalib] V53 DP-Head enabled (gate={dp_gate_deg}°, jacg={use_jacg})")
+
+        self.use_adir = use_adir
+        self.adir_refiner = None
+        if use_adir:
+            from modules.adir_refine import ADIRRefiner
+            self.adir_refiner = ADIRRefiner(
+                feat_dim=feat_dim,
+                n_steps=adir_steps,
+                max_step_deg=adir_max_step_deg,
+                head_dropout=head_dropout,
+                use_pitch_branch=use_pitch_branch,
+            )
+            print(f"[CFBevRCalib] V53b ADIR enabled (steps={adir_steps}, max_step={adir_max_step_deg}°)")
+
+        self.use_pitch_vertical_bands = pitch_vertical_bands
         if use_pitch_branch:
             try:
                 from bev_calib import FrontViewPitchBranch
+                _use_vb = self.use_pitch_vertical_bands > 1
                 self.pitch_branch = FrontViewPitchBranch(
-                    z_feat_dim=feat_dim, img_feat_dim=feat_dim)
+                    z_feat_dim=feat_dim, img_feat_dim=feat_dim,
+                    use_vertical_bands=_use_vb,
+                    n_vertical_bands=self.use_pitch_vertical_bands if _use_vb else 1)
             except ImportError:
                 self.pitch_branch = None
                 self.use_pitch_branch = False
@@ -297,6 +399,8 @@ class CFBevRCalib(nn.Module):
             use_instance_norm=getattr(args, 'use_instance_norm', 0) > 0,
             use_gated_instance_norm=getattr(args, 'use_gated_instance_norm', 0) > 0,
             gin_init_gate=getattr(args, 'gin_init_gate', 0.5),
+            gin_channels=getattr(args, 'gin_channels', 0),
+            gin_gate_reg_target=getattr(args, 'gin_gate_reg_target', 0.0),
             enable_axis_loss=getattr(args, 'enable_axis_loss', 1) > 0,
             weight_axis_rotation=getattr(args, 'weight_axis_rotation', 0.3),
             axis_weights=axis_weights,
@@ -304,6 +408,17 @@ class CFBevRCalib(nn.Module):
             weight_quat_norm=getattr(args, 'quat_norm_weight', 0.5),
             head_dropout=getattr(args, 'head_dropout', 0.1),
             use_magnitude_head=getattr(args, 'use_magnitude_head', 0) > 0,
+            pitch_vertical_bands=getattr(args, 'pitch_vertical_bands', 3),
+            decoder_pool_mode=getattr(args, 'decoder_pool_mode', 'mean'),
+            use_dp_head=getattr(args, 'use_dp_head', 0) > 0,
+            dp_gate_deg=getattr(args, 'dp_gate_deg', 1.5),
+            route_loss_weight=getattr(args, 'route_loss_weight', 0.0),
+            use_jacg=getattr(args, 'use_jacg', 1) > 0,
+            jacg_hidden_dim=getattr(args, 'jacg_hidden_dim', 64),
+            bias_path_in_norm=getattr(args, 'bias_path_in_norm', 1) > 0,
+            use_adir=getattr(args, 'use_adir', 0) > 0,
+            adir_steps=getattr(args, 'adir_steps', 2),
+            adir_max_step_deg=getattr(args, 'adir_max_step_deg', 1.0),
         )
 
     def get_param_groups(self, base_lr: float):
@@ -348,11 +463,17 @@ class CFBevRCalib(nn.Module):
         if T_init is None:
             T_init = gt_T
 
+        init_err_rad = None
+        if self.use_dp_head and gt_T is not None and T_init is not None:
+            from modules.dp_pose_head import compute_init_rot_rad
+            init_err_rad = compute_init_rot_rad(gt_T, T_init)
+
         result = self._core_forward(
             imgs, pcd, T_init, cam_intrinsic,
             pcd_mask=masks if pcd_mask is None else pcd_mask,
             corr_window_radius=corr_window_radius,
             rocr_detach=rocr_detach,
+            init_err_rad=init_err_rad,
         )
 
         if gt_T is None:
@@ -373,10 +494,10 @@ class CFBevRCalib(nn.Module):
         if self.use_pitch_branch and self.pitch_branch is not None:
             from bev_calib import FrontViewPitchBranch
             z_summary = result.get('z_summary')
-            rgb_gap = result.get('rgb_gap')
+            rgb_pitch_feat = result.get('rgb_pitch_feat', result.get('rgb_gap'))
             if z_summary is not None:
-                pitch_pred = self.pitch_branch(z_summary, rgb_gap)
-                pitch_loss = FrontViewPitchBranch.compute_loss(pitch_pred, gt_T)
+                pitch_pred = self.pitch_branch(z_summary, rgb_pitch_feat)
+                pitch_loss = FrontViewPitchBranch.compute_loss(pitch_pred, gt_T, T_init)
                 loss_dict['pitch_aux_loss'] = pitch_loss
                 loss_dict['total_loss'] = loss_dict['total_loss'] + self.pitch_aux_weight * pitch_loss
 
@@ -399,6 +520,14 @@ class CFBevRCalib(nn.Module):
         loss_dict['v42_valid_mask'] = corr_info.get('valid_mask', None)
         loss_dict['v42_patch_size'] = self.patch_size
         loss_dict['v42_rotation'] = rot_q
+
+        if self.use_dp_head and self.route_loss_weight > 0 and 'dp_route_w' in result:
+            route_w = result['dp_route_w']
+            route_tgt = result['dp_route_target_w']
+            route_loss = F.binary_cross_entropy(route_w, route_tgt)
+            loss_dict['route_loss'] = route_loss.item()
+            loss_dict['route_w_mean'] = float(route_w.mean().item())
+            loss_dict['total_loss'] = loss_dict['total_loss'] + self.route_loss_weight * route_loss
 
         init_loss = None
         return T_composed, init_loss, loss_dict
@@ -424,6 +553,7 @@ class CFBevRCalib(nn.Module):
         pcd_mask: Optional[torch.Tensor] = None,
         corr_window_radius: Optional[int] = None,
         rocr_detach: bool = False,
+        init_err_rad: Optional[torch.Tensor] = None,
     ) -> dict:
         """
         Args:
@@ -462,6 +592,7 @@ class CFBevRCalib(nn.Module):
         if self.feat_in is not None:
             F_rgb = self.feat_in(F_rgb)
 
+        cur_feat_h, cur_feat_w = F_rgb.shape[2], F_rgb.shape[3]
         F_rgb_flat = F_rgb.flatten(2).permute(0, 2, 1)  # (B, feat_h*feat_w, D)
         rgb_gap = F_rgb_flat.mean(dim=1)                 # (B, D)
 
@@ -476,8 +607,8 @@ class CFBevRCalib(nn.Module):
         uv_feat, uv_px = self._compute_uv_feat(xyz_groups, T_init, cam_intrinsic)
 
         valid_mask = (
-            (uv_feat[..., 0] >= 0) & (uv_feat[..., 0] < self.feat_w)
-            & (uv_feat[..., 1] >= 0) & (uv_feat[..., 1] < self.feat_h)
+            (uv_feat[..., 0] >= 0) & (uv_feat[..., 0] < cur_feat_w)
+            & (uv_feat[..., 1] >= 0) & (uv_feat[..., 1] < cur_feat_h)
         )
 
         all_invalid = ~valid_mask.any(dim=1)
@@ -486,17 +617,17 @@ class CFBevRCalib(nn.Module):
             valid_mask[all_invalid, 0] = True
 
         uv_norm = torch.zeros_like(uv_feat)
-        uv_norm[..., 0] = 2.0 * uv_feat[..., 0] / max(self.feat_w - 1, 1) - 1.0
-        uv_norm[..., 1] = 2.0 * uv_feat[..., 1] / max(self.feat_h - 1, 1) - 1.0
+        uv_norm[..., 0] = 2.0 * uv_feat[..., 0] / max(cur_feat_w - 1, 1) - 1.0
+        uv_norm[..., 1] = 2.0 * uv_feat[..., 1] / max(cur_feat_h - 1, 1) - 1.0
         proj_pos_emb = self.harmonic(uv_norm)
 
-        grid_y = torch.linspace(-1, 1, self.feat_h, device=device)
-        grid_x = torch.linspace(-1, 1, self.feat_w, device=device)
+        grid_y = torch.linspace(-1, 1, cur_feat_h, device=device)
+        grid_x = torch.linspace(-1, 1, cur_feat_w, device=device)
         gy, gx = torch.meshgrid(grid_y, grid_x, indexing='ij')
         img_grid = torch.stack([gx.flatten(), gy.flatten()], dim=-1)
         img_pos_emb = self.harmonic(img_grid).unsqueeze(0).expand(B, -1, -1)
 
-        n_img = self.feat_h * self.feat_w
+        n_img = cur_feat_h * cur_feat_w
         n_pc = F_pc.shape[1]
         attn_mask = valid_mask.unsqueeze(1).expand(-1, n_img, -1).float()
         attn_mask = attn_mask.masked_fill(attn_mask == 0, float('-inf')).masked_fill(attn_mask == 1, 0.0)
@@ -510,8 +641,8 @@ class CFBevRCalib(nn.Module):
             img_tokens=F_cross,
             pc_tokens=F_pc,
             pc_uv_init=uv_feat,
-            feat_h=self.feat_h,
-            feat_w=self.feat_w,
+            feat_h=cur_feat_h,
+            feat_w=cur_feat_w,
             window_radius=corr_window_radius,
         )
 
@@ -533,8 +664,8 @@ class CFBevRCalib(nn.Module):
                 valid_mask=corr_info.get('valid_mask', valid_mask),
                 window_radius=r,
                 patch_size=self.patch_size,
-                feat_h=self.feat_h,
-                feat_w=self.feat_w,
+                feat_h=cur_feat_h,
+                feat_w=cur_feat_w,
             )
             rocr_info = rocr_out
             R_geo = rocr_out['R_geo']
@@ -544,11 +675,17 @@ class CFBevRCalib(nn.Module):
         pose_queries = self.pose_query_init(rgb_gap, T_init, R_geo)
 
         corr_tokens = f_corr + F_pc
-        head_out = self.corr_head(corr_tokens, pose_queries)
-        if isinstance(head_out, tuple):
-            delta_q, mag_pred = head_out
+        dp_meta = {}
+        if self.use_dp_head and self.dp_head is not None:
+            delta_q, dp_meta = self.dp_head(
+                corr_tokens, pose_queries, init_err_rad=init_err_rad)
+            mag_pred = dp_meta.get('mag_pred')
         else:
-            delta_q, mag_pred = head_out, None
+            head_out = self.corr_head(corr_tokens, pose_queries)
+            if isinstance(head_out, tuple):
+                delta_q, mag_pred = head_out
+            else:
+                delta_q, mag_pred = head_out, None
 
         if self.use_rocr and not rocr_info['skipped'].all():
             R_geo_q = RoCR.matrix_to_quaternion(R_geo)
@@ -559,16 +696,41 @@ class CFBevRCalib(nn.Module):
         rotation = F.normalize(rotation, dim=-1, eps=1e-6)
         translation = torch.zeros(B, 3, device=device)
 
+        if self.use_adir and self.adir_refiner is not None:
+            rotation = self.adir_refiner(corr_tokens, rotation)
+
         z_hist = None
+        rgb_pitch_feat = None
         if self.use_pitch_branch and self.pitch_branch is not None:
-            z_vals = xyz_groups[..., 2]
-            z_hist = torch.zeros(B, self.feat_dim, device=device)
-            for b in range(B):
-                z_hist[b] = torch.histc(z_vals[b], bins=self.feat_dim, min=0, max=60)
+            # Q3: T_init-dependent projected-v histogram instead of raw z_hist
+            # Projects LiDAR points to image using T_init, histograms v-coordinates
+            # This makes pitch branch sensitive to the current pose estimate
+            _n_bins = self.feat_dim
+            z_hist = torch.zeros(B, _n_bins, device=device)
+            if uv_px is not None:
+                for b in range(B):
+                    _v_vals = uv_px[b, valid_mask[b], 1]
+                    if _v_vals.numel() > 0:
+                        z_hist[b] = torch.histc(_v_vals.float(), bins=_n_bins,
+                                                min=0, max=float(cur_feat_h * self.patch_size))
+            empty_mask = z_hist.sum(dim=1) < 1
+            if empty_mask.any():
+                z_vals = xyz_groups[..., 2]
+                for b in range(B):
+                    if empty_mask[b]:
+                        z_hist[b] = torch.histc(z_vals[b], bins=_n_bins, min=0, max=60)
             z_hist = z_hist / z_hist.sum(dim=1, keepdim=True).clamp(min=1)
 
+            # Q2: Vertical band pooling instead of global average
+            if self.use_pitch_vertical_bands > 1:
+                from bev_calib import FrontViewPitchBranch
+                rgb_pitch_feat = FrontViewPitchBranch.vertical_band_pool(
+                    F_rgb_flat, cur_feat_h, cur_feat_w, self.use_pitch_vertical_bands)
+            else:
+                rgb_pitch_feat = rgb_gap
+
             if self.use_pitch_fusion and hasattr(self, 'pitch_conf_net'):
-                pitch_pred = self.pitch_branch(z_hist, rgb_gap)
+                pitch_pred = self.pitch_branch(z_hist, rgb_pitch_feat)
                 pitch_delta = pitch_pred.squeeze(-1) if pitch_pred.dim() > 1 else pitch_pred
                 half_p = pitch_delta * 0.5
                 pitch_q = torch.stack([
@@ -595,10 +757,17 @@ class CFBevRCalib(nn.Module):
             'rgb_gap': rgb_gap,
             'xyz_groups': xyz_groups,
         }
+        if rgb_pitch_feat is not None:
+            output['rgb_pitch_feat'] = rgb_pitch_feat
         if z_hist is not None:
             output['z_summary'] = z_hist
         if mag_pred is not None:
             output['mag_pred'] = mag_pred
+        if dp_meta:
+            output['dp_route_w'] = dp_meta.get('route_w')
+            output['dp_route_target_w'] = dp_meta.get('route_target_w')
+            output['dp_init_err_deg'] = dp_meta.get('init_err_deg')
+            output['dp_jacg_gain'] = dp_meta.get('jacg_gain')
 
         return output
 

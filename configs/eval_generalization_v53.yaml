@@ -1,0 +1,176 @@
+# V53 泛化评估配置
+#
+# 评估 v53a (DP-Head) / v53b (ADIR) / v53c (Partial GIN) + V52 锚点
+#
+# Usage:
+#   bash run_v53_eval.sh
+#   bash run_v53_eval.sh --report-only
+#   bash run_v53_eval.sh --precheck-only
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v53"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v53_generalization"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v53a-dphead-best-dual"
+    dir_name: "model_small_5deg_v53a_dphead_full"
+    ckpt: "ckpt_best_dual.pth"
+    eval_aliases: ["v53a-dphead-full-best-dual"]
+  ckpt_recovery:
+    label: "v53a-dphead-best-val"
+    dir_name: "model_small_5deg_v53a_dphead_full"
+    ckpt: "ckpt_best_val.pth"
+    eval_aliases: ["v53a-dphead-full-best-val"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 75.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+
+  # --- V53 主实验线 ---
+
+  - label: "v53a-dphead-full-best-val"
+    dir_name: "model_small_5deg_v53a_dphead_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_jacobian.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    mode_desc: "V53a DP-Head: 单 ckpt Recovery 优先"
+    pitch_vertical_bands: 5
+
+  - label: "v53a-dphead-full-best-dual"
+    dir_name: "model_small_5deg_v53a_dphead_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    mode_desc: "V53a DP-Head: MEDW + Jacobian gate"
+    pitch_vertical_bands: 5
+
+  - label: "v53b-adir-full-best-val"
+    dir_name: "model_small_5deg_v53b_adir_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_adir: 1
+    adir_steps: 2
+    mode_desc: "V53b DP-Head + ADIR T=2"
+    pitch_vertical_bands: 5
+
+  - label: "v53c-partial-gin-best-val"
+    dir_name: "model_small_5deg_v53c_partial_gin_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V53c Partial GIN 128/256 对照"
+    pitch_vertical_bands: 5
+
+  - label: "v53c-partial-gin-best-dual"
+    dir_name: "model_small_5deg_v53c_partial_gin_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V53c Partial GIN MEDW 路径"
+    pitch_vertical_bands: 5
+
+  # --- 锚点 ---
+
+  - label: "v52a-S1-v2-full-best-val"
+    dir_name: "model_small_5deg_v52a_S1_v2_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52 基线 Recovery 59%"
+    pitch_vertical_bands: 5
+
+  - label: "v52d-mgda-full-best-val"
+    dir_name: "model_small_5deg_v52d_mgda_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V52d MGDA 单 ckpt 对照"
+    pitch_vertical_bands: 5
+
+  - label: "v49b-no-cons-best-dual"
+    dir_name: "model_small_5deg_v49b_no_cons_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "MEDW 历史最佳 0.172°"
+    pitch_vertical_bands: 3
+
+  - label: "v45c-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "Recovery 历史最佳 ~75%"
+    pitch_vertical_bands: 1
+
+  # --- V53e (训练完成后取消注释 eval) ---
+
+  # - label: "v53e-gin-mgda-full-best-dual"
+  #   dir_name: "model_small_5deg_v53e_gin_mgda_full"
+  #   ckpt: "ckpt_best_dual.pth"
+  #   ckpt_fallback: ["ckpt_best_val.pth"]
+  #   bev_zbound_step: "4.0"
+  #   use_drcv: 0
+  #   rotation_only: 1
+  #   fusion_backend: "cf_bev_r"
+  #   use_gated_instance_norm: 1
+  #   gin_channels: 128
+  #   use_dp_head: 0
+  #   mode_desc: "V53e Partial GIN + MGDA"
+  #   pitch_vertical_bands: 5

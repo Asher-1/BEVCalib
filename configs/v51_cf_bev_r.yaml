@@ -1,0 +1,184 @@
+# V51: 双目标训练 — Zero-Drift + Recovery (Jacobian) 代理损失
+#
+# 基于 v50a (Optuna T32 + consistency=0)，新增:
+#   - zero_drift_loss_weight / dedicated_ratio  (压 ZD)
+#   - jacobian_loss_weight                      (提 Genuine Recovery)
+#
+# 设计文档: docs/V51_DESIGN.md
+#
+# Usage:
+#   bash batch_train.sh configs/v51_cf_bev_r.yaml
+#   bash batch_train.sh configs/v51_cf_bev_r.yaml --dry-run
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 5
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+    gin_channels: 0
+    gin_gate_reg_weight: 0.0
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.05
+    batch_size: 16
+    learning_rate: 4.006191761686402e-05
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,5.5,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.1
+
+    tinit_dropout_prob: 0.5
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 15.0
+    zero_perturbation_prob: 0.25
+    zero_drift_loss_weight: 1.0
+    zero_drift_loss_start_epoch: 5
+    zero_drift_dedicated_ratio: 0.15
+    symmetric_perturb: 1
+    overcorrection_penalty: 2.0
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.3
+    multi_scale_perturb: "0.5:0.20,1.0:0.05,2.0:0.05"
+
+    # V51 Recovery 代理 (Jacobian supervision)
+    jacobian_loss_weight: 0.10
+    jacobian_loss_start_epoch: 10
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 4
+
+    augment_mount_jitter_prob: 0.4
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.015
+    augment_intrinsic: 0.03
+    augment_intrinsic_cxcy: 0.015
+    augment_color_jitter: 0.3
+
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: magnitude_balanced
+    per_axis_prob: 0.4
+    pose_aware_sampling: true
+    max_frames_per_seq: 500
+    foreground: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_pitch_flip_prob: 0.0
+
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.1
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    resume_ckpt: auto
+
+experiments:
+  # ===== v51a: 双目标 loss baseline (full 150ep) =====
+  - name: "v51a_dual_loss_S1_full"
+    description: "V51a: v50a + zero_drift_loss + jacobian_loss (双目标 Phase A)"
+    dataset: "all"
+    version: "v51a_dual_loss_S1_full"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 150
+      warmup_epochs: 6
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 50
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v50a_optuna_no_cons_S1_full/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+      consistency_loss_weight: 0.0
+      consistency_loss_start_epoch: 999
+      conditional_consistency_threshold: 0.0
+      quat_bias_reset_alpha: 0.1
+      decoder_pool_mode: mean
+
+  # ===== v51a-smoke: 快速验证 loss 不 NaN (10ep) =====
+  - name: "v51a_dual_loss_S1_smoke"
+    description: "V51a smoke: 10ep 验证双 loss 训练稳定性"
+    dataset: "all"
+    version: "v51a_dual_loss_S1_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 10
+      warmup_epochs: 3
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 10
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v50a_optuna_no_cons_S1_full/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+      consistency_loss_weight: 0.0
+      consistency_loss_start_epoch: 999
+      conditional_consistency_threshold: 0.0
+      quat_bias_reset_alpha: 0.1
+      decoder_pool_mode: mean
+      max_frames_per_seq: 200
+      save_ckpt_per_epoches: 5

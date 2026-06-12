@@ -41,6 +41,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S1 Full baseline"
+    pitch_vertical_bands: 1
 
   - label: "v45gin-S2-full-dual"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
@@ -51,6 +52,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Full (val=0.087°, MEDW=0.027°, Jac=0.990)"
+    pitch_vertical_bands: 1
 
   - label: "v45gin-S2-full-val"
     dir_name: "model_small_3deg_v45_gin_cf_bev_r_S2_full"
@@ -60,6 +62,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Full best_val"
+    pitch_vertical_bands: 1
 
   - label: "v45gin-S3-full-dual"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -70,6 +73,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full (val=0.105°, GS=0.627 - generalization degraded)"
+    pitch_vertical_bands: 1
 
   - label: "v45gin-S3-full-val"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -79,6 +83,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full best_val"
+    pitch_vertical_bands: 1
 
   # ===== V45b S1 Quick (strong generalization baseline, GS=0.319) =====
   - label: "v45b-S1q-dual"
@@ -90,6 +95,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S1 Quick (GS=0.319, strong generalization baseline)"
+    pitch_vertical_bands: 1
 
   # ===== V46 Quick =====
   - label: "v46-S1-quick-dual"
@@ -101,6 +107,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S1 Quick: symmetric perturb + enhanced per_axis"
+    pitch_vertical_bands: 1
 
   - label: "v46-S1-quick-val"
     dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
@@ -110,6 +117,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S1 Quick best_val"
+    pitch_vertical_bands: 1
 
   - label: "v46-S2-quick-dual"
     dir_name: "model_small_3deg_v46_cf_bev_r_S2_quick"
@@ -120,6 +128,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S2 Quick: ±3° symmetric"
+    pitch_vertical_bands: 1
 
   - label: "v46-S3-quick-dual"
     dir_name: "model_small_2deg_v46_cf_bev_r_S3_quick"
@@ -130,6 +139,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S3 Quick: ±2° (wider than V45's ±1°) to prevent collapse"
+    pitch_vertical_bands: 1
 
   # ===== V46 Full =====
   - label: "v46-S1-full-dual"
@@ -141,6 +151,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S1 Full: symmetric perturb + enhanced per_axis"
+    pitch_vertical_bands: 1
 
   - label: "v46-S2-full-dual"
     dir_name: "model_small_3deg_v46_cf_bev_r_S2"
@@ -151,6 +162,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S2 Full: ±3° symmetric"
+    pitch_vertical_bands: 1
 
   - label: "v46-S3-full-dual"
     dir_name: "model_small_2deg_v46_cf_bev_r_S3"
@@ -161,6 +173,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S3 Full: ±2° prevent generalization collapse"
+    pitch_vertical_bands: 1
 
   - label: "v46-S3-full-val"
     dir_name: "model_small_2deg_v46_cf_bev_r_S3"
@@ -170,3 +183,4 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V46 S3 Full best_val"
+    pitch_vertical_bands: 1

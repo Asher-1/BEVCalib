@@ -1,0 +1,171 @@
+# V50 Final 统一泛化评估配置
+#
+# 对比模型:
+#   - v45c 基线 (S1-best-val, S2-best-dual)
+#   - v49b 无 consistency (部署最优)
+#   - v49-optuna-t32 完整训练 (HPO 最优)
+#   - v50a/b/c 融合实验 (训练完成后自动评估)
+#
+# 用法:
+#   # 等 v50 训练完成后运行全量评估
+#   python run_generalization_eval.py --config configs/eval_generalization_v50_final.yaml \
+#       --parallel -1 --eval_max_frames_per_seq 400 --generalization_diag
+#
+#   # 仅重新生成报告 (已有评估结果)
+#   python run_generalization_eval.py --config configs/eval_generalization_v50_final.yaml --report_only
+#
+#   # v50 未完成时先评估已有模型 (自动跳过缺失 checkpoint)
+#   python run_generalization_eval.py --config configs/eval_generalization_v50_final.yaml \
+#       --parallel -1 --eval_max_frames_per_seq 400
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v50_final"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v50_final_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 12
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+
+  # ================================================================
+  #  V45c 基线 (单帧泛化最优)
+  # ================================================================
+
+  - label: "v45c-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 best-val (单帧泛化 0.752deg)"
+    pitch_vertical_bands: 1
+
+  - label: "v45c-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S2 n_groups=256 + IN (3deg fine-tune)"
+    pitch_vertical_bands: 1
+
+  # ================================================================
+  #  V49b 无 consistency (MEDW400 部署最优)
+  # ================================================================
+
+  - label: "v49b-no-cons-best-dual"
+    dir_name: "model_small_5deg_v49b_no_cons_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V49b: No consistency loss (MEDW400=0.272deg)"
+    pitch_vertical_bands: 3
+
+  # ================================================================
+  #  V49 Optuna Trial#32 完整训练
+  # ================================================================
+
+  - label: "v49-optuna-t32-full-best-dual"
+    dir_name: "model_small_5deg_v49_optuna_best_t32_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V49 Optuna T32 full (Epoch121 MEDW=0.0334deg)"
+    pitch_vertical_bands: 5
+
+  - label: "v49-optuna-t32-full-best-val"
+    dir_name: "model_small_5deg_v49_optuna_best_t32_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V49 Optuna T32 full best-val (单帧泛化 1.111deg)"
+    pitch_vertical_bands: 5
+
+  # ================================================================
+  #  V50 融合实验 (训练完成后自动纳入评估)
+  # ================================================================
+
+  - label: "v50a-optuna-no-cons-full-best-dual"
+    dir_name: "model_small_5deg_v50a_optuna_no_cons_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50a: Optuna T32 + no consistency (主候选)"
+    pitch_vertical_bands: 5
+
+  - label: "v50a-optuna-no-cons-full-best-val"
+    dir_name: "model_small_5deg_v50a_optuna_no_cons_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50a: Optuna T32 + no consistency best-val"
+    pitch_vertical_bands: 5
+
+  - label: "v50b-optuna-256g-no-cons-full-best-dual"
+    dir_name: "model_small_5deg_v50b_optuna_256g_no_cons_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50b: Optuna T32 + cf_n_groups=256 + no consistency"
+    pitch_vertical_bands: 5
+
+  - label: "v50b-optuna-256g-no-cons-full-best-val"
+    dir_name: "model_small_5deg_v50b_optuna_256g_no_cons_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50b: Optuna T32 + 256g + no consistency best-val"
+    pitch_vertical_bands: 5
+
+  - label: "v50c-optuna-cond-cons-full-best-dual"
+    dir_name: "model_small_5deg_v50c_optuna_cond_cons_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50c: Optuna T32 原始 consistency 策略 (对照组)"
+    pitch_vertical_bands: 5
+
+  - label: "v50c-optuna-cond-cons-full-best-val"
+    dir_name: "model_small_5deg_v50c_optuna_cond_cons_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V50c: Optuna T32 consistency 对照 best-val"
+    pitch_vertical_bands: 5

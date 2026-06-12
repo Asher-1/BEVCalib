@@ -28,6 +28,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 S1 dual-gate best (5° training, MEDW=0.074°)"
+    pitch_vertical_bands: 1
 
   - label: "v43-S1-best-val"
     dir_name: "model_small_5deg_v43_cf_bev_r_S1_quick"
@@ -37,6 +38,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 S1 best-val (5° training, val_rot=0.22°)"
+    pitch_vertical_bands: 1
 
   - label: "v43-S2-best-dual"
     dir_name: "model_small_3deg_v43_cf_bev_r_S2_quick"
@@ -47,6 +49,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 S2 dual-gate best (3° fine-tune, MEDW=0.048°)"
+    pitch_vertical_bands: 1
 
   - label: "v43-S2-best-val"
     dir_name: "model_small_3deg_v43_cf_bev_r_S2_quick"
@@ -56,6 +59,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 S2 best-val (3° fine-tune, val_rot=0.17°)"
+    pitch_vertical_bands: 1
 
   - label: "v43-S3-best-dual"
     dir_name: "model_small_1deg_v43_cf_bev_r_S3_quick"
@@ -66,6 +70,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 S3 dual-gate best (1° precision, MEDW=0.041°)"
+    pitch_vertical_bands: 1
 
   - label: "v43-S3-best-val"
     dir_name: "model_small_1deg_v43_cf_bev_r_S3_quick"
@@ -75,6 +80,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 S3 best-val (1° precision, val_rot=0.20°)"
+    pitch_vertical_bands: 1
 
   # ===== V43 from V42-S1: V42-S1 → V43-S2 → V43-S3 =====
   - label: "v43-from-v42S1-S2-best-dual"
@@ -86,6 +92,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 from V42-S1 S2 dual-gate best (MEDW=0.045°)"
+    pitch_vertical_bands: 1
 
   - label: "v43-from-v42S1-S3-best-dual"
     dir_name: "model_small_1deg_v43_from_v42S1_S3_quick"
@@ -96,6 +103,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V43 from V42-S1 S3 dual-gate best (MEDW=0.039°)"
+    pitch_vertical_bands: 1
 
   # ===== V44 pipeline: DLA + PitchFusion + DomainAug =====
   - label: "v44-S1-best-dual"
@@ -107,6 +115,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S1 dual-gate best (5° + DLA/PitchFusion, MEDW=0.089°)"
+    pitch_vertical_bands: 1
 
   - label: "v44-S1-best-val"
     dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
@@ -116,6 +125,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S1 best-val (5° + DLA/PitchFusion, val_rot=0.26°)"
+    pitch_vertical_bands: 1
 
   - label: "v44-S1-best-medw"
     dir_name: "model_small_5deg_v44_cf_bev_r_S1_quick"
@@ -125,6 +135,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S1 best-medw (5° + DLA/PitchFusion, MEDW=0.089°)"
+    pitch_vertical_bands: 1
 
   - label: "v44-S2-best-dual"
     dir_name: "model_small_3deg_v44_cf_bev_r_S2_quick"
@@ -135,6 +146,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S2 dual-gate best (3° + InstanceNorm, MEDW=0.043°)"
+    pitch_vertical_bands: 1
 
   - label: "v44-S2-best-val"
     dir_name: "model_small_3deg_v44_cf_bev_r_S2_quick"
@@ -144,6 +156,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S2 best-val (3° + InstanceNorm, val_rot=0.20°)"
+    pitch_vertical_bands: 1
 
   - label: "v44-S3-best-dual"
     dir_name: "model_small_1deg_v44_cf_bev_r_S3_quick"
@@ -154,6 +167,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S3 dual-gate best (1° + InstanceNorm, MEDW=0.044°)"
+    pitch_vertical_bands: 1
 
   - label: "v44-S3-best-val"
     dir_name: "model_small_1deg_v44_cf_bev_r_S3_quick"
@@ -163,3 +177,4 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V44 S3 best-val (1° + InstanceNorm, val_rot=0.27°)"
+    pitch_vertical_bands: 1

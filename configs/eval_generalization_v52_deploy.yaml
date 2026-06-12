@@ -1,0 +1,109 @@
+# V52 部署导向泛化评估
+#
+# 评估 v52a-S1-v2 双 ckpt 各子路径指标 + 对照锚点
+# 注意: 本配置仍对「每个 ckpt 单独跑 eval」，不会自动做 |init_err| 门控切换
+#       门控后的组合指标见 scripts/summarize_v52_deploy_metrics.py
+#
+# Usage:
+#   bash run_v52_deploy_eval.sh
+#   bash run_v52_deploy_eval.sh --report-only
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v52_deploy"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v52_deploy"
+
+# 部署策略说明（供 summarize 脚本读取，eval 主流程暂不消费）
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v52a-S1-v2-deploy-dual"
+    dir_name: "model_small_5deg_v52a_S1_v2_full"
+    ckpt: "ckpt_best_dual.pth"
+    eval_aliases: ["v52a-S1-v2-full-best-dual"]
+  ckpt_recovery:
+    label: "v52a-S1-v2-deploy-val"
+    dir_name: "model_small_5deg_v52a_S1_v2_full"
+    ckpt: "ckpt_best_val.pth"
+    eval_aliases: ["v52a-S1-v2-full-best-val"]
+  # 上车硬门槛（与 gdiag / MEDW 章节对应）
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 90.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+
+  # --- V52 生产双 ckpt（同一 version，不同 ckpt 文件）---
+
+  - label: "v52a-S1-v2-deploy-dual"
+    dir_name: "model_small_5deg_v52a_S1_v2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "【部署-MEDW路径】在线聚合 / 小初值, gate≤1.5° 默认"
+    pitch_vertical_bands: 5
+
+  - label: "v52a-S1-v2-deploy-val"
+    dir_name: "model_small_5deg_v52a_S1_v2_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "【部署-Recovery路径】大扰动 init_rot>1.5°"
+    pitch_vertical_bands: 5
+
+  - label: "v52a-S1-deploy-val-backup"
+    dir_name: "model_small_5deg_v52a_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "Recovery 备选 GenuineRec≈63%"
+    pitch_vertical_bands: 5
+
+  # --- 历史锚点 ---
+
+  - label: "v49b-deploy-dual"
+    dir_name: "model_small_5deg_v49b_no_cons_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "MEDW 历史最佳 0.172°"
+    pitch_vertical_bands: 3
+
+  - label: "v45c-deploy-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "Recovery 历史最佳 GenuineRec≈75%"
+    pitch_vertical_bands: 1

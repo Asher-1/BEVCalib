@@ -26,6 +26,84 @@ import json
 from contextlib import nullcontext
 
 
+_MGDA_MULTITASK_BACKWARD = None
+_MGDA_LOAD_PATH = None
+
+
+def _get_mgda_multitask_backward():
+    """Load MGDA helper from a path relative to this script (avoids utils package shadowing)."""
+    global _MGDA_MULTITASK_BACKWARD, _MGDA_LOAD_PATH
+    if _MGDA_MULTITASK_BACKWARD is not None:
+        return _MGDA_MULTITASK_BACKWARD, _MGDA_LOAD_PATH
+
+    import importlib.util
+
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir.parent / 'utils' / 'mgda.py',
+        script_dir / 'utils' / 'mgda.py',
+        script_dir / 'mgda.py',
+    ]
+    last_err = None
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location('_bevcalib_mgda', path)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            fn = getattr(mod, 'mgda_multitask_backward', None)
+            if fn is None:
+                raise AttributeError(f"mgda_multitask_backward missing in {path}")
+            _MGDA_MULTITASK_BACKWARD = fn
+            _MGDA_LOAD_PATH = str(path)
+            return fn, _MGDA_LOAD_PATH
+        except Exception as exc:
+            last_err = exc
+
+    tried = ", ".join(str(p) for p in candidates)
+    raise ModuleNotFoundError(
+        f"Cannot load MGDA module (tried: {tried}): {last_err}"
+    )
+
+
+def _get_mgda_weight_params(raw_model):
+    """Small bottleneck params for MGDA weight estimation (not full backbone)."""
+    params = []
+    seen = set()
+    corr_head = getattr(raw_model, 'corr_head', None)
+    if corr_head is not None:
+        for p in corr_head.parameters():
+            if p.requires_grad and id(p) not in seen:
+                params.append(p)
+                seen.add(id(p))
+    pqi = getattr(raw_model, 'pose_query_init', None)
+    if pqi is not None:
+        for p in pqi.parameters():
+            if p.requires_grad and id(p) not in seen:
+                params.append(p)
+                seen.add(id(p))
+    return params
+
+
+def _mgda_build_weighted_loss(task_losses, grad_accum_steps, weight_params):
+    """MGDA weights on bottleneck params → single scalar loss for one backward()."""
+    import importlib.util
+
+    script_dir = Path(__file__).resolve().parent
+    mgda_path = script_dir.parent / 'utils' / 'mgda.py'
+    spec = importlib.util.spec_from_file_location('_bevcalib_mgda', mgda_path)
+    mgda_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mgda_mod)
+
+    div = float(grad_accum_steps) if grad_accum_steps > 1 else 1.0
+    scaled = {k: v / div for k, v in task_losses.items()}
+    weighted, meta = mgda_mod.mgda_weighted_loss(scaled, weight_params)
+    return weighted, meta
+
+
 def _accumulate_fusion_gate_stats(raw_model, accum):
     """Accumulate gated-fusion weights for collapse monitoring."""
     meta = getattr(raw_model, '_last_fusion_meta', None)
@@ -415,6 +493,38 @@ def _axis_correction_torch(R_gt, R_init, R_out):
     R_err_init = torch.bmm(R_init_f, R_gt_f.transpose(1, 2))
     R_err_out = torch.bmm(R_out_f, R_gt_f.transpose(1, 2))
     return _euler_from_delta_R_torch(R_err_init) - _euler_from_delta_R_torch(R_err_out)
+
+
+def _zero_drift_axis_error_deg(R_gt, R_pred):
+    """Per-axis signed R_pred vs R_gt error in degrees (euler of R_pred @ R_gt^T)."""
+    R_err = torch.bmm(R_pred.float(), R_gt.float().transpose(1, 2))
+    return _euler_from_delta_R_torch(R_err)
+
+
+def _apply_fixed_inject_batch(gt_T_np, inject_deg):
+    """Fixed-Inject (gdiag): init_R = gt_R @ dR, all RPY = inject_deg."""
+    mag = float(inject_deg)
+    delta = [mag, mag, mag]
+    init_T = gt_T_np.copy()
+    for bi in range(init_T.shape[0]):
+        init_T[bi] = _euler_perturb_T(gt_T_np[bi], delta)
+    return init_T
+
+
+def _effective_zero_drift_loss_weight(args, epoch):
+    """Linear ramp: weight_start → weight over ramp_epochs after start_epoch."""
+    w_max = float(getattr(args, 'zero_drift_loss_weight', 0.0))
+    if w_max <= 0:
+        return 0.0
+    start = int(getattr(args, 'zero_drift_loss_start_epoch', 5))
+    if epoch < start:
+        return 0.0
+    w_min = float(getattr(args, 'zero_drift_loss_weight_start', 0.0))
+    ramp = int(getattr(args, 'zero_drift_loss_ramp_epochs', 0))
+    if w_min <= 0 or ramp <= 0 or w_min >= w_max:
+        return w_max
+    t = min(1.0, (epoch - start + 1) / float(ramp))
+    return w_min + (w_max - w_min) * t
 
 
 def _finalize_jacobian_axis_accum(axis_accum):
@@ -1283,6 +1393,12 @@ def parse_args():
                         help="Dual gate: min Jacobian on overall AND each axis (roll/pitch/yaw)")
     parser.add_argument("--dual_gate_medw_max", type=float, default=0.30,
                         help="Dual gate: max(R,P,Y) MEDW error (deg) on val split must be below this")
+    parser.add_argument("--enable_jacobian_gate_ckpt", type=int, default=0,
+                        help="Save ckpt_best_jacobian.pth when val Jacobian overall improves (1=on)")
+    parser.add_argument("--jacobian_early_stop_min", type=float, default=0.0,
+                        help="V52 S2: stop if val Jacobian overall below this for patience evals (0=off)")
+    parser.add_argument("--jacobian_early_stop_patience", type=int, default=2,
+                        help="V52 S2: consecutive eval cycles below jacobian_early_stop_min before stop")
     parser.add_argument("--enable_jacobian_eval", type=int, default=0,
                         help="eval epoch 时在 val 上跑 lightweight Jacobian (1=启用)")
     parser.add_argument("--jacobian_eval_angle_deg", type=float, default=3.0,
@@ -1330,6 +1446,14 @@ def parse_args():
                         help="V45: Enable Gated Instance Norm (1=enable, overrides use_instance_norm)")
     parser.add_argument("--gin_init_gate", type=float, default=0.5,
                         help="V45: GIN initial gate value (0.5=balanced IN/bypass)")
+    parser.add_argument("--gin_channels", type=int, default=0,
+                        help="V48: Partial GIN — channels to apply GIN to (0=all, <feat_dim=partial)")
+    parser.add_argument("--pitch_vertical_bands", type=int, default=3,
+                       help="V48: Number of vertical bands for pitch branch (1=GAP, 3=top/mid/bot)")
+    parser.add_argument("--gin_gate_reg_target", type=float, default=0.0,
+                        help="V48: GIN gate regularization target (0=disabled, 0.5=balanced)")
+    parser.add_argument("--gin_gate_reg_weight", type=float, default=0.0,
+                        help="V48: weight for GIN gate regularization loss (0=disabled)")
     parser.add_argument("--drop_path_rate", type=float, default=0.1,
                         help="Stochastic depth rate for transformer layers")
     parser.add_argument("--head_dropout", type=float, default=0.1,
@@ -1564,6 +1688,9 @@ def parse_args():
     parser.add_argument("--perturb_distribution", type=str, default="uniform",
                         choices=["uniform", "truncated_normal", "magnitude_balanced"],
                         help="Perturbation angle distribution")
+    parser.add_argument("--multi_scale_perturb", type=str, default="",
+                        help="V48: Multi-scale perturbation ranges with probabilities, "
+                             "e.g. '0.5:0.1,1.0:0.1,2.0:0.1' (remaining prob uses angle_range_deg)")
     parser.add_argument("--per_axis_prob", type=float, default=0.0,
                         help="Probability of single-axis perturbation (0=disabled)")
     parser.add_argument("--per_axis_weights", type=str, default="",
@@ -1576,6 +1703,52 @@ def parse_args():
                         help="V46: wide-range angle for experience replay (default: 5.0°)")
     parser.add_argument("--zero_perturbation_prob", type=float, default=0.0,
                         help="V43: probability of using T_init=T_gt (zero perturbation) to teach model identity mapping")
+    parser.add_argument("--zero_drift_loss_weight", type=float, default=0.0,
+                        help="V51: extra loss on init=gt batches penalizing R_pred deviation from R_gt (0=disabled)")
+    parser.add_argument("--zero_drift_loss_weight_start", type=float, default=0.0,
+                        help="V52 S2: ramp start weight; 0=use weight fixed. Linear ramp to zero_drift_loss_weight")
+    parser.add_argument("--zero_drift_loss_ramp_epochs", type=int, default=0,
+                        help="V52 S2: epochs to ramp zero_drift weight from start to final (0=no ramp)")
+    parser.add_argument("--zero_drift_loss_start_epoch", type=int, default=5,
+                        help="V51: epoch to start zero_drift_loss")
+    parser.add_argument("--zero_drift_dedicated_ratio", type=float, default=0.0,
+                        help="V51: force init=gt on this fraction of batches (in addition to zero_perturbation_prob)")
+    parser.add_argument("--inject_recovery_loss_weight", type=float, default=0.0,
+                        help="V52: extra loss on Fixed-Inject batches (all RPY inject), "
+                             "penalize out_err vs GT (aligns with gdiag Genuine Recovery)")
+    parser.add_argument("--inject_recovery_loss_start_epoch", type=int, default=15,
+                        help="V52: epoch to start inject_recovery_loss")
+    parser.add_argument("--inject_recovery_magnitude_deg", type=float, default=2.0,
+                        help="V52: Fixed-Inject magnitude on all RPY axes (match gdiag inject_deg)")
+    parser.add_argument("--inject_recovery_dedicated_ratio", type=float, default=0.0,
+                        help="V52: fraction of batches with gt + fixed all-axis inject")
+    parser.add_argument("--use_mgda", type=int, default=0,
+                        help="V52d/V53e: MGDA minimum-norm grad for pose+zd(+inject) tasks")
+    parser.add_argument("--mgda_start_epoch", type=int, default=5,
+                        help="Epoch to start MGDA multi-task backward")
+    parser.add_argument("--mgda_include_inject", type=int, default=1,
+                        help="Include inject_recovery as MGDA task (else fold into pose)")
+    # === V53: Dual-Path Pose Head ===
+    parser.add_argument("--use_dp_head", type=int, default=0,
+                        help="V53: enable Dual-Path Pose Head (Bias + Recovery + Router)")
+    parser.add_argument("--dp_gate_deg", type=float, default=1.5,
+                        help="V53: router target threshold (degrees) for recovery path")
+    parser.add_argument("--route_loss_weight", type=float, default=0.0,
+                        help="V53: BCE weight for magnitude router supervision")
+    parser.add_argument("--use_jacg", type=int, default=1,
+                        help="V53: Jacobian-Aware Correction Gain on recovery path")
+    parser.add_argument("--jacg_hidden_dim", type=int, default=64,
+                        help="V53: hidden dim for router / JACG MLPs")
+    parser.add_argument("--bias_path_in_norm", type=int, default=1,
+                        help="V53: LayerNorm on bias path tokens")
+    parser.add_argument("--recovery_path_layer_norm", type=int, default=1,
+                        help="V53: LayerNorm on recovery path tokens (reserved)")
+    parser.add_argument("--use_adir", type=int, default=0,
+                        help="V53b: Axis-Decoupled Iterative Refinement after pose head")
+    parser.add_argument("--adir_steps", type=int, default=2,
+                        help="V53b: ADIR refinement iterations")
+    parser.add_argument("--adir_max_step_deg", type=float, default=1.0,
+                        help="V53b: max per-axis correction per ADIR step (degrees)")
     parser.add_argument("--overcorrection_penalty", type=float, default=0.0,
                         help="V47: extra weight multiplier on loss when model overcorrects "
                              "(prediction error > initial perturbation). 0=disabled, 2.0=recommended")
@@ -1611,6 +1784,19 @@ def parse_args():
                              "difference when same scene gets two different T_init perturbations.")
     parser.add_argument("--consistency_loss_start_epoch", type=int, default=0,
                         help="v32: Epoch to start applying consistency loss.")
+    parser.add_argument("--conditional_consistency_threshold", type=float, default=0.0,
+                        help="v49: Only apply consistency loss when angular distance between "
+                             "two T_init paths is below this threshold (degrees). "
+                             "0=disabled (always apply). Recommended: 1.0-2.0")
+    parser.add_argument("--quat_bias_reset_alpha", type=float, default=0.0,
+                        help="v49: At each cosine restart cycle boundary, blend quat_head bias "
+                             "toward identity [1,0,0,0] by this fraction. "
+                             "0=disabled, 0.5=half-reset, 1.0=full-reset. Recommended: 0.3-0.5")
+    parser.add_argument("--decoder_pool_mode", type=str, default="mean",
+                        choices=["mean", "attention"],
+                        help="v49: Query aggregation in PoseQueryDecoder. "
+                             "'mean'=simple average (v48 default), "
+                             "'attention'=learned attention pooling (v49 enhancement)")
     parser.add_argument("--progressive_angle_start", type=float, default=0.0,
                         help="v32: Starting angle_range for progressive curriculum (0=disabled, use fixed angle_range_deg).")
     parser.add_argument("--progressive_angle_end", type=float, default=0.0,
@@ -2181,15 +2367,30 @@ def main():
         ckpt_sd = remapped_sd
         filtered_sd = {}
         skipped_shape = []
+        partial_loaded = []
         for k, v in ckpt_sd.items():
             if k in model_sd and model_sd[k].shape == v.shape:
                 filtered_sd[k] = v
             elif k in model_sd:
-                skipped_shape.append(f"{k}: ckpt={list(v.shape)} vs model={list(model_sd[k].shape)}")
+                m_shape = model_sd[k].shape
+                if len(v.shape) == 1 and len(m_shape) == 1 and m_shape[0] < v.shape[0] and 'feat_in' in k:
+                    filtered_sd[k] = v[:m_shape[0]].clone()
+                    partial_loaded.append(f"{k}: ckpt[:{m_shape[0]}]/{v.shape[0]}")
+                elif len(v.shape) == 2 and len(m_shape) == 2 and m_shape[0] < v.shape[0] and v.shape[1] == m_shape[1] and 'feat_in' in k:
+                    filtered_sd[k] = v[:m_shape[0]].clone()
+                    partial_loaded.append(f"{k}: ckpt[:{m_shape[0]},:]{v.shape}")
+                elif len(v.shape) == 2 and len(m_shape) == 2 and 'pitch_branch.img_encoder' in k and m_shape[1] > v.shape[1] and m_shape[1] % v.shape[1] == 0:
+                    n_rep = m_shape[1] // v.shape[1]
+                    filtered_sd[k] = v.repeat(1, n_rep)[:m_shape[0], :m_shape[1]].clone()
+                    partial_loaded.append(f"{k}: tile {n_rep}x ({list(v.shape)}->{list(m_shape)})")
+                else:
+                    skipped_shape.append(f"{k}: ckpt={list(v.shape)} vs model={list(m_shape)}")
         missing, unexpected = model.load_state_dict(filtered_sd, strict=False)
         if is_main:
             tprint(f"Load pretrain model from {args.pretrain_ckpt}")
             tprint(f"  Loaded {len(filtered_sd)}/{len(model_sd)} model keys from ckpt")
+            if partial_loaded:
+                tprint(f"  Partial GIN weight transfer: {partial_loaded}")
             if skipped_shape:
                 tprint(f"  Shape mismatch (skipped): {skipped_shape}")
             if missing:
@@ -2552,11 +2753,14 @@ def main():
                  'medw_roll': float('inf'), 'medw_pitch': float('inf'), 'medw_yaw': float('inf'),
                  'jacobian': float('-inf'), 'jacobian_roll': float('-inf'),
                  'jacobian_pitch': float('-inf'), 'jacobian_yaw': float('-inf')}
+    best_jacobian = {'epoch': -1, 'overall': float('-inf'),
+                     'roll': float('-inf'), 'pitch': float('-inf'), 'yaw': float('-inf')}
     kpi_history = []
     last_epoch_train_errors = None
     last_epoch_val_errors = None
     checkpoint_records = []
     early_stop_counter = 0
+    jacobian_early_stop_counter = 0
     early_stop_triggered = False
     
     if is_main:
@@ -2596,6 +2800,33 @@ def main():
                    f"start_ep={args.jacobian_loss_start_epoch}, "
                    f"interval={getattr(args, 'jacobian_loss_interval', 4)} batches, "
                    f"probe=±{args.jacobian_loss_probe_deg}°")
+        if getattr(args, 'zero_drift_loss_weight', 0.0) > 0:
+            _zd_ramp = int(getattr(args, 'zero_drift_loss_ramp_epochs', 0))
+            _zd_w0 = float(getattr(args, 'zero_drift_loss_weight_start', 0.0))
+            _zd_w_msg = (f"ramp {_zd_w0}→{args.zero_drift_loss_weight} over {_zd_ramp}ep"
+                         if _zd_ramp > 0 and _zd_w0 > 0 else f"weight={args.zero_drift_loss_weight}")
+            tprint(f"  • Zero-drift loss: {_zd_w_msg}, "
+                   f"start_ep={args.zero_drift_loss_start_epoch}, "
+                   f"dedicated_ratio={getattr(args, 'zero_drift_dedicated_ratio', 0.0)}")
+        if getattr(args, 'use_mgda', 0) > 0:
+            _inj_mgda = "yes" if getattr(args, 'mgda_include_inject', 1) else "no"
+            tprint(f"  • MGDA: pose+zd(+inject={_inj_mgda}) min-norm grad, "
+                   f"start_ep={getattr(args, 'mgda_start_epoch', 5)}")
+        if getattr(args, 'jacobian_early_stop_min', 0.0) > 0:
+            tprint(f"  • Jacobian early-stop: overall < {args.jacobian_early_stop_min} "
+                   f"for {args.jacobian_early_stop_patience} eval cycles → stop")
+        if args.enable_jacobian_gate_ckpt > 0:
+            tprint("  • Jacobian gate ckpt: best val Jacobian overall → ckpt_best_jacobian.pth")
+        if getattr(args, 'inject_recovery_loss_weight', 0.0) > 0:
+            tprint(f"  • Inject-recovery loss: weight={args.inject_recovery_loss_weight}, "
+                   f"start_ep={args.inject_recovery_loss_start_epoch}, "
+                   f"inject={args.inject_recovery_magnitude_deg}° all-RPY, "
+                   f"dedicated_ratio={getattr(args, 'inject_recovery_dedicated_ratio', 0.0)}")
+        if getattr(args, 'use_dp_head', 0) > 0:
+            tprint(f"  • V53 DP-Head: gate={args.dp_gate_deg}°, route_loss={args.route_loss_weight}, "
+                   f"jacg={getattr(args, 'use_jacg', 1)}")
+        if getattr(args, 'use_adir', 0) > 0:
+            tprint(f"  • V53b ADIR: steps={args.adir_steps}, max_step={args.adir_max_step_deg}°")
         if args.enable_dual_gate_ckpt > 0:
             tprint(f"  • Dual gate ckpt: max(MEDW{args.medw_eval_max_frames} R,P,Y) < {args.dual_gate_medw_max}° "
                    f"AND Jacobian R/P/Y/overall > {args.dual_gate_jacobian_min} → ckpt_best_dual.pth")
@@ -2647,10 +2878,14 @@ def main():
                 best_medw = ckpt['best_medw']
             if 'best_dual' in ckpt and ckpt['best_dual'] is not None:
                 best_dual = ckpt['best_dual']
+            if 'best_jacobian' in ckpt and ckpt['best_jacobian'] is not None:
+                best_jacobian = ckpt['best_jacobian']
             if 'kpi_history' in ckpt and ckpt['kpi_history']:
                 kpi_history = ckpt['kpi_history']
             if 'early_stop_counter' in ckpt:
                 early_stop_counter = int(ckpt['early_stop_counter'])
+            if 'jacobian_early_stop_counter' in ckpt:
+                jacobian_early_stop_counter = int(ckpt['jacobian_early_stop_counter'])
             if _v321_ema_enabled and _v321_ema_model is not None and 'ema_state_dict' in ckpt:
                 _v321_ema_model.load_state_dict(ckpt['ema_state_dict'])
                 if is_main:
@@ -2698,14 +2933,42 @@ def main():
     import signal
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
+    _qbr_alpha = getattr(args, 'quat_bias_reset_alpha', 0.0)
+    _qbr_T0 = getattr(args, 'cosine_T0', 40)
+    _qbr_Tmult = getattr(args, 'cosine_Tmult', 2)
+
+    _mgda_weight_params = _get_mgda_weight_params(raw_model)
     for epoch in range(start_epoch, num_epochs):
         _current_epoch[0] = epoch
         main._cuda_error_count = 0
         if train_sampler is not None and hasattr(train_sampler, 'set_epoch'):
             train_sampler.set_epoch(epoch)
+        if (is_main and getattr(args, 'use_mgda', 0) > 0
+                and epoch == getattr(args, 'mgda_start_epoch', 5)):
+            tprint(f"  [MGDA] epoch {epoch + 1} start: weighted-loss mode, "
+                   f"bottleneck={len(_mgda_weight_params)} tensors")
         model.train()
         if hasattr(raw_model, 'set_training_epoch'):
             raw_model.set_training_epoch(epoch)
+
+        if _qbr_alpha > 0 and epoch > 0:
+            _is_cycle_boundary = False
+            _cycle_start = 0
+            _T = _qbr_T0
+            while _cycle_start + _T <= epoch:
+                _cycle_start += _T
+                _T = int(_T * _qbr_Tmult)
+            if epoch == _cycle_start:
+                _is_cycle_boundary = True
+            if _is_cycle_boundary and is_main:
+                _qh = getattr(raw_model, 'corr_head', None)
+                if _qh and hasattr(_qh, 'quat_head'):
+                    _final = _qh.quat_head[-1]
+                    _id_bias = torch.tensor([1.0, 0.0, 0.0, 0.0], device=_final.bias.device)
+                    with torch.no_grad():
+                        _final.bias.copy_((1 - _qbr_alpha) * _final.bias + _qbr_alpha * _id_bias)
+                    tprint(f"  [v49] Quat bias reset (alpha={_qbr_alpha}) at cycle boundary ep{epoch}: "
+                           f"new bias={_final.bias.data.cpu().tolist()}")
         if args.domain_adversarial > 0:
             raw_model._dann_epoch_ratio = epoch / max(num_epochs - 1, 1)
 
@@ -2786,9 +3049,37 @@ def main():
             _mr_angle = getattr(args, 'multi_range_angle', 5.0)
             if _mr_prob > 0 and np.random.rand() < _mr_prob:
                 _current_angle_range = _mr_angle
-            _use_zero_perturb = (args.zero_perturbation_prob > 0 and
-                                 np.random.rand() < args.zero_perturbation_prob)
-            if _use_zero_perturb:
+            _ms_spec = getattr(args, 'multi_scale_perturb', '')
+            if _ms_spec:
+                _ms_roll = np.random.rand()
+                _ms_cum = 0.0
+                for _ms_pair in _ms_spec.split(','):
+                    _ms_parts = _ms_pair.strip().split(':')
+                    if len(_ms_parts) == 2:
+                        _ms_angle, _ms_p = float(_ms_parts[0]), float(_ms_parts[1])
+                        _ms_cum += _ms_p
+                        if _ms_roll < _ms_cum:
+                            _current_angle_range = _ms_angle
+                            break
+            _use_zero_perturb = False
+            _use_inject_recovery = False
+            _inj_dedicated = float(getattr(args, 'inject_recovery_dedicated_ratio', 0.0))
+            _inj_loss_w_cfg = float(getattr(args, 'inject_recovery_loss_weight', 0.0))
+            if (_inj_dedicated > 0 and _inj_loss_w_cfg > 0
+                    and np.random.rand() < _inj_dedicated):
+                _use_inject_recovery = True
+                init_T_to_camera_np = _apply_fixed_inject_batch(
+                    gt_T_to_camera_np, getattr(args, 'inject_recovery_magnitude_deg', 2.0))
+            else:
+                _zd_dedicated = float(getattr(args, 'zero_drift_dedicated_ratio', 0.0))
+                if _zd_dedicated > 0 and np.random.rand() < _zd_dedicated:
+                    _use_zero_perturb = True
+                elif (args.zero_perturbation_prob > 0 and
+                      np.random.rand() < args.zero_perturbation_prob):
+                    _use_zero_perturb = True
+            if _use_inject_recovery:
+                pass  # init already set above
+            elif _use_zero_perturb:
                 init_T_to_camera_np = gt_T_to_camera_np.copy()
             else:
                 init_T_to_camera_np, _, _ = generate_single_perturbation_from_T(
@@ -2926,6 +3217,8 @@ def main():
                 _jac_loss_w > 0 and epoch >= _jac_loss_start
                 and batch_index % _jac_interval == 0)
             B_cur = resize_imgs.shape[0]
+            _use_mgda = False
+            _mgda_tasks = {}
             # V32 consistency: split-forward approach (memory-safe).
             # Run main batch with gradients, then alt batch with no_grad for consistency loss.
             # The old 2B-concat approach OOMs on L20 (46GB) when B=16 → 2B=32.
@@ -3002,7 +3295,25 @@ def main():
                             R_diff = torch.bmm(
                                 T_pred[:, :3, :3], T_pred_alt[:, :3, :3].transpose(1, 2))
                             trace = R_diff[:, 0, 0] + R_diff[:, 1, 1] + R_diff[:, 2, 2]
-                            consistency_loss = (1.0 - trace / 3.0).mean()
+                            per_sample_cons = 1.0 - trace / 3.0
+
+                            _cond_thresh_deg = getattr(args, 'conditional_consistency_threshold', 0.0)
+                            if _cond_thresh_deg > 0:
+                                _R_init_main = _fwd_init[:B_cur, :3, :3]
+                                _R_init_alt = init_T_alt_t[:B_cur, :3, :3]
+                                _R_pair_diff = torch.bmm(_R_init_main, _R_init_alt.transpose(1, 2))
+                                _pair_trace = _R_pair_diff[:, 0, 0] + _R_pair_diff[:, 1, 1] + _R_pair_diff[:, 2, 2]
+                                _pair_angle = torch.acos(torch.clamp((_pair_trace - 1) / 2, -1 + 1e-7, 1 - 1e-7))
+                                _thresh_rad = _cond_thresh_deg * 3.14159265 / 180.0
+                                _cons_mask = (_pair_angle < _thresh_rad).float()
+                                if _cons_mask.sum() > 0:
+                                    consistency_loss = (per_sample_cons * _cons_mask).sum() / _cons_mask.sum()
+                                else:
+                                    consistency_loss = torch.tensor(0.0, device=per_sample_cons.device)
+                                loss["cons_mask_ratio"] = _cons_mask.mean().item()
+                            else:
+                                consistency_loss = per_sample_cons.mean()
+
                             total_loss = total_loss + _v32_consistency_w * consistency_loss
                             loss["v32_consistency_loss"] = consistency_loss.item()
                         elif _v32_init_T_alt is not None and _v321_ema_enabled:
@@ -3037,14 +3348,70 @@ def main():
                             loss['overcorr_ratio'] = _overcorr_ratio.item()
                             loss['overcorr_scale'] = _overcorr_scale.item()
 
+                        _zd_loss_w = _effective_zero_drift_loss_weight(args, epoch)
+                        _zd_loss_start = getattr(args, 'zero_drift_loss_start_epoch', 5)
+                        _task_zd = None
+                        if _zd_loss_w > 0 and epoch >= _zd_loss_start and _use_zero_perturb:
+                            _R_gt_zd = _fwd_gt[:B_cur, :3, :3]
+                            _R_pred_zd = T_pred[:B_cur, :3, :3]
+                            _zd_rpy = _zero_drift_axis_error_deg(_R_gt_zd, _R_pred_zd)
+                            _zd_loss = torch.nn.functional.smooth_l1_loss(
+                                _zd_rpy, torch.zeros_like(_zd_rpy), beta=0.1, reduction='mean')
+                            _task_zd = _zd_loss_w * _zd_loss
+                            loss['zero_drift_loss'] = _zd_loss.item()
+                            loss['zero_drift_loss_weight_eff'] = _zd_loss_w
+
+                        _inj_loss_w = getattr(args, 'inject_recovery_loss_weight', 0.0)
+                        _inj_loss_start = getattr(args, 'inject_recovery_loss_start_epoch', 15)
+                        _task_inj = None
+                        if (_inj_loss_w > 0 and epoch >= _inj_loss_start
+                                and _use_inject_recovery):
+                            _R_gt_inj = _fwd_gt[:B_cur, :3, :3]
+                            _R_pred_inj = T_pred[:B_cur, :3, :3]
+                            _out_err_inj = _zero_drift_axis_error_deg(_R_gt_inj, _R_pred_inj)
+                            _inj_loss = torch.nn.functional.smooth_l1_loss(
+                                _out_err_inj, torch.zeros_like(_out_err_inj),
+                                beta=0.1, reduction='mean')
+                            _task_inj = _inj_loss_w * _inj_loss
+                            loss['inject_recovery_loss'] = _inj_loss.item()
+
                         _mag_w = getattr(args, 'magnitude_loss_weight', 0.3)
                         if 'magnitude_loss' in loss and _mag_w > 0:
                             _mag_loss = loss['magnitude_loss']
                             total_loss = total_loss + _mag_w * _mag_loss
                             loss['magnitude_loss_weighted'] = (_mag_w * _mag_loss).item()
 
+                        _gin_reg_w = getattr(args, 'gin_gate_reg_weight', 0.0)
+                        _raw = model.module if hasattr(model, 'module') else model
+                        if _gin_reg_w > 0 and hasattr(_raw, 'feat_in') and _raw.feat_in is not None and hasattr(_raw.feat_in, 'gate_reg_loss'):
+                            _gin_reg = _raw.feat_in.gate_reg_loss()
+                            total_loss = total_loss + _gin_reg_w * _gin_reg
+                            loss['gin_gate_reg'] = _gin_reg.item()
+
+                        _use_mgda = (
+                            getattr(args, 'use_mgda', 0) > 0
+                            and epoch >= getattr(args, 'mgda_start_epoch', 5))
+                        _mgda_tasks = {'pose': total_loss}
+                        if _task_zd is not None:
+                            _mgda_tasks['zd'] = _task_zd
+                        if _task_inj is not None:
+                            if getattr(args, 'mgda_include_inject', 1) > 0:
+                                _mgda_tasks['inject'] = _task_inj
+                            else:
+                                _mgda_tasks['pose'] = _mgda_tasks['pose'] + _task_inj
+                        if not _use_mgda:
+                            if _task_zd is not None:
+                                total_loss = total_loss + _task_zd
+                            if _task_inj is not None:
+                                total_loss = total_loss + _task_inj
+                        else:
+                            total_loss = sum(_mgda_tasks.values())
+                            loss['mgda_n_tasks'] = len(_mgda_tasks)
+
                         if grad_accum_steps > 1:
                             total_loss = total_loss / grad_accum_steps
+                            if _use_mgda and len(_mgda_tasks) >= 2:
+                                _mgda_tasks = {k: v / grad_accum_steps for k, v in _mgda_tasks.items()}
                 except RuntimeError as _fwd_err:
                     if "CUDA" in str(_fwd_err) or "illegal" in str(_fwd_err):
                         if is_main:
@@ -3101,7 +3468,41 @@ def main():
                 if _bwd_ev is not None:
                     _bwd_ev[0].record()
                 try:
-                    scaler.scale(total_loss).backward()
+                    if _use_mgda and len(_mgda_tasks) >= 2:
+                        if is_main and not getattr(main, '_mgda_load_logged', False):
+                            _, _mgda_path = _get_mgda_multitask_backward()
+                            tprint(f"  [MGDA] loaded from {_mgda_path}")
+                            main._mgda_load_logged = True
+                        if is_main:
+                            _mgda_task_str = ", ".join(
+                                f"{k}={v.item():.4f}" for k, v in _mgda_tasks.items())
+                            tprint(
+                                f"  [MGDA] backward start ep={epoch + 1} batch={batch_index + 1} "
+                                f"n_tasks={len(_mgda_tasks)} [{_mgda_task_str}]")
+                        _mgda_t0 = time.time()
+                        try:
+                            _mgda_loss, _mgda_meta = _mgda_build_weighted_loss(
+                                _mgda_tasks, grad_accum_steps=1,
+                                weight_params=_mgda_weight_params)
+                            if is_main and 'mgda_alpha' in _mgda_meta:
+                                _alpha_str = ", ".join(
+                                    f"{k}={v:.3f}" for k, v in _mgda_meta['mgda_alpha'].items())
+                                tprint(f"  [MGDA] weights ep={epoch + 1} batch={batch_index + 1}: {_alpha_str}")
+                            scaler.scale(_mgda_loss).backward()
+                        except Exception as _mgda_err:
+                            if is_main:
+                                tprint(
+                                    f"  [MGDA] backward FAILED ep={epoch + 1} "
+                                    f"batch={batch_index + 1} after {time.time() - _mgda_t0:.2f}s: "
+                                    f"{type(_mgda_err).__name__}: {_mgda_err}")
+                            raise
+                        else:
+                            if is_main:
+                                tprint(
+                                    f"  [MGDA] backward done ep={epoch + 1} batch={batch_index + 1} "
+                                    f"({time.time() - _mgda_t0:.2f}s)")
+                    else:
+                        scaler.scale(total_loss).backward()
                 except RuntimeError as _bwd_err:
                     if "CUDA" in str(_bwd_err) or "illegal" in str(_bwd_err):
                         _cuda_error_count = getattr(main, '_cuda_error_count', 0) + 1
@@ -3531,8 +3932,10 @@ def main():
                 'best_val': best_val,
                 'best_medw': best_medw,
                 'best_dual': best_dual,
+                'best_jacobian': best_jacobian,
                 'kpi_history': kpi_history,
                 'early_stop_counter': early_stop_counter,
+                'jacobian_early_stop_counter': jacobian_early_stop_counter,
                 'args': vars(args),
             }
             if _v321_ema_enabled and _v321_ema_model is not None:
@@ -4036,6 +4439,55 @@ def main():
                            f"Overall={jac_result['overall']:.3f} "
                            f"(R:{jac_result['roll']:.3f} P:{jac_result['pitch']:.3f} "
                            f"Y:{jac_result['yaw']:.3f}) [{jac_result['verdict']}]")
+                    _jac_es_min = float(getattr(args, 'jacobian_early_stop_min', 0.0))
+                    _jac_es_pat = int(getattr(args, 'jacobian_early_stop_patience', 2))
+                    if _jac_es_min > 0:
+                        if float(jac_result['overall']) < _jac_es_min:
+                            jacobian_early_stop_counter += 1
+                            tprint(f"  Jacobian early-stop: overall={jac_result['overall']:.3f} "
+                                   f"< {_jac_es_min} ({jacobian_early_stop_counter}/{_jac_es_pat} eval cycles)")
+                        else:
+                            jacobian_early_stop_counter = 0
+                        if jacobian_early_stop_counter >= _jac_es_pat:
+                            tprint(f"Early stopping triggered at epoch {epoch+1} "
+                                   f"(Jacobian overall < {_jac_es_min} for {_jac_es_pat} eval cycles)")
+                            early_stop_triggered = True
+                    if args.enable_jacobian_gate_ckpt > 0:
+                        _jac_ov = float(jac_result['overall'])
+                        if _jac_ov > best_jacobian.get('overall', float('-inf')):
+                            best_jacobian.update({
+                                'epoch': epoch + 1,
+                                'overall': _jac_ov,
+                                'roll': float(jac_result['roll']),
+                                'pitch': float(jac_result['pitch']),
+                                'yaw': float(jac_result['yaw']),
+                            })
+                            model_to_save = model.module if use_ddp else model
+                            jac_path = os.path.join(ckpt_save_dir, 'ckpt_best_jacobian.pth')
+                            _jac_data = {
+                                'epoch': epoch + 1,
+                                'model_state_dict': model_to_save.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                                'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                                'scaler_state_dict': scaler.state_dict(),
+                                'train_noise': train_noise,
+                                'eval_noise': eval_noise,
+                                'rotation_only': rotation_only,
+                                'epoch_train_errors': last_epoch_train_errors,
+                                'epoch_val_errors': last_epoch_val_errors,
+                                'best_train': best_train,
+                                'best_val': best_val,
+                                'best_medw': best_medw,
+                                'best_dual': best_dual,
+                                'best_jacobian': best_jacobian,
+                                'jacobian_eval': jac_result,
+                                'args': vars(args),
+                            }
+                            _jac_data.update(_build_ckpt_metadata(model, args))
+                            if _v321_ema_enabled and _v321_ema_model is not None:
+                                _jac_data['ema_state_dict'] = _v321_ema_model.state_dict()
+                            torch.save(_jac_data, jac_path)
+                            tprint(f"  ★ New best Jacobian → {jac_path} (overall={_jac_ov:.3f})")
                 elif args.enable_jacobian_eval > 0:
                     tprint("  [JAC WARN] Insufficient Jacobian data from val sweep")
 
@@ -4233,6 +4685,15 @@ def main():
             md_lines.append("")
         elif args.enable_dual_gate_ckpt > 0 and kpi_history:
             md_lines.append("Dual Gate: NOT CONVERGED (never passed max(R,P,Y) + Jacobian axes gate)")
+            md_lines.append("")
+
+        if best_jacobian.get('epoch', -1) > 0:
+            md_lines.append(f"Best Jacobian (Epoch {best_jacobian['epoch']}):")
+            md_lines.append(f"  overall: {best_jacobian.get('overall', float('nan')):.3f} "
+                            f"(R:{best_jacobian.get('roll', float('nan')):.3f} "
+                            f"P:{best_jacobian.get('pitch', float('nan')):.3f} "
+                            f"Y:{best_jacobian.get('yaw', float('nan')):.3f})")
+            md_lines.append(f"  ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_jacobian.pth')}")
             md_lines.append("")
 
         if checkpoint_records:

@@ -25,6 +25,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S2 Full baseline (MEDW=0.027°)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-full-best-dual"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -35,6 +36,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full 150ep best-dual (MEDW=0.026°, Jac=0.987)"
+    pitch_vertical_bands: 1
 
   - label: "v45-gin-S3-full-best-val"
     dir_name: "model_small_1deg_v45_gin_cf_bev_r_S3_full"
@@ -44,6 +46,7 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45 GIN S3 Full 150ep best-val (ValRot=0.10°)"
+    pitch_vertical_bands: 1
 
   - label: "v45b-S1-quick-best-dual"
     dir_name: "model_small_5deg_v45b_cf_bev_r_S1_quick"
@@ -54,3 +57,4 @@ models:
     rotation_only: 1
     fusion_backend: "cf_bev_r"
     mode_desc: "V45b S1 Quick baseline (GS=0.342 reference)"
+    pitch_vertical_bands: 1

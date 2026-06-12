@@ -1,0 +1,256 @@
+# V48 CF-BEV-R Quick: Partial GIN + Multi-Scale Perturbation (Revised)
+#
+# === 审查后修订要点 ===
+# 1. cf_n_groups 从512改回256:
+#    v45c(256g)的Pitch精度W200_P=0.16 优于 v47-512(512g)的0.30
+#    v45c(256g)的GenRec=69% 远优于 v47-512(512g)的30%
+#    512g在最关键的Pitch轴反而更差,且Recovery崩塌
+# 2. epoch从300减至150:
+#    v45c best_val@ep81, v47 best_val@ep171
+#    300 epoch中后半段完全浪费, 150+patience=50足够
+# 3. 目标重新校准:
+#    Recovery>90%在当前框架下不可行(历史最高82%)
+#    MEDW200 RPY全<0.1在当前框架下极难(Pitch ORACLE最低=0.076)
+#    切合实际: W200 max(R,P,Y)<0.18, ZD<0.20, GenRec>55%
+#
+# === 核心设计 ===
+# 基线: v45c-S1(无GIN, cf256, GenRec=69%, W200_P=0.16)
+# 改进1: Partial GIN(64ch/256) — 仅少量通道做GIN,保留大部分扰动敏感性
+# 改进2: Multi-Scale训练扰动 — 30%小扰动(0.5/1.0/2.0deg)
+# 改进3: GIN gate正则化 — 防止gate塌缩
+#
+# Quick version: single-node 8-GPU
+#
+# Usage:
+#   bash batch_train.sh configs/v48_cf_bev_r_quick.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === V48: cf_n_groups=256 (与v45c一致,已证明是精度/Recovery最佳平衡点) ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 3
+    corr_window_mode: adaptive
+
+    # === V48 Partial GIN: 64 channels GIN + 192 channels LayerNorm ===
+    # 比例1/4 GIN: 保留大部分扰动敏感性(v45c风格),仅少量通道控制ZD
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 1
+    gin_init_gate: 0.5
+    gin_channels: 64
+    gin_gate_reg_target: 0.5
+    gin_gate_reg_weight: 0.05
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.15
+
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.4
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.1
+
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 15.0
+    consistency_loss_weight: 0.5
+    consistency_loss_start_epoch: 10
+    zero_perturbation_prob: 0.25
+    symmetric_perturb: 1
+    overcorrection_penalty: 2.0
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.3
+
+    # === V48 Multi-Scale Perturbation ===
+    # 10% prob each for 0.5/1.0/2.0deg, remaining 70% uses angle_range_deg
+    multi_scale_perturb: "0.5:0.10,1.0:0.10,2.0:0.10"
+
+    augment_mount_jitter_prob: 0.4
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.015
+    augment_intrinsic: 0.03
+    augment_intrinsic_cxcy: 0.015
+    augment_color_jitter: 0.3
+
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: magnitude_balanced
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    max_frames_per_seq: 500
+    foreground: true
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_pitch_flip_prob: 0.0
+
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== E1: Multi-Scale only (无Partial GIN, 纯训练策略改进) =====
+  # 基线: v45c-S1-quick (无GIN, cf256, GenRec=69%)
+  # 改动: 仅加multi-scale扰动, 不改架构
+  # 目的: 隔离验证multi-scale对recovery的改善效果
+  - name: "v48a_ms_only_S1_quick"
+    description: "V48a: v45c基线 + Multi-Scale扰动 (无GIN)"
+    dataset: "all"
+    version: "v48a_ms_only_S1_quick"
+    params:
+      use_gated_instance_norm: 0
+      gin_channels: 0
+      gin_gate_reg_weight: 0.0
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 150
+      warmup_epochs: 8
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 50
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v45c_cf_bev_r_S1_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+      per_axis_prob: 0.4
+
+  # ===== E2: Partial GIN(64ch) + Multi-Scale =====
+  # 基线: v45c-S1 pretrain, 加上轻量GIN(64/256通道)
+  # 目的: 验证少量GIN能否改善ZD但不损害Recovery
+  - name: "v48b_partial_gin64_S1_quick"
+    description: "V48b: Partial GIN(64ch/256) + Multi-Scale, cf256"
+    dataset: "all"
+    version: "v48b_partial_gin64_S1_quick"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 150
+      warmup_epochs: 8
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 50
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v45c_cf_bev_r_S1_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+      per_axis_prob: 0.4
+
+  # ===== E3: Partial GIN(128ch) + Multi-Scale =====
+  # 更多GIN通道,更强ZD控制,验证Recovery损失边界
+  - name: "v48c_partial_gin128_S1_quick"
+    description: "V48c: Partial GIN(128ch/256) + Multi-Scale, cf256"
+    dataset: "all"
+    version: "v48c_partial_gin128_S1_quick"
+    params:
+      gin_channels: 128
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 150
+      warmup_epochs: 8
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 50
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v45c_cf_bev_r_S1_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+      per_axis_prob: 0.4
+
+  # ===== E4: 960x540分辨率 + Multi-Scale (无GIN) =====
+  # 目的: 验证分辨率从640x360提升到960x540对Pitch精度的改善
+  # 当前640x360下0.1°Pitch仅0.56px, 960x540下为0.84px
+  # 预期: Pitch改善15-25%, 计算量增加2.3x
+  - name: "v48d_hires960_S1_quick"
+    description: "V48d: 960x540分辨率 + Multi-Scale (无GIN)"
+    dataset: "all"
+    version: "v48d_hires960_S1_quick"
+    params:
+      target_width: 960
+      target_height: 540
+      use_gated_instance_norm: 0
+      gin_channels: 0
+      gin_gate_reg_weight: 0.0
+      batch_size: 8
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 150
+      warmup_epochs: 8
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 50
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v45c_cf_bev_r_S1_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+      resume_ckpt: auto
+      rocr_detach_epochs: 999
+      seq_consistency_start_epoch: 999
+      per_axis_prob: 0.4

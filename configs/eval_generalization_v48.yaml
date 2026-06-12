@@ -1,0 +1,245 @@
+# V48 泛化评估配置 (合并 V47-only 基线 + V48 全系列)
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/eval_generalization_v48.yaml --parallel -1 --eval_max_frames_per_seq 400
+#   python run_generalization_eval.py --config configs/eval_generalization_v48.yaml --generalization_diag --parallel -1 --eval_max_frames_per_seq 400
+#
+# 评估内容:
+#   === 基线 (来自 v47_only) ===
+#   - V46 S1 Quick (v47方案对照基线)
+#   - V47-512g S1 Full (最低ZD, 但Recovery最差)
+#   - V45c S1/S2 Quick (最优综合基线)
+#   === V48 新实验 ===
+#   - V48a: Multi-Scale only (无GIN)
+#   - V48b: Partial GIN(64ch) + Multi-Scale
+#   - V48c: Partial GIN(128ch) + Multi-Scale
+#   - V48d: 960x540分辨率 + Multi-Scale (无GIN) [训练完成后启用]
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v48"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v48_generalization"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 8
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+
+models:
+
+  # ========================================================================
+  # 基线模型 (来自 eval_generalization_v47_only.yaml)
+  # ========================================================================
+
+  # ===== V45c Quick: V45b + cf_n_groups=256 =====
+  - label: "v45c-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 (5deg + double spatial res)"
+    pitch_vertical_bands: 1
+
+  - label: "v45c-S1-quick-best-val"
+    dir_name: "model_small_5deg_v45c_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S1 n_groups=256 best-val"
+    pitch_vertical_bands: 1
+
+  - label: "v45c-S2-quick-best-dual"
+    dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S2 n_groups=256 + IN (3deg fine-tune)"
+    pitch_vertical_bands: 1
+
+  - label: "v45c-S2-quick-best-val"
+    dir_name: "model_small_3deg_v45c_cf_bev_r_S2_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V45c S2 n_groups=256 + IN best-val"
+    pitch_vertical_bands: 1
+
+  # ===== V46 Quick (v47方案的对照基线) =====
+  - label: "v46-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick baseline"
+    pitch_vertical_bands: 1
+
+  - label: "v46-S1-quick-best-val"
+    dir_name: "model_small_5deg_v46_cf_bev_r_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V46 S1 Quick baseline best-val"
+    pitch_vertical_bands: 1
+
+  # ===== V47-512g S1 Full: 长训练 =====
+  - label: "v47-512g-S1-full-best-dual"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Full n_groups=512 (longer training)"
+    pitch_vertical_bands: 1
+
+  - label: "v47-512g-S1-full-best-val"
+    dir_name: "model_small_5deg_v47_512g_cf_bev_r_S1_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S1 Full n_groups=512 best-val"
+    pitch_vertical_bands: 1
+
+  - label: "v47-512g-S2-full-best-dual"
+    dir_name: "model_small_3deg_v47_512g_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S2 Full n_groups=512 (longer training)"
+    pitch_vertical_bands: 1
+
+  - label: "v47-512g-S2-full-best-val"
+    dir_name: "model_small_3deg_v47_512g_cf_bev_r_S2_full"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V47 S2 Full n_groups=512 best-val"
+    pitch_vertical_bands: 1
+
+  # ========================================================================
+  # V48 新实验
+  # ========================================================================
+
+  # ===== V48a: Multi-Scale only (无GIN, 纯训练策略改进) =====
+  - label: "v48a-ms-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v48a_ms_only_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V48a Multi-Scale only (no GIN, cf256)"
+    pitch_vertical_bands: 3
+
+  - label: "v48a-ms-S1-quick-best-val"
+    dir_name: "model_small_5deg_v48a_ms_only_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V48a Multi-Scale only best-val"
+    pitch_vertical_bands: 3
+
+  # ===== V48b: Partial GIN(64ch) + Multi-Scale =====
+  - label: "v48b-gin64-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v48b_partial_gin64_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V48b Partial GIN(64ch/256) + Multi-Scale"
+    pitch_vertical_bands: 3
+
+  - label: "v48b-gin64-S1-quick-best-val"
+    dir_name: "model_small_5deg_v48b_partial_gin64_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V48b Partial GIN(64ch/256) + Multi-Scale best-val"
+    pitch_vertical_bands: 3
+
+  # ===== V48c: Partial GIN(128ch) + Multi-Scale =====
+  - label: "v48c-gin128-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v48c_partial_gin128_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V48c Partial GIN(128ch/256) + Multi-Scale"
+    pitch_vertical_bands: 3
+
+  - label: "v48c-gin128-S1-quick-best-val"
+    dir_name: "model_small_5deg_v48c_partial_gin128_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V48c Partial GIN(128ch/256) + Multi-Scale best-val"
+    pitch_vertical_bands: 3
+
+  # ===== V48d: 960x540分辨率 + Multi-Scale (无GIN) =====
+  # 注意: v48d 使用960x540分辨率训练, 评估时也需要960x540
+  - label: "v48d-hires-S1-quick-best-dual"
+    dir_name: "model_small_5deg_v48d_hires960_S1_quick"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    target_width: 960
+    target_height: 540
+    mode_desc: "V48d 960x540 + Multi-Scale (no GIN)"
+    pitch_vertical_bands: 3
+  
+  - label: "v48d-hires-S1-quick-best-val"
+    dir_name: "model_small_5deg_v48d_hires960_S1_quick"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    target_width: 960
+    target_height: 540
+    mode_desc: "V48d 960x540 + Multi-Scale (no GIN) best-val"
+    pitch_vertical_bands: 3
