@@ -1,0 +1,170 @@
+# V53f: GIN + JACG + MGDA — 无 DP-Head，冲 GenuineRec≥70%
+#
+# 背景: v53e ZD/Rec 均衡 (ZD=0.20°, Rec=56.6%)，v54c DP-Head 拉高 Rec 但恶化 ZD/MEDW
+# 策略: 保留 v53e Partial GIN + 加强 JACG + inject，不加 DP-Head 双通路
+# 基座: v53e-gin-mgda-best-dual
+#
+# Usage:
+#   bash batch_train.sh configs/v53f_gin_jacg_mgda_cf_bev_r.yaml --skip-pattern smoke
+#   bash batch_train.sh configs/v53f_gin_jacg_mgda_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 5
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    gin_init_gate: 0.5
+    gin_gate_reg_weight: 0.01
+    gin_gate_reg_target: 0.5
+
+    use_dp_head: 0
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.05
+    batch_size: 16
+    learning_rate: 2.0e-05
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    no_amp: 1
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,5.5,1.5"
+    corr_alignment_weight: 0.3
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.1
+
+    tinit_dropout_prob: 0.4
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 12.0
+    zero_perturbation_prob: 0.25
+    multi_scale_perturb: "0.5:0.30,1.0:0.25,2.0:0.15"
+    symmetric_perturb: 1
+    overcorrection_penalty: 2.0
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.3
+
+    use_mgda: 1
+    mgda_start_epoch: 0
+    mgda_include_inject: 1
+    mgda_include_photo: 0
+
+    # 加强 JACG（v53e 0.10 → 0.15）
+    jacobian_loss_weight: 0.15
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 3
+
+    zero_drift_loss_weight: 0.35
+    zero_drift_loss_weight_start: 0.25
+    zero_drift_loss_ramp_epochs: 5
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.20
+
+    # 加强 inject（v53e 0.25 → 0.45）
+    inject_recovery_loss_weight: 0.45
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.12
+
+    progressive_angle_start: 2.0
+    progressive_angle_end: 5.0
+    progressive_warmup_epochs: 30
+
+    augment_mount_jitter_prob: 0.4
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_intrinsic: 0.03
+    augment_color_jitter: 0.3
+    max_pcd_points: 16384
+    pose_aware_sampling: true
+    max_frames_per_seq: 500
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.18
+    enable_jacobian_gate_ckpt: 1
+    jacobian_early_stop_min: 0.85
+    jacobian_early_stop_patience: 3
+    save_ckpt_per_epoches: 10
+    seed: 42
+    no_tensorboard: true
+
+experiments:
+  - name: "v53f_gin_jacg_smoke"
+    description: "V53f smoke: GIN+JACG+MGDA 无 DP-Head, 15ep"
+    dataset: "all"
+    version: "v53f_gin_jacg_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 15
+      warmup_epochs: 3
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 15
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v53e_gin_mgda_full/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      dual_gate_medw_max: 0.25
+
+  - name: "v53f_gin_jacg_full"
+    description: "V53f full: 无 DP-Head 冲 GenuineRec≥70%, 保持 MEDW≤0.25°"
+    dataset: "all"
+    version: "v53f_gin_jacg"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 60
+      warmup_epochs: 5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 30
+      cosine_Tmult: 2
+      early_stopping_patience: 30
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v53e_gin_mgda_full/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      dual_gate_medw_max: 0.18

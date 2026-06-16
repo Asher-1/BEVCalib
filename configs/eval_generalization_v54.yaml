@@ -1,0 +1,151 @@
+# V54 泛化评估配置
+#
+# 对比: v54a_lsp / v54a_nolsp 消融 + v53e/v53c 锚点
+#
+# Usage:
+#   bash run_v54_eval.sh
+#   bash run_v54_eval.sh --precheck-only
+#   bash run_v54_eval.sh --report-only
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v54"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v54_generalization"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v54a-lsp-best-dual"
+    dir_name: "model_small_5deg_v54a_lsp_full"
+    ckpt: "ckpt_best_dual.pth"
+    eval_aliases: ["v54a-lsp-full-best-dual"]
+  ckpt_recovery:
+    label: "v54a-lsp-best-val"
+    dir_name: "model_small_5deg_v54a_lsp_full"
+    ckpt: "ckpt_best_val.pth"
+    eval_aliases: ["v54a-lsp-full-best-val"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 70.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+
+  # --- V54 主实验 ---
+
+  - label: "v54a-lsp-full-best-dual"
+    dir_name: "model_small_5deg_v54a_lsp_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_30.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    use_dp_head: 0
+    mode_desc: "V54a LSP+MGDA4+RigC+PRS (dual gate, ep33 前最佳)"
+    pitch_vertical_bands: 5
+
+  - label: "v54a-lsp-full-best-val"
+    dir_name: "model_small_5deg_v54a_lsp_full"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    use_dp_head: 0
+    mode_desc: "V54a LSP Recovery 路径"
+    pitch_vertical_bands: 5
+
+  - label: "v54a-nolsp-full-best-dual"
+    dir_name: "model_small_5deg_v54a_nolsp"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_80.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    use_dp_head: 0
+    mode_desc: "V54a 消融: RigC+PRS, 无 LSP (80ep)"
+    pitch_vertical_bands: 5
+
+  - label: "v54a-nolsp-full-best-val"
+    dir_name: "model_small_5deg_v54a_nolsp"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    use_dp_head: 0
+    mode_desc: "V54a nolsp Recovery 路径"
+    pitch_vertical_bands: 5
+
+  - label: "v54a-nolsp-full-ckpt80"
+    dir_name: "model_small_5deg_v54a_nolsp"
+    ckpt: "ckpt_80.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    use_dp_head: 0
+    mode_desc: "V54a nolsp 最终 epoch ckpt"
+    pitch_vertical_bands: 5
+
+  # --- 锚点 ---
+
+  - label: "v53e-gin-mgda-full-best-dual"
+    dir_name: "model_small_5deg_v53e_gin_mgda_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    use_dp_head: 0
+    mode_desc: "V53e Partial GIN + MGDA (直接前序)"
+    pitch_vertical_bands: 5
+
+  - label: "v53c-partial-gin-best-dual"
+    dir_name: "model_small_5deg_v53c_partial_gin_full"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    use_dp_head: 0
+    mode_desc: "V53c Partial GIN 基座"
+    pitch_vertical_bands: 5

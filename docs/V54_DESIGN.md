@@ -1,7 +1,7 @@
 # V54 设计方案：TLC 启发的光度-几何联合标定（Photo-Geometric Joint Alignment）
 
 **日期**: 2026-06-12  
-**状态**: 设计稿  
+**状态**: 已实现（2026-06-12）— LSP/RigC/PRS/MGDA4 + v54a/v54b 配置  
 **前置**: V53e（Partial GIN + MGDA）训练中；V53c test MEDW 0.209°；GenuineRec 仍 ~62%  
 **参考**: [TLC-Calib](https://github.com/SNU-VGILab/TLC-Calib) — Targetless LiDAR-Camera Calibration with Neural Gaussian Splatting (RA-L 2026)
 

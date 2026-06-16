@@ -511,6 +511,42 @@ def _apply_fixed_inject_batch(gt_T_np, inject_deg):
     return init_T
 
 
+def _effective_lsp_weight(args, epoch):
+    """Ramp LSP weight from start to final over ramp_epochs (V54)."""
+    w_max = float(getattr(args, 'lsp_weight', 0.0))
+    if w_max <= 0:
+        return 0.0
+    start = int(getattr(args, 'lsp_start_epoch', 10))
+    if epoch < start:
+        return 0.0
+    w_min = float(getattr(args, 'lsp_weight_start', 0.0))
+    ramp = int(getattr(args, 'lsp_ramp_epochs', 0))
+    if ramp <= 0:
+        return w_max
+    ep_in = epoch - start + 1
+    alpha = min(1.0, ep_in / float(ramp))
+    return w_min + alpha * (w_max - w_min)
+
+
+def _prs_lr_scales(args, epoch):
+    """Pose Release Scheduler LR multipliers (corr_path, pose_head)."""
+    rel = int(getattr(args, 'pose_release_epoch', 0))
+    if rel <= 0:
+        return 1.0, 1.0
+    if epoch < rel:
+        return 1.0, 0.0
+    joint_ep = int(getattr(args, 'pose_release_joint_epoch', 50))
+    corr_joint = float(getattr(args, 'pose_release_corr_lr_scale_joint', 0.5))
+    if epoch >= joint_ep:
+        return corr_joint, 1.0
+    return 1.0, 1.0
+
+
+def _is_v54_pose_head_param(name: str) -> bool:
+    prefixes = ('corr_head.', 'dp_head.', 'adir_refiner.', 'pitch_branch.', 'pitch_conf_net.')
+    return any(name.startswith(p) for p in prefixes)
+
+
 def _effective_zero_drift_loss_weight(args, epoch):
     """Linear ramp: weight_start → weight over ramp_epochs after start_epoch."""
     w_max = float(getattr(args, 'zero_drift_loss_weight', 0.0))
@@ -1728,6 +1764,35 @@ def parse_args():
                         help="Epoch to start MGDA multi-task backward")
     parser.add_argument("--mgda_include_inject", type=int, default=1,
                         help="Include inject_recovery as MGDA task (else fold into pose)")
+    parser.add_argument("--mgda_include_photo", type=int, default=1,
+                        help="V54: include LSP as MGDA photo task")
+    # === V54: TLC-inspired Photo-Geometric Joint Alignment ===
+    parser.add_argument("--use_lsp_loss", type=int, default=0,
+                        help="V54: LiDAR Splat Photo Loss (train-only)")
+    parser.add_argument("--lsp_weight", type=float, default=0.35,
+                        help="V54: final LSP loss weight")
+    parser.add_argument("--lsp_weight_start", type=float, default=0.0,
+                        help="V54: LSP weight at lsp_start_epoch")
+    parser.add_argument("--lsp_ramp_epochs", type=int, default=15,
+                        help="V54: epochs to ramp LSP weight to final")
+    parser.add_argument("--lsp_start_epoch", type=int, default=10,
+                        help="V54: epoch to enable LSP (aligns with pose release)")
+    parser.add_argument("--lsp_lambda_ssim", type=float, default=0.2,
+                        help="V54: SSIM fraction in LSP (TLC lambda_dssim)")
+    parser.add_argument("--lsp_max_points", type=int, default=4096,
+                        help="V54: max LiDAR points for LSP per sample")
+    parser.add_argument("--rig_consistency_weight", type=float, default=0.0,
+                        help="V54: rig consistency loss weight (TLC use_rig)")
+    parser.add_argument("--rig_consistency_start_epoch", type=int, default=5,
+                        help="V54: epoch to start rig consistency loss")
+    parser.add_argument("--pose_release_epoch", type=int, default=0,
+                        help="V54 PRS: epoch to release pose-head LR (0=disabled)")
+    parser.add_argument("--pose_release_joint_epoch", type=int, default=50,
+                        help="V54 PRS: epoch to reduce corr-path LR in joint phase")
+    parser.add_argument("--pose_release_corr_lr_scale_joint", type=float, default=0.5,
+                        help="V54 PRS: corr-path LR scale after joint_epoch")
+    parser.add_argument("--freeze_backbone_epoch", type=int, default=999,
+                        help="V54b refine: freeze backbone LR from this epoch (999=off)")
     # === V53: Dual-Path Pose Head ===
     parser.add_argument("--use_dp_head", type=int, default=0,
                         help="V53: enable Dual-Path Pose Head (Bias + Recovery + Router)")
@@ -1735,6 +1800,8 @@ def parse_args():
                         help="V53: router target threshold (degrees) for recovery path")
     parser.add_argument("--route_loss_weight", type=float, default=0.0,
                         help="V53: BCE weight for magnitude router supervision")
+    parser.add_argument("--route_zd_penalty_weight", type=float, default=0.0,
+                        help="V54d: penalize high route_w when init_err <= dp_gate_deg (anti-collapse)")
     parser.add_argument("--use_jacg", type=int, default=1,
                         help="V53: Jacobian-Aware Correction Gain on recovery path")
     parser.add_argument("--jacg_hidden_dim", type=int, default=64,
@@ -2047,7 +2114,9 @@ def main():
                                     sample_step=args.sample_step,
                                     pose_aware_sampling=args.pose_aware_sampling,
                                     poses_dir=args.poses_dir or None,
-                                    return_seq_id=args.domain_adversarial > 0)
+                                    return_seq_id=(
+                                        args.domain_adversarial > 0
+                                        or getattr(args, 'rig_consistency_weight', 0.0) > 0))
         else:
             if is_main:
                 print("使用 KittiDataset")
@@ -2430,8 +2499,13 @@ def main():
     backbone_params = []
     bev_branch_params = []
     head_params = []
+    corr_path_params = []
+    pose_head_params = []
+    _use_prs = int(getattr(args, 'pose_release_epoch', 0)) > 0
     _backbone_param_set = set()
     _bev_branch_param_set = set()
+    _corr_path_param_set = set()
+    _pose_head_param_set = set()
     _module_param_map = {}
     _layer_wise_groups = {}
     _HTCN_BEV_MODULES = ('conv_fuser', 'transformer', 'bev_encoder', 'pose_embed', 'pc_branch')
@@ -2452,8 +2526,15 @@ def main():
                     _layer_wise_groups.setdefault(layer_idx, []).append(param)
                 else:
                     _layer_wise_groups.setdefault(-1, []).append(param)
+        elif _use_prs and _is_v54_pose_head_param(name):
+            pose_head_params.append(param)
+            head_params.append(param)
+            _pose_head_param_set.add(id(param))
         else:
             head_params.append(param)
+            if _use_prs:
+                corr_path_params.append(param)
+                _corr_path_param_set.add(id(param))
         mod = name.split('.')[0]
         if mod not in _module_param_map:
             _module_param_map[mod] = []
@@ -2492,23 +2573,41 @@ def main():
                 depth = max_layer - layer_idx
             layer_lr = backbone_lr * (args.layer_wise_lr_decay ** depth)
             param_groups.append({'params': _layer_wise_groups[layer_idx], 'lr': layer_lr})
-        param_groups.append({'params': head_params, 'lr': args.lr})
+        if _use_prs and pose_head_params:
+            param_groups.append({'params': corr_path_params, 'lr': args.lr, 'name': 'corr_path'})
+            param_groups.append({'params': pose_head_params, 'lr': args.lr, 'name': 'pose_head'})
+        else:
+            param_groups.append({'params': head_params, 'lr': args.lr, 'name': 'head'})
         optimizer = torch.optim.AdamW(param_groups, weight_decay=args.wd)
-        _backbone_group_count = len(param_groups) - 1
+        _backbone_group_count = len(param_groups) - (2 if _use_prs and pose_head_params else 1)
     else:
         param_groups = []
         if backbone_params:
-            param_groups.append({'params': backbone_params, 'lr': backbone_lr})
+            param_groups.append({'params': backbone_params, 'lr': backbone_lr, 'name': 'backbone'})
         if bev_branch_params:
-            param_groups.append({'params': bev_branch_params, 'lr': bev_branch_lr})
-        param_groups.append({'params': head_params, 'lr': args.lr})
+            param_groups.append({'params': bev_branch_params, 'lr': bev_branch_lr, 'name': 'bev_branch'})
+        if _use_prs and pose_head_params:
+            param_groups.append({'params': corr_path_params, 'lr': args.lr, 'name': 'corr_path'})
+            param_groups.append({'params': pose_head_params, 'lr': args.lr, 'name': 'pose_head'})
+        else:
+            param_groups.append({'params': head_params, 'lr': args.lr, 'name': 'head'})
         optimizer = torch.optim.AdamW(param_groups, weight_decay=args.wd)
-        _backbone_group_count = max(len(param_groups) - 1, 1)
+        _backbone_group_count = max(len(param_groups) - (2 if _use_prs and pose_head_params else 1), 1)
+
+    _prs_corr_pg = next((i for i, pg in enumerate(optimizer.param_groups)
+                         if pg.get('name') == 'corr_path'), None)
+    _prs_pose_pg = next((i for i, pg in enumerate(optimizer.param_groups)
+                         if pg.get('name') == 'pose_head'), None)
+    _backbone_pg = next((i for i, pg in enumerate(optimizer.param_groups)
+                           if pg.get('name') == 'backbone'), 0)
 
     if is_main:
         tprint(f"Differential LR: backbone={backbone_lr:.2e} ({len(backbone_params)} params), "
                f"bev_branch={bev_branch_lr:.2e} ({len(bev_branch_params)} params), "
                f"heads={args.lr:.2e} ({len(head_params)} params)")
+        if _use_prs and pose_head_params:
+            tprint(f"  V54 PRS: corr_path={len(corr_path_params)} params, "
+                   f"pose_head={len(pose_head_params)} params, release_ep={args.pose_release_epoch}")
         if args.layer_wise_lr_decay < 1.0 and _layer_wise_groups:
             for i, pg in enumerate(optimizer.param_groups[:-1]):
                 tprint(f"  Layer group {i}: lr={pg['lr']:.2e} ({len(pg['params'])} params)")
@@ -2663,6 +2762,37 @@ def main():
             tprint(f"  Seq consistency loss: w={_v42_seq_consistency_w}, start_epoch={_v42_seq_consistency_start}")
             tprint("=" * 60)
 
+    _v54_lsp_fn = None
+    _v54_rig_fn = None
+    if getattr(args, 'use_lsp_loss', 0) > 0:
+        from losses.lidar_splat_photo_loss import LiDARSplatPhotoLoss
+        _v54_lsp_fn = LiDARSplatPhotoLoss(
+            lambda_ssim=getattr(args, 'lsp_lambda_ssim', 0.2),
+            max_points=getattr(args, 'lsp_max_points', 4096),
+        )
+    if getattr(args, 'rig_consistency_weight', 0.0) > 0:
+        from losses.rig_consistency_loss import RigConsistencyLoss
+        _v54_rig_fn = RigConsistencyLoss(weight=args.rig_consistency_weight)
+
+    if is_main and (getattr(args, 'use_lsp_loss', 0) > 0
+                    or getattr(args, 'rig_consistency_weight', 0.0) > 0
+                    or int(getattr(args, 'pose_release_epoch', 0)) > 0):
+        tprint("=" * 60)
+        tprint("V54 Photo-Geometric Joint Alignment:")
+        if getattr(args, 'use_lsp_loss', 0) > 0:
+            tprint(f"  LSP: w ramp {args.lsp_weight_start}→{args.lsp_weight} over "
+                   f"{args.lsp_ramp_epochs}ep, start_ep={args.lsp_start_epoch}, "
+                   f"λ_ssim={args.lsp_lambda_ssim}")
+        if getattr(args, 'rig_consistency_weight', 0.0) > 0:
+            tprint(f"  RigC: w={args.rig_consistency_weight}, start_ep={args.rig_consistency_start_epoch}")
+        if int(getattr(args, 'pose_release_epoch', 0)) > 0:
+            tprint(f"  PRS: pose release ep={args.pose_release_epoch}, "
+                   f"joint ep={args.pose_release_joint_epoch} "
+                   f"(corr×{args.pose_release_corr_lr_scale_joint})")
+        if int(getattr(args, 'freeze_backbone_epoch', 999)) < 999:
+            tprint(f"  Refine: freeze backbone from ep={args.freeze_backbone_epoch}")
+        tprint("=" * 60)
+
     def _v32_get_angle_range(epoch):
         """Progressive angle curriculum for v32."""
         if _v32_prog_start <= 0:
@@ -2810,8 +2940,16 @@ def main():
                    f"dedicated_ratio={getattr(args, 'zero_drift_dedicated_ratio', 0.0)}")
         if getattr(args, 'use_mgda', 0) > 0:
             _inj_mgda = "yes" if getattr(args, 'mgda_include_inject', 1) else "no"
-            tprint(f"  • MGDA: pose+zd(+inject={_inj_mgda}) min-norm grad, "
+            _photo_mgda = "yes" if getattr(args, 'mgda_include_photo', 1) else "no"
+            tprint(f"  • MGDA: pose+zd(+inject={_inj_mgda},+photo={_photo_mgda}) weighted-loss, "
                    f"start_ep={getattr(args, 'mgda_start_epoch', 5)}")
+        if getattr(args, 'use_lsp_loss', 0) > 0:
+            tprint(f"  • LSP: ramp {args.lsp_weight_start}→{args.lsp_weight}, start_ep={args.lsp_start_epoch}")
+        if getattr(args, 'rig_consistency_weight', 0.0) > 0:
+            tprint(f"  • Rig consistency: w={args.rig_consistency_weight}, "
+                   f"start_ep={args.rig_consistency_start_epoch}")
+        if int(getattr(args, 'pose_release_epoch', 0)) > 0:
+            tprint(f"  • Pose release (PRS): ep={args.pose_release_epoch}")
         if getattr(args, 'jacobian_early_stop_min', 0.0) > 0:
             tprint(f"  • Jacobian early-stop: overall < {args.jacobian_early_stop_min} "
                    f"for {args.jacobian_early_stop_patience} eval cycles → stop")
@@ -2824,6 +2962,7 @@ def main():
                    f"dedicated_ratio={getattr(args, 'inject_recovery_dedicated_ratio', 0.0)}")
         if getattr(args, 'use_dp_head', 0) > 0:
             tprint(f"  • V53 DP-Head: gate={args.dp_gate_deg}°, route_loss={args.route_loss_weight}, "
+                   f"route_zd_penalty={getattr(args, 'route_zd_penalty_weight', 0.0)}, "
                    f"jacg={getattr(args, 'use_jacg', 1)}")
         if getattr(args, 'use_adir', 0) > 0:
             tprint(f"  • V53b ADIR: steps={args.adir_steps}, max_step={args.adir_max_step_deg}°")
@@ -2861,14 +3000,31 @@ def main():
             model_to_load = model.module if use_ddp else model
             model_to_load.load_state_dict(ckpt['model_state_dict'])
             if 'optimizer_state_dict' in ckpt:
-                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                try:
+                    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                except (ValueError, RuntimeError) as _opt_err:
+                    if is_main:
+                        tprint(f"WARNING: optimizer state incompatible ({_opt_err}); "
+                               f"using freshly built optimizer (model weights still loaded)")
             if 'scheduler_state_dict' in ckpt and scheduler is not None and ckpt['scheduler_state_dict'] is not None:
-                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+                try:
+                    scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+                except (ValueError, RuntimeError) as _sched_err:
+                    if is_main:
+                        tprint(f"WARNING: scheduler state incompatible ({_sched_err}); "
+                               f"rebuilding scheduler from epoch 0")
+                    if 'epoch' in ckpt:
+                        for _ in range(ckpt['epoch']):
+                            scheduler.step()
             elif scheduler is not None and 'epoch' in ckpt:
                 for _ in range(ckpt['epoch']):
                     scheduler.step()
             if 'scaler_state_dict' in ckpt and ckpt['scaler_state_dict'] is not None:
-                scaler.load_state_dict(ckpt['scaler_state_dict'])
+                try:
+                    scaler.load_state_dict(ckpt['scaler_state_dict'])
+                except (ValueError, RuntimeError) as _sc_err:
+                    if is_main:
+                        tprint(f"WARNING: GradScaler state incompatible ({_sc_err}); using fresh scaler")
             start_epoch = ckpt.get('epoch', 0)
             if 'best_train' in ckpt and ckpt['best_train'] is not None:
                 best_train = ckpt['best_train']
@@ -2898,6 +3054,10 @@ def main():
             if is_main:
                 tprint(f"Resumed from {resume_path}: epoch={start_epoch}, "
                        f"best_val_rot={best_val.get('rot', 'N/A')}")
+                if start_epoch >= num_epochs:
+                    tprint(f"WARNING: resume epoch ({start_epoch}) >= num_epochs ({num_epochs}); "
+                           f"training loop will not run. Use --pretrain_ckpt for refine, "
+                           f"or set num_epochs > {start_epoch}.")
         if use_ddp:
             dist.barrier()
 
@@ -2990,6 +3150,32 @@ def main():
                             or epoch == args.backbone_warmup_epochs):
                 tprint(f"  Backbone warmup: factor={warmup_factor:.3f}, "
                        f"backbone_lr={optimizer.param_groups[0]['lr']:.2e}")
+
+        _prs_corr_scale, _prs_pose_scale = _prs_lr_scales(args, epoch)
+        if _prs_corr_pg is not None:
+            _base = optimizer.param_groups[_prs_corr_pg].get('_base_lr', args.lr)
+            if '_base_lr' not in optimizer.param_groups[_prs_corr_pg]:
+                optimizer.param_groups[_prs_corr_pg]['_base_lr'] = _base
+            optimizer.param_groups[_prs_corr_pg]['lr'] = _base * _prs_corr_scale
+        if _prs_pose_pg is not None:
+            _base = optimizer.param_groups[_prs_pose_pg].get('_base_lr', args.lr)
+            if '_base_lr' not in optimizer.param_groups[_prs_pose_pg]:
+                optimizer.param_groups[_prs_pose_pg]['_base_lr'] = _base
+            optimizer.param_groups[_prs_pose_pg]['lr'] = _base * _prs_pose_scale
+        _freeze_bb = int(getattr(args, 'freeze_backbone_epoch', 999))
+        if _freeze_bb < 999 and epoch >= _freeze_bb:
+            for _pg in optimizer.param_groups:
+                if _pg.get('name') in ('backbone', 'bev_branch'):
+                    _pg['lr'] = 0.0
+                elif _pg.get('name') is None and optimizer.param_groups.index(_pg) < _backbone_group_count:
+                    _pg['lr'] = 0.0
+        if is_main and int(getattr(args, 'pose_release_epoch', 0)) > 0:
+            if epoch == args.pose_release_epoch:
+                tprint(f"  [V54 PRS] Pose released at epoch {epoch + 1}")
+            if (_prs_corr_pg is not None and epoch == args.pose_release_joint_epoch):
+                tprint(f"  [V54 PRS] Joint phase: corr_path lr ×{args.pose_release_corr_lr_scale_joint}")
+        if is_main and (_freeze_bb < 999 and epoch == _freeze_bb):
+            tprint(f"  [V54 Refine] Backbone frozen from epoch {epoch + 1}")
 
         train_loss = {}
         for key in epoch_pose_errors:
@@ -3217,7 +3403,9 @@ def main():
                 _jac_loss_w > 0 and epoch >= _jac_loss_start
                 and batch_index % _jac_interval == 0)
             B_cur = resize_imgs.shape[0]
-            _use_mgda = False
+            _use_mgda = (
+                getattr(args, 'use_mgda', 0) > 0
+                and epoch >= getattr(args, 'mgda_start_epoch', 5))
             _mgda_tasks = {}
             # V32 consistency: split-forward approach (memory-safe).
             # Run main batch with gradients, then alt batch with no_grad for consistency loss.
@@ -3375,6 +3563,33 @@ def main():
                             _task_inj = _inj_loss_w * _inj_loss
                             loss['inject_recovery_loss'] = _inj_loss.item()
 
+                        _task_photo = None
+                        _lsp_w_eff = _effective_lsp_weight(args, epoch)
+                        if (_v54_lsp_fn is not None and _lsp_w_eff > 0
+                                and epoch >= getattr(args, 'lsp_start_epoch', 10)):
+                            _lsp_out = _v54_lsp_fn(
+                                _fwd_imgs[:B_cur], _fwd_pcs[:B_cur],
+                                T_pred[:B_cur], _fwd_gt[:B_cur], _fwd_K[:B_cur],
+                                mask=_fwd_masks[:B_cur] if _fwd_masks is not None else None)
+                            _task_photo = _lsp_w_eff * _lsp_out['lsp_loss']
+                            loss['lsp_loss'] = _lsp_out['lsp_loss'].item()
+                            loss['lsp_loss_weight_eff'] = _lsp_w_eff
+                            loss['lsp_valid_ratio'] = float(_lsp_out['lsp_valid_ratio'].item())
+
+                        _task_rig = None
+                        _rig_start = getattr(args, 'rig_consistency_start_epoch', 5)
+                        if (_v54_rig_fn is not None and epoch >= _rig_start
+                                and _use_zero_perturb
+                                and domain_ids_list is not None and 'v42_rotation' in loss):
+                            _seq_t = torch.tensor(
+                                domain_ids_list[:B_cur], dtype=torch.long, device=device)
+                            _zp_t = torch.tensor(
+                                [_use_zero_perturb] * B_cur, dtype=torch.float32, device=device)
+                            _rig_raw = _v54_rig_fn(
+                                loss['v42_rotation'][:B_cur], _seq_t, _zp_t)
+                            _task_rig = _rig_raw
+                            loss['rig_consistency_loss'] = _rig_raw.item()
+
                         _mag_w = getattr(args, 'magnitude_loss_weight', 0.3)
                         if 'magnitude_loss' in loss and _mag_w > 0:
                             _mag_loss = loss['magnitude_loss']
@@ -3388,22 +3603,32 @@ def main():
                             total_loss = total_loss + _gin_reg_w * _gin_reg
                             loss['gin_gate_reg'] = _gin_reg.item()
 
-                        _use_mgda = (
-                            getattr(args, 'use_mgda', 0) > 0
-                            and epoch >= getattr(args, 'mgda_start_epoch', 5))
                         _mgda_tasks = {'pose': total_loss}
-                        if _task_zd is not None:
-                            _mgda_tasks['zd'] = _task_zd
+                        if _task_zd is not None or _task_rig is not None:
+                            _zd_combined = (
+                                (_task_zd if _task_zd is not None else total_loss.new_tensor(0.0))
+                                + (_task_rig if _task_rig is not None else total_loss.new_tensor(0.0))
+                            )
+                            _mgda_tasks['zd'] = _zd_combined
                         if _task_inj is not None:
                             if getattr(args, 'mgda_include_inject', 1) > 0:
                                 _mgda_tasks['inject'] = _task_inj
                             else:
                                 _mgda_tasks['pose'] = _mgda_tasks['pose'] + _task_inj
+                        if (_task_photo is not None
+                                and getattr(args, 'mgda_include_photo', 1) > 0):
+                            _mgda_tasks['photo'] = _task_photo
+                        elif _task_photo is not None:
+                            _mgda_tasks['pose'] = _mgda_tasks['pose'] + _task_photo
                         if not _use_mgda:
                             if _task_zd is not None:
                                 total_loss = total_loss + _task_zd
+                            if _task_rig is not None:
+                                total_loss = total_loss + _task_rig
                             if _task_inj is not None:
                                 total_loss = total_loss + _task_inj
+                            if _task_photo is not None:
+                                total_loss = total_loss + _task_photo
                         else:
                             total_loss = sum(_mgda_tasks.values())
                             loss['mgda_n_tasks'] = len(_mgda_tasks)
@@ -3473,7 +3698,8 @@ def main():
                             _, _mgda_path = _get_mgda_multitask_backward()
                             tprint(f"  [MGDA] loaded from {_mgda_path}")
                             main._mgda_load_logged = True
-                        if is_main:
+                        _mgda_log_batch = is_main and (batch_index == 0 or batch_index % 100 == 0)
+                        if _mgda_log_batch:
                             _mgda_task_str = ", ".join(
                                 f"{k}={v.item():.4f}" for k, v in _mgda_tasks.items())
                             tprint(
@@ -3484,7 +3710,7 @@ def main():
                             _mgda_loss, _mgda_meta = _mgda_build_weighted_loss(
                                 _mgda_tasks, grad_accum_steps=1,
                                 weight_params=_mgda_weight_params)
-                            if is_main and 'mgda_alpha' in _mgda_meta:
+                            if _mgda_log_batch and 'mgda_alpha' in _mgda_meta:
                                 _alpha_str = ", ".join(
                                     f"{k}={v:.3f}" for k, v in _mgda_meta['mgda_alpha'].items())
                                 tprint(f"  [MGDA] weights ep={epoch + 1} batch={batch_index + 1}: {_alpha_str}")
@@ -3497,7 +3723,7 @@ def main():
                                     f"{type(_mgda_err).__name__}: {_mgda_err}")
                             raise
                         else:
-                            if is_main:
+                            if _mgda_log_batch:
                                 tprint(
                                     f"  [MGDA] backward done ep={epoch + 1} batch={batch_index + 1} "
                                     f"({time.time() - _mgda_t0:.2f}s)")

@@ -1,0 +1,182 @@
+# V54d: Router 塌缩修复 — 在 v54c-nogin-dual 基础上重训
+#
+# 问题: route_w_mean→0.99，ZD 路径恒走 Recovery，test ZD=0.535° / GenuineRec=68.3%
+# 修复:
+#   1. route_zd_penalty — 小扰动样本强制压低 route_w
+#   2. 推理硬门控 (dp_pose_head use_hard_route_eval) — init≤1.5° 走 BiasPath
+#   3. 加强 ZD 监督 + 提高 zero_pert 比例
+#
+# 目标: GenuineRec≥70%, MEDW400≤0.25°, ZD≤0.15°
+#
+# Usage:
+#   bash batch_train.sh configs/v54d_router_fix_cf_bev_r.yaml --skip-pattern smoke
+#   bash batch_train.sh configs/v54d_router_fix_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 5
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+    gin_channels: 0
+    gin_gate_reg_weight: 0.0
+
+    use_dp_head: 1
+    dp_gate_deg: 1.5
+    route_loss_weight: 0.2
+    route_zd_penalty_weight: 0.25
+    use_jacg: 1
+    jacg_hidden_dim: 64
+    bias_path_in_norm: 1
+    recovery_path_layer_norm: 1
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.05
+    batch_size: 16
+    learning_rate: 1.6e-05
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    no_amp: 1
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,5.5,1.5"
+    corr_alignment_weight: 0.3
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.1
+
+    # 降低连续噪声占比，给 ZD 样本更多 router 监督
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 10.0
+    zero_perturbation_prob: 0.30
+    multi_scale_perturb: "0.5:0.30,1.0:0.25,2.0:0.15"
+    symmetric_perturb: 1
+    overcorrection_penalty: 2.0
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.3
+
+    use_mgda: 1
+    mgda_start_epoch: 0
+    mgda_include_inject: 1
+    mgda_include_photo: 0
+
+    jacobian_loss_weight: 0.10
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 4
+
+    # 加强 ZD（v54c 0.3 → 0.5）
+    zero_drift_loss_weight: 0.5
+    zero_drift_loss_weight_start: 0.3
+    zero_drift_loss_ramp_epochs: 5
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.30
+
+    inject_recovery_loss_weight: 0.45
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.12
+
+    use_lsp_loss: 0
+    rig_consistency_weight: 0.0
+    pose_release_epoch: 0
+    freeze_backbone_epoch: 999
+
+    progressive_angle_start: 2.0
+    progressive_angle_end: 5.0
+    progressive_warmup_epochs: 20
+
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.0
+    augment_intrinsic: 0.02
+    augment_color_jitter: 0.2
+    max_pcd_points: 16384
+    pose_aware_sampling: true
+    max_frames_per_seq: 500
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.20
+    eval_epoches: 5
+    save_ckpt_per_epoches: 5
+    seed: 42
+    no_tensorboard: true
+
+experiments:
+  - name: "v54d_router_fix_smoke"
+    description: "V54d smoke: router ZD penalty + hard eval gate, 15ep"
+    dataset: "all"
+    version: "v54d_router_fix_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 15
+      warmup_epochs: 2
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 15
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v54c_dphead_nogin/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      dual_gate_medw_max: 0.25
+
+  - name: "v54d_router_fix_full"
+    description: "V54d full: 修 router 塌缩，目标 GenuineRec≥70%"
+    dataset: "all"
+    version: "v54d_router_fix"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 40
+      warmup_epochs: 4
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 20
+      cosine_Tmult: 2
+      early_stopping_patience: 20
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v54c_dphead_nogin/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      dual_gate_medw_max: 0.18

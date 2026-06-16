@@ -627,6 +627,34 @@ while [[ $# -gt 0 ]]; do
             MGDA_START_EPOCH="$2"; shift 2 ;;
         --mgda_include_inject)
             MGDA_INCLUDE_INJECT="$2"; shift 2 ;;
+        --mgda_include_photo)
+            MGDA_INCLUDE_PHOTO="$2"; shift 2 ;;
+        --use_lsp_loss)
+            USE_LSP_LOSS="$2"; shift 2 ;;
+        --lsp_weight)
+            LSP_WEIGHT="$2"; shift 2 ;;
+        --lsp_weight_start)
+            LSP_WEIGHT_START="$2"; shift 2 ;;
+        --lsp_ramp_epochs)
+            LSP_RAMP_EPOCHS="$2"; shift 2 ;;
+        --lsp_start_epoch)
+            LSP_START_EPOCH="$2"; shift 2 ;;
+        --lsp_lambda_ssim)
+            LSP_LAMBDA_SSIM="$2"; shift 2 ;;
+        --lsp_max_points)
+            LSP_MAX_POINTS="$2"; shift 2 ;;
+        --rig_consistency_weight)
+            RIG_CONSISTENCY_WEIGHT="$2"; shift 2 ;;
+        --rig_consistency_start_epoch)
+            RIG_CONSISTENCY_START_EPOCH="$2"; shift 2 ;;
+        --pose_release_epoch)
+            POSE_RELEASE_EPOCH="$2"; shift 2 ;;
+        --pose_release_joint_epoch)
+            POSE_RELEASE_JOINT_EPOCH="$2"; shift 2 ;;
+        --pose_release_corr_lr_scale_joint)
+            POSE_RELEASE_CORR_LR_SCALE_JOINT="$2"; shift 2 ;;
+        --freeze_backbone_epoch)
+            FREEZE_BACKBONE_EPOCH="$2"; shift 2 ;;
         --use_dp_head)
             USE_DP_HEAD="$2"; shift 2 ;;
         --dp_gate_deg)
@@ -1438,6 +1466,20 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$USE_MGDA" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mgda $USE_MGDA"
     [ -n "$MGDA_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_start_epoch $MGDA_START_EPOCH"
     [ -n "$MGDA_INCLUDE_INJECT" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_include_inject $MGDA_INCLUDE_INJECT"
+    [ -n "$MGDA_INCLUDE_PHOTO" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_include_photo $MGDA_INCLUDE_PHOTO"
+    [ -n "$USE_LSP_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_lsp_loss $USE_LSP_LOSS"
+    [ -n "$LSP_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_weight $LSP_WEIGHT"
+    [ -n "$LSP_WEIGHT_START" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_weight_start $LSP_WEIGHT_START"
+    [ -n "$LSP_RAMP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_ramp_epochs $LSP_RAMP_EPOCHS"
+    [ -n "$LSP_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_start_epoch $LSP_START_EPOCH"
+    [ -n "$LSP_LAMBDA_SSIM" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_lambda_ssim $LSP_LAMBDA_SSIM"
+    [ -n "$LSP_MAX_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_max_points $LSP_MAX_POINTS"
+    [ -n "$RIG_CONSISTENCY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_weight $RIG_CONSISTENCY_WEIGHT"
+    [ -n "$RIG_CONSISTENCY_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_start_epoch $RIG_CONSISTENCY_START_EPOCH"
+    [ -n "$POSE_RELEASE_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_epoch $POSE_RELEASE_EPOCH"
+    [ -n "$POSE_RELEASE_JOINT_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_joint_epoch $POSE_RELEASE_JOINT_EPOCH"
+    [ -n "$POSE_RELEASE_CORR_LR_SCALE_JOINT" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_corr_lr_scale_joint $POSE_RELEASE_CORR_LR_SCALE_JOINT"
+    [ -n "$FREEZE_BACKBONE_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --freeze_backbone_epoch $FREEZE_BACKBONE_EPOCH"
     [ -n "$USE_DP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_dp_head $USE_DP_HEAD"
     [ -n "$DP_GATE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --dp_gate_deg $DP_GATE_DEG"
     [ -n "$ROUTE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_loss_weight $ROUTE_LOSS_WEIGHT"
@@ -1720,6 +1762,20 @@ else
     [ -n "$USE_MGDA" ] && OPTIM_ARGS="$OPTIM_ARGS --use_mgda $USE_MGDA"
     [ -n "$MGDA_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_start_epoch $MGDA_START_EPOCH"
     [ -n "$MGDA_INCLUDE_INJECT" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_include_inject $MGDA_INCLUDE_INJECT"
+    [ -n "$MGDA_INCLUDE_PHOTO" ] && OPTIM_ARGS="$OPTIM_ARGS --mgda_include_photo $MGDA_INCLUDE_PHOTO"
+    [ -n "$USE_LSP_LOSS" ] && OPTIM_ARGS="$OPTIM_ARGS --use_lsp_loss $USE_LSP_LOSS"
+    [ -n "$LSP_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_weight $LSP_WEIGHT"
+    [ -n "$LSP_WEIGHT_START" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_weight_start $LSP_WEIGHT_START"
+    [ -n "$LSP_RAMP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_ramp_epochs $LSP_RAMP_EPOCHS"
+    [ -n "$LSP_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_start_epoch $LSP_START_EPOCH"
+    [ -n "$LSP_LAMBDA_SSIM" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_lambda_ssim $LSP_LAMBDA_SSIM"
+    [ -n "$LSP_MAX_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_max_points $LSP_MAX_POINTS"
+    [ -n "$RIG_CONSISTENCY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_weight $RIG_CONSISTENCY_WEIGHT"
+    [ -n "$RIG_CONSISTENCY_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_start_epoch $RIG_CONSISTENCY_START_EPOCH"
+    [ -n "$POSE_RELEASE_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_epoch $POSE_RELEASE_EPOCH"
+    [ -n "$POSE_RELEASE_JOINT_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_joint_epoch $POSE_RELEASE_JOINT_EPOCH"
+    [ -n "$POSE_RELEASE_CORR_LR_SCALE_JOINT" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_corr_lr_scale_joint $POSE_RELEASE_CORR_LR_SCALE_JOINT"
+    [ -n "$FREEZE_BACKBONE_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --freeze_backbone_epoch $FREEZE_BACKBONE_EPOCH"
     [ -n "$USE_DP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_dp_head $USE_DP_HEAD"
     [ -n "$DP_GATE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --dp_gate_deg $DP_GATE_DEG"
     [ -n "$ROUTE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_loss_weight $ROUTE_LOSS_WEIGHT"

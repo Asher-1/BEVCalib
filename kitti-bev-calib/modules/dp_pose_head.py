@@ -133,6 +133,7 @@ class DPPoseHead(nn.Module):
         jacg_hidden_dim: int = 64,
         bias_path_in_norm: bool = True,
         head_dropout: float = 0.1,
+        use_hard_route_eval: bool = False,
     ):
         super().__init__()
         self.recovery_head = recovery_head
@@ -140,6 +141,7 @@ class DPPoseHead(nn.Module):
         self.router = MagnitudeRouter(hidden_dim=jacg_hidden_dim)
         self.use_jacg = use_jacg
         self.gate_rad = math.radians(gate_deg)
+        self.use_hard_route_eval = use_hard_route_eval
         if use_jacg:
             self.jacg = JacobianGain(hidden_dim=jacg_hidden_dim)
         else:
@@ -170,6 +172,8 @@ class DPPoseHead(nn.Module):
             init_err_rad = init_err_rad.reshape(B)
 
         route_w = self.router(init_err_rad, mag_pred)
+        if not self.training and self.use_hard_route_eval:
+            route_w = (init_err_rad > self.gate_rad).float().unsqueeze(-1)
 
         if self.jacg is not None:
             gain = self.jacg(init_err_rad, mag_pred)

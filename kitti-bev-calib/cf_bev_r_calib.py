@@ -173,6 +173,7 @@ class CFBevRCalib(nn.Module):
         use_dp_head: bool = False,
         dp_gate_deg: float = 1.5,
         route_loss_weight: float = 0.0,
+        route_zd_penalty_weight: float = 0.0,
         use_jacg: bool = True,
         jacg_hidden_dim: int = 64,
         bias_path_in_norm: bool = True,
@@ -311,6 +312,8 @@ class CFBevRCalib(nn.Module):
 
         self.use_dp_head = use_dp_head
         self.route_loss_weight = route_loss_weight
+        self.route_zd_penalty_weight = route_zd_penalty_weight
+        self.dp_gate_rad = math.radians(dp_gate_deg)
         self.dp_head = None
         if use_dp_head:
             from modules.dp_pose_head import DPPoseHead
@@ -413,6 +416,7 @@ class CFBevRCalib(nn.Module):
             use_dp_head=getattr(args, 'use_dp_head', 0) > 0,
             dp_gate_deg=getattr(args, 'dp_gate_deg', 1.5),
             route_loss_weight=getattr(args, 'route_loss_weight', 0.0),
+            route_zd_penalty_weight=getattr(args, 'route_zd_penalty_weight', 0.0),
             use_jacg=getattr(args, 'use_jacg', 1) > 0,
             jacg_hidden_dim=getattr(args, 'jacg_hidden_dim', 64),
             bias_path_in_norm=getattr(args, 'bias_path_in_norm', 1) > 0,
@@ -528,6 +532,17 @@ class CFBevRCalib(nn.Module):
             loss_dict['route_loss'] = route_loss.item()
             loss_dict['route_w_mean'] = float(route_w.mean().item())
             loss_dict['total_loss'] = loss_dict['total_loss'] + self.route_loss_weight * route_loss
+
+        if (self.use_dp_head and self.route_zd_penalty_weight > 0
+                and 'dp_route_w' in result and 'dp_init_err_deg' in result):
+            init_err_rad = result['dp_init_err_deg'] * (math.pi / 180.0)
+            zd_mask = (init_err_rad <= self.dp_gate_rad).float().unsqueeze(-1)
+            route_w = result['dp_route_w']
+            route_zd_penalty = (route_w * zd_mask).sum() / zd_mask.sum().clamp(min=1.0)
+            loss_dict['route_zd_penalty'] = route_zd_penalty.item()
+            loss_dict['total_loss'] = (
+                loss_dict['total_loss'] + self.route_zd_penalty_weight * route_zd_penalty
+            )
 
         init_loss = None
         return T_composed, init_loss, loss_dict
