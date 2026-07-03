@@ -1,0 +1,144 @@
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v60_seq_balance_pitch_guard_only"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v60_seq_balance_pitch_guard_generalization"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v60-best-dual"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_best_dual.pth"
+    eval_aliases: ["v60-best-dual"]
+  ckpt_recovery:
+    label: "v60-best-val"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_best_val.pth"
+    eval_aliases: ["v60-best-val"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 70.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: false
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v60-best-dual"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 best-dual 主候选"
+    pitch_vertical_bands: 5
+
+  - label: "v60-best-medw"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 best-medw 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v60-best-val"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 best-val 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v60-best-jacobian"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 best-jacobian 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v60-ckpt10"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_10.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 ckpt10 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v60-ckpt15"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_15.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 ckpt15 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v60-ckpt18"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_18.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 ckpt18 内部最佳eval候选"
+    pitch_vertical_bands: 5

@@ -30,14 +30,15 @@ import os
 import sys
 import time
 import json
-import copy
 from collections import defaultdict
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'kitti-bev-calib'))
+BEVCALIB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, BEVCALIB_ROOT)
+sys.path.insert(0, os.path.join(BEVCALIB_ROOT, 'kitti-bev-calib'))
 
 if '--use_drcv' in sys.argv:
     os.environ['USE_DRCV_BACKEND'] = '1'
@@ -257,36 +258,14 @@ def evaluate_tta(args):
     else:
         rotation_only = args.rotation_only > 0
 
-    state_dict = checkpoint['model_state_dict']
-    use_mlp_head = 'rotation_pred.0.weight' in state_dict
-    ckpt_args = checkpoint.get('args', {})
-    _voxel_mode = args.voxel_mode or ckpt_args.get('voxel_mode', 'hard')
-    _scatter_reduce = args.scatter_reduce or ckpt_args.get('scatter_reduce', 'sum')
-    _to_bev_mode = args.to_bev_mode or ckpt_args.get('to_bev_mode', 'concat')
-
-    model = BEVCalib(
-        deformable=args.deformable > 0,
-        bev_encoder=args.bev_encoder > 0,
-        img_shape=(args.target_height, args.target_width),
-        rotation_only=rotation_only,
-        use_mlp_head=use_mlp_head,
-        bev_pool_factor=args.bev_pool_factor,
-        voxel_mode=_voxel_mode,
-        to_bev_mode=_to_bev_mode,
-        scatter_reduce=_scatter_reduce,
-        intrinsic_input=ckpt_args.get('intrinsic_input', False),
-    ).to(device)
-
     from evaluate_checkpoint import (
-        _auto_permute_spconv_weights, _adapt_model_to_checkpoint,
-        _resolve_perturbation_from_ckpt, _build_eval_custom_dataset, make_collate_fn,
+        _build_model_from_ckpt, _resolve_perturbation_from_ckpt,
+        _build_eval_custom_dataset, make_collate_fn,
     )
     _resolve_perturbation_from_ckpt(args, checkpoint)
-    state_dict = _auto_permute_spconv_weights(state_dict, model)
-    _adapt_model_to_checkpoint(model, state_dict, device)
-    model.load_state_dict(state_dict, strict=False)
-    model.eval()
-    base_state = copy.deepcopy(model.state_dict())
+    model, ckpt_args, _ = _build_model_from_ckpt(
+        args, checkpoint, device, rotation_only)
+    base_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     print(f"   ✓ Epoch {epoch}, rotation_only={rotation_only}")
 
     # -- 2. Load dataset and build per-sequence indices --
@@ -570,6 +549,8 @@ if __name__ == "__main__":
     parser.add_argument("--eval_seed", type=int, default=42)
     parser.add_argument("--eval_max_frames_per_seq", type=int, default=None)
     parser.add_argument("--eval_sample_step", type=int, default=None)
+    parser.add_argument("--exclude_seqs", type=str, default=None,
+                        help="逗号分隔的序列ID列表，评估时跳过这些序列")
 
     parser.add_argument("--rotation_only", type=int, default=-1)
     parser.add_argument("--deformable", type=int, default=0)

@@ -25,7 +25,7 @@ from native_cross_attention import (
     CrossAttentionBlock,
 )
 from img_branch.img_encoders import SwinT_tiny_Encoder
-from losses.quat_tools import batch_quat2mat, batch_tvector2mat
+from losses.quat_tools import batch_quat2mat, batch_tvector2mat, quaternion_distance
 from losses.losses import realworld_loss
 
 from modules.dla_aggregation import DLAAggregation
@@ -174,9 +174,15 @@ class CFBevRCalib(nn.Module):
         dp_gate_deg: float = 1.5,
         route_loss_weight: float = 0.0,
         route_zd_penalty_weight: float = 0.0,
+        dp_route_input_mode: str = "gt_or_pred",
+        dp_jacg_input_mode: str = "gt_or_pred",
+        dp_recovery_quat_loss_weight: float = 0.0,
         use_jacg: bool = True,
         jacg_hidden_dim: int = 64,
         bias_path_in_norm: bool = True,
+        recovery_path_layer_norm: bool = True,
+        dp_train_hard_route: bool = False,
+        use_hard_route_eval: bool = False,
         use_adir: bool = False,
         adir_steps: int = 2,
         adir_max_step_deg: float = 1.0,
@@ -313,6 +319,9 @@ class CFBevRCalib(nn.Module):
         self.use_dp_head = use_dp_head
         self.route_loss_weight = route_loss_weight
         self.route_zd_penalty_weight = route_zd_penalty_weight
+        self.dp_route_input_mode = dp_route_input_mode
+        self.dp_jacg_input_mode = dp_jacg_input_mode
+        self.dp_recovery_quat_loss_weight = dp_recovery_quat_loss_weight
         self.dp_gate_rad = math.radians(dp_gate_deg)
         self.dp_head = None
         if use_dp_head:
@@ -325,8 +334,16 @@ class CFBevRCalib(nn.Module):
                 jacg_hidden_dim=jacg_hidden_dim,
                 bias_path_in_norm=bias_path_in_norm,
                 head_dropout=head_dropout,
+                use_hard_route_eval=use_hard_route_eval,
+                route_input_mode=dp_route_input_mode,
+                jacg_input_mode=dp_jacg_input_mode,
+                recovery_path_layer_norm=recovery_path_layer_norm,
+                train_hard_route=dp_train_hard_route,
             )
-            print(f"[CFBevRCalib] V53 DP-Head enabled (gate={dp_gate_deg}°, jacg={use_jacg})")
+            print(f"[CFBevRCalib] V53 DP-Head enabled (gate={dp_gate_deg}°, jacg={use_jacg}, "
+                  f"hard_eval={use_hard_route_eval}, route_input={dp_route_input_mode}, "
+                  f"jacg_input={dp_jacg_input_mode}, rec_ln={recovery_path_layer_norm}, "
+                  f"train_hard_route={dp_train_hard_route})")
 
         self.use_adir = use_adir
         self.adir_refiner = None
@@ -417,9 +434,15 @@ class CFBevRCalib(nn.Module):
             dp_gate_deg=getattr(args, 'dp_gate_deg', 1.5),
             route_loss_weight=getattr(args, 'route_loss_weight', 0.0),
             route_zd_penalty_weight=getattr(args, 'route_zd_penalty_weight', 0.0),
+            dp_route_input_mode=getattr(args, 'dp_route_input_mode', 'gt_or_pred'),
+            dp_jacg_input_mode=getattr(args, 'dp_jacg_input_mode', 'gt_or_pred'),
+            dp_recovery_quat_loss_weight=getattr(args, 'dp_recovery_quat_loss_weight', 0.0),
             use_jacg=getattr(args, 'use_jacg', 1) > 0,
             jacg_hidden_dim=getattr(args, 'jacg_hidden_dim', 64),
             bias_path_in_norm=getattr(args, 'bias_path_in_norm', 1) > 0,
+            recovery_path_layer_norm=getattr(args, 'recovery_path_layer_norm', 1) > 0,
+            dp_train_hard_route=getattr(args, 'dp_train_hard_route', 0) > 0,
+            use_hard_route_eval=getattr(args, 'use_hard_route_eval', 0) > 0,
             use_adir=getattr(args, 'use_adir', 0) > 0,
             adir_steps=getattr(args, 'adir_steps', 2),
             adir_max_step_deg=getattr(args, 'adir_max_step_deg', 1.0),
@@ -525,8 +548,8 @@ class CFBevRCalib(nn.Module):
         loss_dict['v42_patch_size'] = self.patch_size
         loss_dict['v42_rotation'] = rot_q
 
-        if self.use_dp_head and self.route_loss_weight > 0 and 'dp_route_w' in result:
-            route_w = result['dp_route_w']
+        if self.use_dp_head and self.route_loss_weight > 0 and 'dp_route_pred_w' in result:
+            route_w = result['dp_route_pred_w']
             route_tgt = result['dp_route_target_w']
             route_loss = F.binary_cross_entropy(route_w, route_tgt)
             loss_dict['route_loss'] = route_loss.item()
@@ -542,6 +565,32 @@ class CFBevRCalib(nn.Module):
             loss_dict['route_zd_penalty'] = route_zd_penalty.item()
             loss_dict['total_loss'] = (
                 loss_dict['total_loss'] + self.route_zd_penalty_weight * route_zd_penalty
+            )
+
+        if (self.use_dp_head and self.dp_recovery_quat_loss_weight > 0
+                and 'dp_delta_q_rec' in result and gt_T is not None and T_init is not None):
+            with torch.cuda.amp.autocast(enabled=False):
+                target_R = torch.bmm(
+                    T_init[:, :3, :3].float(),
+                    gt_T[:, :3, :3].float().transpose(1, 2))
+                target_q = RoCR.matrix_to_quaternion(target_R).to(result['dp_delta_q_rec'].device)
+                rec_dist = quaternion_distance(
+                    result['dp_delta_q_rec'].float(), target_q.float(),
+                    result['dp_delta_q_rec'].device)
+                if 'dp_route_target_w' in result and result['dp_route_target_w'] is not None:
+                    rec_mask = result['dp_route_target_w'].detach().reshape(-1).float()
+                else:
+                    init_err = result.get('dp_init_err_deg')
+                    if init_err is None:
+                        rec_mask = torch.ones_like(rec_dist)
+                    else:
+                        rec_mask = (init_err.reshape(-1) * (math.pi / 180.0) > self.dp_gate_rad).float()
+                denom = rec_mask.sum().clamp(min=1.0)
+                rec_loss = (rec_dist * rec_mask).sum() / denom
+            loss_dict['dp_recovery_quat_loss'] = rec_loss.detach() / math.pi * 180.0
+            loss_dict['dp_recovery_active_ratio'] = float(rec_mask.mean().item())
+            loss_dict['total_loss'] = (
+                loss_dict['total_loss'] + self.dp_recovery_quat_loss_weight * rec_loss
             )
 
         init_loss = None
@@ -780,9 +829,12 @@ class CFBevRCalib(nn.Module):
             output['mag_pred'] = mag_pred
         if dp_meta:
             output['dp_route_w'] = dp_meta.get('route_w')
+            output['dp_route_pred_w'] = dp_meta.get('route_pred_w')
             output['dp_route_target_w'] = dp_meta.get('route_target_w')
             output['dp_init_err_deg'] = dp_meta.get('init_err_deg')
             output['dp_jacg_gain'] = dp_meta.get('jacg_gain')
+            output['dp_delta_q_bias'] = dp_meta.get('delta_q_bias')
+            output['dp_delta_q_rec'] = dp_meta.get('delta_q_rec')
 
         return output
 

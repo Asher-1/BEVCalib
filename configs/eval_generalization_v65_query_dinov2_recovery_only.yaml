@@ -1,0 +1,117 @@
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v65_query_dinov2_recovery_only"
+eval_script: "evaluate_checkpoint.py"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v65-best-medw"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_best_medw.pth"
+    eval_aliases: ["v65-best-medw", "v65-best-dual"]
+  ckpt_recovery:
+    label: "v65-best-jacobian"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_best_jacobian.pth"
+    eval_aliases: ["v65-best-jacobian", "v65-best-dual"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 70.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 14400
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v65-smoke-best-dual"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery_smoke"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_jacobian.pth", "ckpt_best_val.pth", "ckpt_20.pth", "ckpt_16.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 smoke best dual, Query-BEV + DINOv2 recovery"
+
+  - label: "v65-smoke-best-medw"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery_smoke"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_jacobian.pth", "ckpt_best_val.pth", "ckpt_20.pth", "ckpt_16.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 smoke best MEDW"
+
+  - label: "v65-smoke-best-jacobian"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery_smoke"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth", "ckpt_20.pth", "ckpt_16.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 smoke best Jacobian"
+
+  - label: "v65-smoke-final"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery_smoke"
+    ckpt: "ckpt_20.pth"
+    ckpt_fallback: ["ckpt_16.pth", "ckpt_best_dual.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 smoke final checkpoint"
+
+  - label: "v65-best-dual"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_jacobian.pth", "ckpt_best_val.pth", "ckpt_90.pth", "ckpt_80.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 full best dual"
+
+  - label: "v65-best-medw"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_jacobian.pth", "ckpt_best_val.pth", "ckpt_90.pth", "ckpt_80.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 full best MEDW"
+
+  - label: "v65-best-jacobian"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth", "ckpt_90.pth", "ckpt_80.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 full best Jacobian"
+
+  - label: "v65-ckpt30"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_30.pth"
+    ckpt_fallback: ["ckpt_25.pth", "ckpt_best_dual.pth", "ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 full early checkpoint"
+
+  - label: "v65-ckpt60"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_60.pth"
+    ckpt_fallback: ["ckpt_55.pth", "ckpt_best_dual.pth", "ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 full mid checkpoint"
+
+  - label: "v65-ckpt90"
+    dir_name: "model_small_5deg_v65_query_dinov2_recovery"
+    ckpt: "ckpt_90.pth"
+    ckpt_fallback: ["ckpt_85.pth", "ckpt_best_dual.pth", "ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65 full final checkpoint"

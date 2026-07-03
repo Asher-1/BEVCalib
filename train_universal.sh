@@ -549,6 +549,10 @@ while [[ $# -gt 0 ]]; do
             CROSS_CORRELATION_FUSION="$2"; shift 2 ;;
         --explicit_tinit)
             EXPLICIT_TINIT="$2"; shift 2 ;;
+        --tinit_bev_film)
+            TINIT_BEV_FILM="$2"; shift 2 ;;
+        --tinit_query_film)
+            TINIT_QUERY_FILM="$2"; shift 2 ;;
         --tinit_sensitivity_weight)
             TINIT_SENSITIVITY_WEIGHT="$2"; shift 2 ;;
         --iterative_refine)
@@ -1354,6 +1358,8 @@ OPTIM_FLAGS=""
 [ -n "$CORRELATION_FUSION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --correlation_fusion $CORRELATION_FUSION"
 [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_FLAGS="$OPTIM_FLAGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
 [ -n "$EXPLICIT_TINIT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --explicit_tinit $EXPLICIT_TINIT"
+[ -n "$TINIT_BEV_FILM" ] && OPTIM_FLAGS="$OPTIM_FLAGS --tinit_bev_film $TINIT_BEV_FILM"
+[ -n "$TINIT_QUERY_FILM" ] && OPTIM_FLAGS="$OPTIM_FLAGS --tinit_query_film $TINIT_QUERY_FILM"
 [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
 [ -n "$ITERATIVE_REFINE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --iterative_refine $ITERATIVE_REFINE"
 [ -n "$NATIVE_CROSS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross $NATIVE_CROSS"

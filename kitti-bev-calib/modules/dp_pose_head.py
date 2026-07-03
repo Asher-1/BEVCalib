@@ -85,13 +85,22 @@ class MagnitudeRouter(nn.Module):
         self,
         init_err_rad: torch.Tensor,
         mag_pred_rad: Optional[torch.Tensor] = None,
+        input_mode: str = "gt_or_pred",
     ) -> torch.Tensor:
         init_deg = init_err_rad * (180.0 / math.pi)
         if mag_pred_rad is not None:
             mag_deg = mag_pred_rad.squeeze(-1) * (180.0 / math.pi)
         else:
             mag_deg = init_deg.detach()
-        x = torch.stack([init_deg, mag_deg], dim=-1)
+        mode = (input_mode or "gt_or_pred").lower()
+        if mode in {"mag_only", "pred_mag", "deploy_mag"}:
+            # Deployment has no GT init error; use predicted magnitude on both channels.
+            mag_feat = mag_deg.detach()
+            x = torch.stack([mag_feat, mag_feat], dim=-1)
+        elif mode in {"zero_mag", "zero_init_mag"}:
+            x = torch.stack([torch.zeros_like(mag_deg), mag_deg.detach()], dim=-1)
+        else:
+            x = torch.stack([init_deg, mag_deg], dim=-1)
         return self.mlp(x).sigmoid()
 
 
@@ -111,13 +120,21 @@ class JacobianGain(nn.Module):
         self,
         init_err_rad: torch.Tensor,
         mag_pred_rad: Optional[torch.Tensor] = None,
+        input_mode: str = "gt_or_pred",
     ) -> torch.Tensor:
         init_deg = init_err_rad * (180.0 / math.pi)
         if mag_pred_rad is not None:
             mag_deg = mag_pred_rad.squeeze(-1) * (180.0 / math.pi)
         else:
             mag_deg = init_deg.detach()
-        x = torch.stack([init_deg, mag_deg], dim=-1)
+        mode = (input_mode or "gt_or_pred").lower()
+        if mode in {"mag_only", "pred_mag", "deploy_mag"}:
+            mag_feat = mag_deg.detach()
+            x = torch.stack([mag_feat, mag_feat], dim=-1)
+        elif mode in {"zero_mag", "zero_init_mag"}:
+            x = torch.stack([torch.zeros_like(mag_deg), mag_deg.detach()], dim=-1)
+        else:
+            x = torch.stack([init_deg, mag_deg], dim=-1)
         return self.mlp(x).clamp(min=0.05, max=2.0)
 
 
@@ -134,6 +151,10 @@ class DPPoseHead(nn.Module):
         bias_path_in_norm: bool = True,
         head_dropout: float = 0.1,
         use_hard_route_eval: bool = False,
+        route_input_mode: str = "gt_or_pred",
+        jacg_input_mode: str = "gt_or_pred",
+        recovery_path_layer_norm: bool = True,
+        train_hard_route: bool = False,
     ):
         super().__init__()
         self.recovery_head = recovery_head
@@ -142,11 +163,24 @@ class DPPoseHead(nn.Module):
         self.use_jacg = use_jacg
         self.gate_rad = math.radians(gate_deg)
         self.use_hard_route_eval = use_hard_route_eval
+        self.route_input_mode = route_input_mode
+        self.jacg_input_mode = jacg_input_mode
+        self.train_hard_route = train_hard_route
         if use_jacg:
             self.jacg = JacobianGain(hidden_dim=jacg_hidden_dim)
         else:
             self.jacg = None
-        self.token_norm_rec = nn.LayerNorm(feat_dim)
+        self.token_norm_rec = nn.LayerNorm(feat_dim) if recovery_path_layer_norm else nn.Identity()
+
+    def _hard_route_signal(
+        self,
+        init_err_rad: torch.Tensor,
+        mag_pred_rad: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        mode = (self.route_input_mode or "gt_or_pred").lower()
+        if mode in {"mag_only", "pred_mag", "deploy_mag"} and mag_pred_rad is not None:
+            return mag_pred_rad.squeeze(-1).detach()
+        return init_err_rad
 
     def forward(
         self,
@@ -171,12 +205,16 @@ class DPPoseHead(nn.Module):
         if init_err_rad.dim() > 1:
             init_err_rad = init_err_rad.reshape(B)
 
-        route_w = self.router(init_err_rad, mag_pred)
-        if not self.training and self.use_hard_route_eval:
+        route_pred_w = self.router(init_err_rad, mag_pred, input_mode=self.route_input_mode)
+        route_w = route_pred_w
+        if self.training and self.train_hard_route:
             route_w = (init_err_rad > self.gate_rad).float().unsqueeze(-1)
+        if not self.training and self.use_hard_route_eval:
+            hard_signal = self._hard_route_signal(init_err_rad, mag_pred)
+            route_w = (hard_signal > self.gate_rad).float().unsqueeze(-1)
 
         if self.jacg is not None:
-            gain = self.jacg(init_err_rad, mag_pred)
+            gain = self.jacg(init_err_rad, mag_pred, input_mode=self.jacg_input_mode)
             eff_w = (route_w * gain).clamp(0.0, 1.0)
         else:
             gain = torch.ones(B, 1, device=device)
@@ -187,6 +225,7 @@ class DPPoseHead(nn.Module):
         target_w = (init_err_rad > self.gate_rad).float().unsqueeze(-1)
         meta = {
             'route_w': route_w,
+            'route_pred_w': route_pred_w,
             'route_target_w': target_w,
             'delta_q_bias': delta_q_bias,
             'delta_q_rec': delta_q_rec,

@@ -535,6 +535,7 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
         "voxel_mode", "scatter_reduce", "to_bev_mode", "fuser_type",
         "use_foundation_depth", "depth_model_type", "fd_mode",
         "intrinsic_input", "target_width", "target_height",
+        "use_hard_route_eval",
         "pitch_vertical_bands",
     ]
     _BOOL_TO_INT = {"intrinsic_input", "rotation_only", "deformable",

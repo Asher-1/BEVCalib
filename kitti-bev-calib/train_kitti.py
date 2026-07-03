@@ -294,7 +294,27 @@ def stratified_split_by_sequence(dataset, train_ratio=0.8, seed=114514):
     return Subset(dataset, train_indices), Subset(dataset, val_indices), split_stats
 
 
-def build_balanced_weights(subset, dataset, mode=1):
+def parse_seq_weight_overrides(spec):
+    """Parse sequence weighting overrides like '02:1.5,03:2.0'."""
+    overrides = {}
+    if not spec:
+        return overrides
+    for item in str(spec).split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if ':' not in item:
+            raise ValueError(f"Invalid seq_weight_overrides item '{item}', expected SEQ:WEIGHT")
+        seq_id, value = item.split(':', 1)
+        seq_id = seq_id.strip()
+        weight = float(value)
+        if weight <= 0:
+            raise ValueError(f"seq_weight_overrides weight must be > 0, got {weight} for seq {seq_id}")
+        overrides[seq_id] = weight
+    return overrides
+
+
+def build_balanced_weights(subset, dataset, mode=1, seq_weight_overrides=None):
     """Build per-sample weights for balanced sampling across sequences.
     
     mode=1 (full): each sequence gets equal total weight 1/N.
@@ -302,6 +322,7 @@ def build_balanced_weights(subset, dataset, mode=1):
     mode=2 (sqrt): softer balance using sqrt(1/count).
       → weight_i = sqrt(1 / count_of_seq(i)) / Z   (Z = normalization constant)
     """
+    seq_weight_overrides = seq_weight_overrides or {}
     all_files = dataset.all_files
     seq_counts = defaultdict(int)
     sample_seqs = []
@@ -319,13 +340,18 @@ def build_balanced_weights(subset, dataset, mode=1):
     num_seqs = len(seq_counts)
     weights = []
     if mode == 2:
-        raw = {s: math.sqrt(1.0 / c) for s, c in seq_counts.items()}
+        raw = {
+            s: math.sqrt(1.0 / c) * seq_weight_overrides.get(s, 1.0)
+            for s, c in seq_counts.items()
+        }
         z = sum(raw[s] * seq_counts[s] for s in seq_counts)
         for seq_id in sample_seqs:
             weights.append(raw[seq_id] / z)
     else:
+        raw = {s: seq_weight_overrides.get(s, 1.0) / (num_seqs * c) for s, c in seq_counts.items()}
+        z = sum(raw[s] * seq_counts[s] for s in seq_counts)
         for seq_id in sample_seqs:
-            weights.append(1.0 / (num_seqs * seq_counts[seq_id]))
+            weights.append(raw[seq_id] / z)
     
     return weights, seq_counts
 
@@ -795,7 +821,7 @@ def _get_gmp_model(model):
 def _compute_jacobian_supervision_loss(
         model, resize_imgs, pcs_t, gt_T_t, init_T_np, post_cam2ego_T,
         intrinsic_matrix, masks_t, probe_deg, use_amp, amp_dtype, domain_ids_t=None,
-        max_samples=4, T_pred_center=None):
+        max_samples=4, T_pred_center=None, axis_weights=None):
     """Train-time loss: encourage d(correction)/d(bias) ≈ 1 on a random axis.
 
     GMP: reuses encoder cache from main forward via forward_pose_from_cache (no
@@ -807,7 +833,14 @@ def _compute_jacobian_supervision_loss(
         return None
     n_sub = min(max_samples, B)
     sub_idx = np.random.choice(B, n_sub, replace=False)
-    ax_idx = int(np.random.randint(0, 3))
+    axis_probs = None
+    if axis_weights is not None:
+        axis_probs = np.asarray(axis_weights, dtype=np.float64)
+        if axis_probs.shape[0] == 3 and np.isfinite(axis_probs).all() and axis_probs.sum() > 0:
+            axis_probs = axis_probs / axis_probs.sum()
+        else:
+            axis_probs = None
+    ax_idx = int(np.random.choice(3, p=axis_probs)) if axis_probs is not None else int(np.random.randint(0, 3))
     probe = float(probe_deg)
 
     init_probe_np = init_T_np.copy()
@@ -1451,6 +1484,8 @@ def parse_args():
                         help="±degrees for two-probe Jacobian loss (init±probe on one axis)")
     parser.add_argument("--jacobian_loss_interval", type=int, default=4,
                         help="Run Jacobian supervision every N train batches (1=every batch)")
+    parser.add_argument("--jacobian_loss_axis_weights", type=str, default="",
+                        help="Optional R,P,Y sampling weights for train-time Jacobian loss, e.g. '1,1,2'")
     parser.add_argument("--compile", type=int, default=0, help="使用 torch.compile 加速模型 (1=启用, 0=禁用)")
     parser.add_argument("--no_amp", type=int, default=0, help="禁用 AMP 混合精度训练 (1=禁用FP16, 用FP32; 0=默认FP16)")
     parser.add_argument("--amp_bf16", type=int, default=0, help="AMP 使用 bfloat16 替代 float16 (减少溢出风险, 需GPU支持)")
@@ -1525,8 +1560,14 @@ def parse_args():
                         help="V34: Use cost-volume cross-correlation fusion for explicit spatial offset detection.")
     parser.add_argument("--explicit_tinit", type=int, default=0,
                         help="V35: Explicit T_init RPY encoding injected before prediction head.")
+    parser.add_argument("--tinit_bev_film", type=int, default=0,
+                        help="V80: Apply T_init-conditioned FiLM adapter to BEV feature map before pooling.")
+    parser.add_argument("--tinit_query_film", type=int, default=0,
+                        help="V81: Apply T_init-conditioned FiLM adapter to Cam2BEV query tokens.")
     parser.add_argument("--tinit_sensitivity_weight", type=float, default=0.0,
                         help="V35 Phase2: Weight for T_init sensitivity contrastive loss (0=disabled).")
+    parser.add_argument("--correction_quat_loss_weight", type=float, default=0.0,
+                        help="Direct raw correction quaternion supervision weight (0=disabled).")
     parser.add_argument("--iterative_refine", type=int, default=0,
                         help="V35 Phase3: Number of iterative refinement steps (0=disabled, 3=recommended).")
     parser.add_argument("--native_cross", type=int, default=0,
@@ -1781,6 +1822,12 @@ def parse_args():
                         help="V54: SSIM fraction in LSP (TLC lambda_dssim)")
     parser.add_argument("--lsp_max_points", type=int, default=4096,
                         help="V54: max LiDAR points for LSP per sample")
+    parser.add_argument("--lsp_downsample", type=int, default=4,
+                        help="V54: image downsample factor for LSP splat")
+    parser.add_argument("--lsp_loss_clip", type=float, default=2.0,
+                        help="V54: clip LSP total loss to this max (0=disable)")
+    parser.add_argument("--lsp_min_valid_ratio", type=float, default=0.02,
+                        help="V54: skip LSP when valid point ratio below this threshold")
     parser.add_argument("--rig_consistency_weight", type=float, default=0.0,
                         help="V54: rig consistency loss weight (TLC use_rig)")
     parser.add_argument("--rig_consistency_start_epoch", type=int, default=5,
@@ -1802,6 +1849,14 @@ def parse_args():
                         help="V53: BCE weight for magnitude router supervision")
     parser.add_argument("--route_zd_penalty_weight", type=float, default=0.0,
                         help="V54d: penalize high route_w when init_err <= dp_gate_deg (anti-collapse)")
+    parser.add_argument("--dp_route_input_mode", type=str, default="gt_or_pred",
+                        help="V71: router input mode: gt_or_pred (legacy) or mag_only (deploy-consistent)")
+    parser.add_argument("--dp_jacg_input_mode", type=str, default="gt_or_pred",
+                        help="V71: JACG input mode: gt_or_pred (legacy) or mag_only")
+    parser.add_argument("--dp_recovery_quat_loss_weight", type=float, default=0.0,
+                        help="V71: direct correction-quaternion supervision weight for DP recovery branch")
+    parser.add_argument("--dp_train_hard_route", type=int, default=0,
+                        help="V71b: use GT hard gate for DP output during training while router still learns BCE")
     parser.add_argument("--use_jacg", type=int, default=1,
                         help="V53: Jacobian-Aware Correction Gain on recovery path")
     parser.add_argument("--jacg_hidden_dim", type=int, default=64,
@@ -1810,12 +1865,20 @@ def parse_args():
                         help="V53: LayerNorm on bias path tokens")
     parser.add_argument("--recovery_path_layer_norm", type=int, default=1,
                         help="V53: LayerNorm on recovery path tokens (reserved)")
+    parser.add_argument("--use_hard_route_eval", type=int, default=0,
+                        help="V55: use init_err hard gate at inference for DP-Head "
+                             "(init<=gate走BiasPath, init>gate走RecoveryPath)")
     parser.add_argument("--use_adir", type=int, default=0,
                         help="V53b: Axis-Decoupled Iterative Refinement after pose head")
     parser.add_argument("--adir_steps", type=int, default=2,
                         help="V53b: ADIR refinement iterations")
     parser.add_argument("--adir_max_step_deg", type=float, default=1.0,
                         help="V53b: max per-axis correction per ADIR step (degrees)")
+    parser.add_argument("--adir_train_only", type=int, default=0,
+                        help="V72: freeze pretrained base model and train only the identity-initialized ADIR adapter")
+    parser.add_argument("--trainable_prefixes", type=str, default="",
+                        help="V73: comma-separated module/name prefixes to keep trainable after loading "
+                             "pretrain, e.g. 'corr_head,pose_query_init,adir_refiner'. Empty=default.")
     parser.add_argument("--overcorrection_penalty", type=float, default=0.0,
                         help="V47: extra weight multiplier on loss when model overcorrects "
                              "(prediction error > initial perturbation). 0=disabled, 2.0=recommended")
@@ -1898,6 +1961,9 @@ def parse_args():
                         help="Per-sequence balanced sampling mode (0=off, 1=full, 2=sqrt). "
                              "1: each sequence equal probability (1/N). "
                              "2: softer sqrt(1/count) balance, less oversampling of small seqs.")
+    parser.add_argument("--seq_weight_overrides", type=str, default="",
+                        help="Optional per-sequence sampler multipliers, e.g. '02:1.4,03:2.2'. "
+                             "Applied on top of --data_balance and re-normalized.")
     return parser.parse_args()
 
 def crop_and_resize(item, size, intrinsics, crop=True):
@@ -2310,7 +2376,9 @@ def main():
 
     if can_balance:
         balance_mode_int = args.data_balance
-        weights, bal_counts = build_balanced_weights(raw_ds, orig_ds, mode=balance_mode_int)
+        seq_weight_overrides = parse_seq_weight_overrides(getattr(args, 'seq_weight_overrides', ''))
+        weights, bal_counts = build_balanced_weights(
+            raw_ds, orig_ds, mode=balance_mode_int, seq_weight_overrides=seq_weight_overrides)
         if use_ddp:
             train_sampler = DistributedBalancedSampler(
                 weights, num_samples=len(weights), seed=args.seed)
@@ -2320,6 +2388,8 @@ def main():
         mode_name = {1: "full(1/N)", 2: "sqrt(1/√count)"}.get(balance_mode_int, "unknown")
         if is_main:
             tprint(f"📊 数据均衡采样已启用: mode={mode_name}, {len(bal_counts)} seqs, {'DDP' if use_ddp else '单机'}")
+            if seq_weight_overrides:
+                tprint(f"   seq_weight_overrides: {seq_weight_overrides}")
             offset = 0
             for sid, cnt in sorted(bal_counts.items()):
                 w_sample = weights[offset]
@@ -2448,6 +2518,15 @@ def main():
                 elif len(v.shape) == 2 and len(m_shape) == 2 and m_shape[0] < v.shape[0] and v.shape[1] == m_shape[1] and 'feat_in' in k:
                     filtered_sd[k] = v[:m_shape[0]].clone()
                     partial_loaded.append(f"{k}: ckpt[:{m_shape[0]},:]{v.shape}")
+                elif (len(v.shape) == 2 and len(m_shape) == 2
+                      and m_shape[0] == v.shape[0] and m_shape[1] > v.shape[1]
+                      and (k.endswith('rotation_pred.weight') or k.endswith('translation_pred.weight'))):
+                    expanded = model_sd[k].clone()
+                    expanded[:, :v.shape[1]] = v
+                    expanded[:, v.shape[1]:] = 0
+                    filtered_sd[k] = expanded
+                    partial_loaded.append(
+                        f"{k}: expand input {list(v.shape)}->{list(m_shape)} (new cols zero)")
                 elif len(v.shape) == 2 and len(m_shape) == 2 and 'pitch_branch.img_encoder' in k and m_shape[1] > v.shape[1] and m_shape[1] % v.shape[1] == 0:
                     n_rep = m_shape[1] // v.shape[1]
                     filtered_sd[k] = v.repeat(1, n_rep)[:m_shape[0], :m_shape[1]].clone()
@@ -2476,6 +2555,45 @@ def main():
             if is_main:
                 tprint(f"torch.compile failed, falling back to eager mode: {e}")
     
+    trainable_prefixes = [
+        p.strip() for p in str(getattr(args, 'trainable_prefixes', '') or '').split(',')
+        if p.strip()
+    ]
+    if trainable_prefixes:
+        trainable, frozen = 0, 0
+        matched_prefixes = set()
+        for name, param in model.named_parameters():
+            matched = False
+            for prefix in trainable_prefixes:
+                if name == prefix or name.startswith(prefix + '.'):
+                    matched = True
+                    matched_prefixes.add(prefix)
+                    break
+            param.requires_grad_(matched)
+            if matched:
+                trainable += param.numel()
+            else:
+                frozen += param.numel()
+        if is_main:
+            tprint(f"V73 selective training: prefixes={trainable_prefixes}, "
+                   f"trainable={trainable:,} params, frozen={frozen:,} params")
+            missing_prefixes = sorted(set(trainable_prefixes) - matched_prefixes)
+            if missing_prefixes:
+                tprint(f"  WARNING: trainable_prefixes not matched: {missing_prefixes}")
+
+    if getattr(args, 'adir_train_only', 0) > 0:
+        trainable, frozen = 0, 0
+        for name, param in model.named_parameters():
+            is_adir = name.startswith('adir_refiner.')
+            param.requires_grad_(is_adir)
+            if is_adir:
+                trainable += param.numel()
+            else:
+                frozen += param.numel()
+        if is_main:
+            tprint(f"V72 ADIR adapter-only training: trainable={trainable:,} params, "
+                   f"frozen={frozen:,} params")
+
     if use_ddp:
         need_find_unused = (getattr(args, 'cam_drop_prob', 0) > 0
                             or getattr(args, 'use_pitch_branch', 0) > 0
@@ -2769,6 +2887,9 @@ def main():
         _v54_lsp_fn = LiDARSplatPhotoLoss(
             lambda_ssim=getattr(args, 'lsp_lambda_ssim', 0.2),
             max_points=getattr(args, 'lsp_max_points', 4096),
+            downsample=getattr(args, 'lsp_downsample', 4),
+            loss_clip=getattr(args, 'lsp_loss_clip', 2.0),
+            min_valid_ratio=getattr(args, 'lsp_min_valid_ratio', 0.02),
         )
     if getattr(args, 'rig_consistency_weight', 0.0) > 0:
         from losses.rig_consistency_loss import RigConsistencyLoss
@@ -2782,7 +2903,8 @@ def main():
         if getattr(args, 'use_lsp_loss', 0) > 0:
             tprint(f"  LSP: w ramp {args.lsp_weight_start}→{args.lsp_weight} over "
                    f"{args.lsp_ramp_epochs}ep, start_ep={args.lsp_start_epoch}, "
-                   f"λ_ssim={args.lsp_lambda_ssim}")
+                   f"λ_ssim={args.lsp_lambda_ssim}, clip={args.lsp_loss_clip}, "
+                   f"min_valid={args.lsp_min_valid_ratio}")
         if getattr(args, 'rig_consistency_weight', 0.0) > 0:
             tprint(f"  RigC: w={args.rig_consistency_weight}, start_ep={args.rig_consistency_start_epoch}")
         if int(getattr(args, 'pose_release_epoch', 0)) > 0:
@@ -2866,6 +2988,12 @@ def main():
     per_axis_weights_parsed = None
     if args.per_axis_weights:
         per_axis_weights_parsed = tuple(float(x) for x in args.per_axis_weights.split(','))
+    jacobian_loss_axis_weights_parsed = None
+    if getattr(args, 'jacobian_loss_axis_weights', ''):
+        jacobian_loss_axis_weights_parsed = tuple(
+            float(x) for x in args.jacobian_loss_axis_weights.split(','))
+        if len(jacobian_loss_axis_weights_parsed) != 3:
+            raise ValueError("--jacobian_loss_axis_weights expects three comma-separated values")
 
     global_step = 0
     
@@ -2930,6 +3058,8 @@ def main():
                    f"start_ep={args.jacobian_loss_start_epoch}, "
                    f"interval={getattr(args, 'jacobian_loss_interval', 4)} batches, "
                    f"probe=±{args.jacobian_loss_probe_deg}°")
+            if jacobian_loss_axis_weights_parsed is not None:
+                tprint(f"    axis sampling weights R/P/Y={jacobian_loss_axis_weights_parsed}")
         if getattr(args, 'zero_drift_loss_weight', 0.0) > 0:
             _zd_ramp = int(getattr(args, 'zero_drift_loss_ramp_epochs', 0))
             _zd_w0 = float(getattr(args, 'zero_drift_loss_weight_start', 0.0))
@@ -2960,12 +3090,21 @@ def main():
                    f"start_ep={args.inject_recovery_loss_start_epoch}, "
                    f"inject={args.inject_recovery_magnitude_deg}° all-RPY, "
                    f"dedicated_ratio={getattr(args, 'inject_recovery_dedicated_ratio', 0.0)}")
+        if getattr(args, 'correction_quat_loss_weight', 0.0) > 0:
+            tprint(f"  • Direct correction quaternion loss: "
+                   f"weight={args.correction_quat_loss_weight}")
         if getattr(args, 'use_dp_head', 0) > 0:
             tprint(f"  • V53 DP-Head: gate={args.dp_gate_deg}°, route_loss={args.route_loss_weight}, "
                    f"route_zd_penalty={getattr(args, 'route_zd_penalty_weight', 0.0)}, "
-                   f"jacg={getattr(args, 'use_jacg', 1)}")
+                   f"route_input={getattr(args, 'dp_route_input_mode', 'gt_or_pred')}, "
+                   f"jacg_input={getattr(args, 'dp_jacg_input_mode', 'gt_or_pred')}, "
+                   f"rec_q={getattr(args, 'dp_recovery_quat_loss_weight', 0.0)}, "
+                   f"train_hard={getattr(args, 'dp_train_hard_route', 0)}, "
+                   f"jacg={getattr(args, 'use_jacg', 1)}, "
+                   f"hard_eval={getattr(args, 'use_hard_route_eval', 0)}")
         if getattr(args, 'use_adir', 0) > 0:
-            tprint(f"  • V53b ADIR: steps={args.adir_steps}, max_step={args.adir_max_step_deg}°")
+            tprint(f"  • V53b ADIR: steps={args.adir_steps}, max_step={args.adir_max_step_deg}°, "
+                   f"adapter_only={getattr(args, 'adir_train_only', 0)}")
         if args.enable_dual_gate_ckpt > 0:
             tprint(f"  • Dual gate ckpt: max(MEDW{args.medw_eval_max_frames} R,P,Y) < {args.dual_gate_medw_max}° "
                    f"AND Jacobian R/P/Y/overall > {args.dual_gate_jacobian_min} → ckpt_best_dual.pth")
@@ -3571,10 +3710,18 @@ def main():
                                 _fwd_imgs[:B_cur], _fwd_pcs[:B_cur],
                                 T_pred[:B_cur], _fwd_gt[:B_cur], _fwd_K[:B_cur],
                                 mask=_fwd_masks[:B_cur] if _fwd_masks is not None else None)
-                            _task_photo = _lsp_w_eff * _lsp_out['lsp_loss']
-                            loss['lsp_loss'] = _lsp_out['lsp_loss'].item()
+                            _lsp_vr = float(_lsp_out['lsp_valid_ratio'].item())
+                            _lsp_skipped = bool(_lsp_out.get('lsp_skipped', False))
+                            loss['lsp_valid_ratio'] = _lsp_vr
                             loss['lsp_loss_weight_eff'] = _lsp_w_eff
-                            loss['lsp_valid_ratio'] = float(_lsp_out['lsp_valid_ratio'].item())
+                            if (not _lsp_skipped
+                                    and torch.isfinite(_lsp_out['lsp_loss'])
+                                    and _lsp_out['lsp_loss'].item() > 0):
+                                _task_photo = _lsp_w_eff * _lsp_out['lsp_loss']
+                                loss['lsp_loss'] = _lsp_out['lsp_loss'].item()
+                            else:
+                                loss['lsp_skipped'] = 1
+                                loss['lsp_loss'] = 0.0
 
                         _task_rig = None
                         _rig_start = getattr(args, 'rig_consistency_start_epoch', 5)
@@ -3789,7 +3936,8 @@ def main():
                             model, resize_imgs, pcs_t, gt_T_to_camera_t,
                             init_T_to_camera_np, post_cam2ego_T, intrinsic_matrix,
                             masks_t, args.jacobian_loss_probe_deg, use_amp, amp_dtype,
-                            domain_ids_t=domain_ids_t, T_pred_center=T_pred.detach())
+                            domain_ids_t=domain_ids_t, T_pred_center=T_pred.detach(),
+                            axis_weights=jacobian_loss_axis_weights_parsed)
                         if jac_out is not None:
                             jac_sup, j_est_mean = jac_out
                             _jac_term = _jac_loss_w * jac_sup

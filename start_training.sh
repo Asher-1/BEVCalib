@@ -569,6 +569,8 @@ while [[ $# -gt 0 ]]; do
             MAX_SCALED_LR="$2"; shift 2 ;;
         --data_balance)
             DATA_BALANCE="$2"; shift 2 ;;
+        --seq_weight_overrides)
+            SEQ_WEIGHT_OVERRIDES="$2"; shift 2 ;;
         --wd)
             WEIGHT_DECAY="$2"; shift 2 ;;
         --target_width)
@@ -643,6 +645,12 @@ while [[ $# -gt 0 ]]; do
             LSP_LAMBDA_SSIM="$2"; shift 2 ;;
         --lsp_max_points)
             LSP_MAX_POINTS="$2"; shift 2 ;;
+        --lsp_downsample)
+            LSP_DOWNSAMPLE="$2"; shift 2 ;;
+        --lsp_loss_clip)
+            LSP_LOSS_CLIP="$2"; shift 2 ;;
+        --lsp_min_valid_ratio)
+            LSP_MIN_VALID_RATIO="$2"; shift 2 ;;
         --rig_consistency_weight)
             RIG_CONSISTENCY_WEIGHT="$2"; shift 2 ;;
         --rig_consistency_start_epoch)
@@ -661,6 +669,8 @@ while [[ $# -gt 0 ]]; do
             DP_GATE_DEG="$2"; shift 2 ;;
         --route_loss_weight)
             ROUTE_LOSS_WEIGHT="$2"; shift 2 ;;
+        --route_zd_penalty_weight)
+            ROUTE_ZD_PENALTY_WEIGHT="$2"; shift 2 ;;
         --use_jacg)
             USE_JACG="$2"; shift 2 ;;
         --jacg_hidden_dim)
@@ -669,6 +679,8 @@ while [[ $# -gt 0 ]]; do
             BIAS_PATH_IN_NORM="$2"; shift 2 ;;
         --recovery_path_layer_norm)
             RECOVERY_PATH_LAYER_NORM="$2"; shift 2 ;;
+        --use_hard_route_eval)
+            USE_HARD_ROUTE_EVAL="$2"; shift 2 ;;
         --use_adir)
             USE_ADIR="$2"; shift 2 ;;
         --adir_steps)
@@ -695,6 +707,10 @@ while [[ $# -gt 0 ]]; do
             CROSS_CORRELATION_FUSION="$2"; shift 2 ;;
         --explicit_tinit)
             EXPLICIT_TINIT="$2"; shift 2 ;;
+        --tinit_bev_film)
+            TINIT_BEV_FILM="$2"; shift 2 ;;
+        --tinit_query_film)
+            TINIT_QUERY_FILM="$2"; shift 2 ;;
         --tinit_sensitivity_weight)
             TINIT_SENSITIVITY_WEIGHT="$2"; shift 2 ;;
         --iterative_refine)
@@ -1418,6 +1434,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
     [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
     [ -n "$DATA_BALANCE" ] && OPTIM_ARGS="$OPTIM_ARGS --data_balance $DATA_BALANCE"
+    [ -n "$SEQ_WEIGHT_OVERRIDES" ] && OPTIM_ARGS="$OPTIM_ARGS --seq_weight_overrides $SEQ_WEIGHT_OVERRIDES"
     [ -n "$WEIGHT_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --wd $WEIGHT_DECAY"
     [ -n "$TARGET_WIDTH" ] && OPTIM_ARGS="$OPTIM_ARGS --target_width $TARGET_WIDTH"
     [ -n "$TARGET_HEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --target_height $TARGET_HEIGHT"
@@ -1474,6 +1491,9 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$LSP_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_start_epoch $LSP_START_EPOCH"
     [ -n "$LSP_LAMBDA_SSIM" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_lambda_ssim $LSP_LAMBDA_SSIM"
     [ -n "$LSP_MAX_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_max_points $LSP_MAX_POINTS"
+    [ -n "$LSP_DOWNSAMPLE" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_downsample $LSP_DOWNSAMPLE"
+    [ -n "$LSP_LOSS_CLIP" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_loss_clip $LSP_LOSS_CLIP"
+    [ -n "$LSP_MIN_VALID_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_min_valid_ratio $LSP_MIN_VALID_RATIO"
     [ -n "$RIG_CONSISTENCY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_weight $RIG_CONSISTENCY_WEIGHT"
     [ -n "$RIG_CONSISTENCY_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_start_epoch $RIG_CONSISTENCY_START_EPOCH"
     [ -n "$POSE_RELEASE_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_epoch $POSE_RELEASE_EPOCH"
@@ -1483,10 +1503,12 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$USE_DP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_dp_head $USE_DP_HEAD"
     [ -n "$DP_GATE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --dp_gate_deg $DP_GATE_DEG"
     [ -n "$ROUTE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_loss_weight $ROUTE_LOSS_WEIGHT"
+    [ -n "$ROUTE_ZD_PENALTY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_zd_penalty_weight $ROUTE_ZD_PENALTY_WEIGHT"
     [ -n "$USE_JACG" ] && OPTIM_ARGS="$OPTIM_ARGS --use_jacg $USE_JACG"
     [ -n "$JACG_HIDDEN_DIM" ] && OPTIM_ARGS="$OPTIM_ARGS --jacg_hidden_dim $JACG_HIDDEN_DIM"
     [ -n "$BIAS_PATH_IN_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --bias_path_in_norm $BIAS_PATH_IN_NORM"
     [ -n "$RECOVERY_PATH_LAYER_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --recovery_path_layer_norm $RECOVERY_PATH_LAYER_NORM"
+    [ -n "$USE_HARD_ROUTE_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --use_hard_route_eval $USE_HARD_ROUTE_EVAL"
     [ -n "$USE_ADIR" ] && OPTIM_ARGS="$OPTIM_ARGS --use_adir $USE_ADIR"
     [ -n "$ADIR_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_steps $ADIR_STEPS"
     [ -n "$ADIR_MAX_STEP_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_max_step_deg $ADIR_MAX_STEP_DEG"
@@ -1500,6 +1522,8 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --correlation_fusion $CORRELATION_FUSION"
     [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
     [ -n "$EXPLICIT_TINIT" ] && OPTIM_ARGS="$OPTIM_ARGS --explicit_tinit $EXPLICIT_TINIT"
+    [ -n "$TINIT_BEV_FILM" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_bev_film $TINIT_BEV_FILM"
+    [ -n "$TINIT_QUERY_FILM" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_query_film $TINIT_QUERY_FILM"
     [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
     [ -n "$ITERATIVE_REFINE" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine $ITERATIVE_REFINE"
     [ -n "$NATIVE_CROSS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross $NATIVE_CROSS"
@@ -1714,6 +1738,7 @@ else
     [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
     [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
     [ -n "$DATA_BALANCE" ] && OPTIM_ARGS="$OPTIM_ARGS --data_balance $DATA_BALANCE"
+    [ -n "$SEQ_WEIGHT_OVERRIDES" ] && OPTIM_ARGS="$OPTIM_ARGS --seq_weight_overrides $SEQ_WEIGHT_OVERRIDES"
     [ -n "$WEIGHT_DECAY" ] && OPTIM_ARGS="$OPTIM_ARGS --wd $WEIGHT_DECAY"
     [ -n "$TARGET_WIDTH" ] && OPTIM_ARGS="$OPTIM_ARGS --target_width $TARGET_WIDTH"
     [ -n "$TARGET_HEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --target_height $TARGET_HEIGHT"
@@ -1770,6 +1795,9 @@ else
     [ -n "$LSP_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_start_epoch $LSP_START_EPOCH"
     [ -n "$LSP_LAMBDA_SSIM" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_lambda_ssim $LSP_LAMBDA_SSIM"
     [ -n "$LSP_MAX_POINTS" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_max_points $LSP_MAX_POINTS"
+    [ -n "$LSP_DOWNSAMPLE" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_downsample $LSP_DOWNSAMPLE"
+    [ -n "$LSP_LOSS_CLIP" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_loss_clip $LSP_LOSS_CLIP"
+    [ -n "$LSP_MIN_VALID_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --lsp_min_valid_ratio $LSP_MIN_VALID_RATIO"
     [ -n "$RIG_CONSISTENCY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_weight $RIG_CONSISTENCY_WEIGHT"
     [ -n "$RIG_CONSISTENCY_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --rig_consistency_start_epoch $RIG_CONSISTENCY_START_EPOCH"
     [ -n "$POSE_RELEASE_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --pose_release_epoch $POSE_RELEASE_EPOCH"
@@ -1779,10 +1807,12 @@ else
     [ -n "$USE_DP_HEAD" ] && OPTIM_ARGS="$OPTIM_ARGS --use_dp_head $USE_DP_HEAD"
     [ -n "$DP_GATE_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --dp_gate_deg $DP_GATE_DEG"
     [ -n "$ROUTE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_loss_weight $ROUTE_LOSS_WEIGHT"
+    [ -n "$ROUTE_ZD_PENALTY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --route_zd_penalty_weight $ROUTE_ZD_PENALTY_WEIGHT"
     [ -n "$USE_JACG" ] && OPTIM_ARGS="$OPTIM_ARGS --use_jacg $USE_JACG"
     [ -n "$JACG_HIDDEN_DIM" ] && OPTIM_ARGS="$OPTIM_ARGS --jacg_hidden_dim $JACG_HIDDEN_DIM"
     [ -n "$BIAS_PATH_IN_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --bias_path_in_norm $BIAS_PATH_IN_NORM"
     [ -n "$RECOVERY_PATH_LAYER_NORM" ] && OPTIM_ARGS="$OPTIM_ARGS --recovery_path_layer_norm $RECOVERY_PATH_LAYER_NORM"
+    [ -n "$USE_HARD_ROUTE_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --use_hard_route_eval $USE_HARD_ROUTE_EVAL"
     [ -n "$USE_ADIR" ] && OPTIM_ARGS="$OPTIM_ARGS --use_adir $USE_ADIR"
     [ -n "$ADIR_STEPS" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_steps $ADIR_STEPS"
     [ -n "$ADIR_MAX_STEP_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --adir_max_step_deg $ADIR_MAX_STEP_DEG"
@@ -1796,6 +1826,8 @@ else
     [ -n "$CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --correlation_fusion $CORRELATION_FUSION"
     [ -n "$CROSS_CORRELATION_FUSION" ] && OPTIM_ARGS="$OPTIM_ARGS --cross_correlation_fusion $CROSS_CORRELATION_FUSION"
     [ -n "$EXPLICIT_TINIT" ] && OPTIM_ARGS="$OPTIM_ARGS --explicit_tinit $EXPLICIT_TINIT"
+    [ -n "$TINIT_BEV_FILM" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_bev_film $TINIT_BEV_FILM"
+    [ -n "$TINIT_QUERY_FILM" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_query_film $TINIT_QUERY_FILM"
     [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
     [ -n "$ITERATIVE_REFINE" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine $ITERATIVE_REFINE"
     [ -n "$NATIVE_CROSS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross $NATIVE_CROSS"

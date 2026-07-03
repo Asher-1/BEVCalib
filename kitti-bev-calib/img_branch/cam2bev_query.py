@@ -115,6 +115,47 @@ class _BEVQueryPositionalEncoding(nn.Module):
         return self.pe.expand(B, -1, -1)
 
 
+class _TInitFourierEncoder(nn.Module):
+    """Small local T_init RPY encoder used to condition BEV queries."""
+
+    def __init__(self, embed_dim=64, n_freq=32):
+        super().__init__()
+        self.n_freq = n_freq
+        input_dim = 3 * (2 * n_freq + 1)
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.LayerNorm(embed_dim),
+        )
+
+    @staticmethod
+    def rotation_matrix_to_rpy(R):
+        sy = torch.sqrt(R[:, 0, 0] ** 2 + R[:, 1, 0] ** 2)
+        singular = sy < 1e-6
+        roll = torch.atan2(R[:, 2, 1], R[:, 2, 2])
+        pitch = torch.atan2(-R[:, 2, 0], sy)
+        yaw = torch.atan2(R[:, 1, 0], R[:, 0, 0])
+        roll_s = torch.atan2(-R[:, 1, 2], R[:, 1, 1])
+        pitch_s = torch.atan2(-R[:, 2, 0], sy)
+        yaw_s = torch.zeros_like(roll)
+        roll = torch.where(singular, roll_s, roll)
+        pitch = torch.where(singular, pitch_s, pitch)
+        yaw = torch.where(singular, yaw_s, yaw)
+        return torch.stack([roll, pitch, yaw], dim=-1)
+
+    def forward(self, T_init_4x4):
+        if T_init_4x4.dim() == 4:
+            T_init_4x4 = T_init_4x4[:, 0]
+        rpy_rad = self.rotation_matrix_to_rpy(T_init_4x4[:, :3, :3])
+        freqs = (2.0 ** torch.arange(
+            self.n_freq, device=rpy_rad.device, dtype=rpy_rad.dtype))
+        encoded = rpy_rad.unsqueeze(-1) * freqs.view(1, 1, -1)
+        feat = torch.cat([torch.sin(encoded), torch.cos(encoded),
+                          rpy_rad.unsqueeze(-1)], dim=-1)
+        return self.mlp(feat.flatten(1))
+
+
 class _DeformableCrossAttention(nn.Module):
     """Simplified deformable cross-attention for BEV queries attending to image features.
 
@@ -247,6 +288,7 @@ class Cam2BEVQuery(nn.Module):
         freeze_layers=None,
         backbone_weights=None,
         query_downsample=4,
+        tinit_query_film=False,
     ):
         super().__init__()
         if img_shape is None:
@@ -296,6 +338,17 @@ class Cam2BEVQuery(nn.Module):
         self.bev_queries = nn.Embedding(num_queries, embed_dim)
         self.bev_pos = _BEVQueryPositionalEncoding(embed_dim, self.qx, self.qy, nz)
         self.cam_pos = _CameraAwarePositionalEncoding(embed_dim, fH, fW)
+        self.use_tinit_query_film = bool(tinit_query_film)
+        if self.use_tinit_query_film:
+            self.tinit_query_encoder = _TInitFourierEncoder(embed_dim=64)
+            self.tinit_query_film = nn.Sequential(
+                nn.Linear(64, 128),
+                nn.GELU(),
+                nn.Linear(128, embed_dim * 2),
+            )
+            nn.init.zeros_(self.tinit_query_film[-1].weight)
+            nn.init.zeros_(self.tinit_query_film[-1].bias)
+            print(f"[Cam2BEVQuery] T_init query FiLM enabled (embed_dim={embed_dim})")
 
         self.layers = nn.ModuleList([
             _QueryBEVLayer(embed_dim, num_heads, num_points, query_dropout)
@@ -308,7 +361,8 @@ class Cam2BEVQuery(nn.Module):
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1))
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1))
 
-    def forward(self, cam2ego_T, cam_intrins, post_cam2ego_T, imgs, return_z_features=False):
+    def forward(self, cam2ego_T, cam_intrins, post_cam2ego_T, imgs,
+                return_z_features=False, tinit_T=None):
         """
         Same interface as Cam2BEV.forward.
 
@@ -345,6 +399,12 @@ class Cam2BEVQuery(nn.Module):
             img_pos = img_pos.view(B, self.fH * self.fW, -1)
 
         bev_q = self.bev_queries.weight.unsqueeze(0).expand(B, -1, -1)
+        if self.use_tinit_query_film:
+            if tinit_T is None:
+                tinit_T = torch.linalg.inv(cam2ego_T[:, 0].float())
+            film = self.tinit_query_film(self.tinit_query_encoder(tinit_T)).to(dtype=bev_q.dtype)
+            gamma, beta = film.chunk(2, dim=-1)
+            bev_q = bev_q * (1.0 + torch.tanh(gamma).unsqueeze(1)) + beta.unsqueeze(1)
         bev_p = self.bev_pos(B)
 
         for layer in self.layers:

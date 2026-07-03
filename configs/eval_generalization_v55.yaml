@@ -1,0 +1,286 @@
+# V55 泛化评估配置
+#
+# 主目标: 用部署口径比较 V55 主线、V55-safe 备线与 V54d / V53f 锚点
+# 验收: GenuineRec>=70%, MEDW400<=0.18°, ZD<=0.10°
+#
+# Usage:
+#   bash run_v55_eval.sh
+#   bash run_v55_eval.sh --gate-eval
+#   bash run_v55_eval.sh --precheck-only
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v55"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v55_generalization"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v55-main-best-dual"
+    dir_name: "model_small_5deg_v55_deploy_generalization"
+    ckpt: "ckpt_best_dual.pth"
+    eval_aliases: ["v55-main-best-dual"]
+  ckpt_recovery:
+    label: "v55-main-best-val"
+    dir_name: "model_small_5deg_v55_deploy_generalization"
+    ckpt: "ckpt_best_val.pth"
+    eval_aliases: ["v55-main-best-val"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 70.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+
+  - label: "v55-main-best-dual"
+    dir_name: "model_small_5deg_v55_deploy_generalization"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    use_gated_instance_norm: 1
+    gin_channels: 96
+    mode_desc: "V55 主部署候选: Partial GIN + hard-route eval"
+    pitch_vertical_bands: 5
+
+  - label: "v55-main-best-medw"
+    dir_name: "model_small_5deg_v55_deploy_generalization"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    use_gated_instance_norm: 1
+    gin_channels: 96
+    mode_desc: "V55 MEDW 最优候选"
+    pitch_vertical_bands: 5
+
+  - label: "v55-main-best-val"
+    dir_name: "model_small_5deg_v55_deploy_generalization"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    use_gated_instance_norm: 1
+    gin_channels: 96
+    mode_desc: "V55 Recovery 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v55-refine-best-dual"
+    dir_name: "model_small_5deg_v55_refine"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    use_gated_instance_norm: 1
+    gin_channels: 96
+    mode_desc: "V55 refine: 冻结 backbone 冲部署 gate"
+    pitch_vertical_bands: 5
+
+  - label: "v55-safe-best-dual"
+    dir_name: "model_small_5deg_v55_safe_deploy_generalization"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55-safe 主候选: Partial GIN 稳定底盘"
+    pitch_vertical_bands: 5
+
+  - label: "v55-safe-best-medw"
+    dir_name: "model_small_5deg_v55_safe_deploy_generalization"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55-safe MEDW 最优候选"
+    pitch_vertical_bands: 5
+
+  - label: "v55-safe-best-val"
+    dir_name: "model_small_5deg_v55_safe_deploy_generalization"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55-safe Recovery 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v55b-best-dual"
+    dir_name: "model_small_5deg_v55b_route_tight"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55b 主候选: route/perturb/GIN 收紧版"
+    pitch_vertical_bands: 5
+
+  - label: "v55b-best-medw"
+    dir_name: "model_small_5deg_v55b_route_tight"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55b MEDW 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v55b-best-val"
+    dir_name: "model_small_5deg_v55b_route_tight"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55b Recovery 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v55-safe-refine-best-dual"
+    dir_name: "model_small_5deg_v55_safe_refine"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55-safe refine: 冻结 backbone 压 MEDW/ZD"
+    pitch_vertical_bands: 5
+
+  - label: "v55-safe-refine-ckpt15"
+    dir_name: "model_small_5deg_v55_safe_refine"
+    ckpt: "ckpt_15.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V55-safe refine ckpt15: 当前更优 deploy 候选"
+    pitch_vertical_bands: 5
+
+  - label: "v54d-router-fix-best-dual"
+    base_dir: "logs/all_training_data/v54"
+    dir_name: "model_small_5deg_v54d_router_fix"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    mode_desc: "V54d router-fix 锚点"
+    pitch_vertical_bands: 5
+
+  - label: "v54d-refine2-best-dual"
+    base_dir: "logs/all_training_data/v54"
+    dir_name: "model_small_5deg_v54d_refine2"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 1
+    mode_desc: "V54d refine2 锚点"
+    pitch_vertical_bands: 5
+
+  - label: "v53f-gin-jacg-best-dual"
+    base_dir: "logs/all_training_data/v53"
+    dir_name: "model_small_5deg_v53f_gin_jacg"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V53f Partial GIN 锚点"
+    pitch_vertical_bands: 5
+
+  - label: "v54a-nolsp-best-dual"
+    base_dir: "logs/all_training_data/v54"
+    dir_name: "model_small_5deg_v54a_nolsp"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V54a no-photo 锚点"
+    pitch_vertical_bands: 5

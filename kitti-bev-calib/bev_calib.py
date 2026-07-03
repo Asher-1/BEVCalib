@@ -7,7 +7,7 @@ from torch.autograd import Function
 from img_branch.img_branch import Cam2BEV
 from pc_branch.pc_branch import Lidar2BEV
 from losses.losses import realworld_loss
-from losses.quat_tools import quaternion_from_matrix
+from losses.quat_tools import quaternion_distance, quaternion_from_matrix
 from deformable_attention import DeformableAttention
 from BEVEncoder.BEVEncoder import BEVEncoder
 import bev_settings
@@ -569,6 +569,9 @@ class IterativeRefinementHead(nn.Module):
             nn.Linear(hidden_dim, 4),
             nn.Tanh(),
         )
+        nn.init.zeros_(self.delta_rot[3].weight)
+        nn.init.zeros_(self.delta_rot[3].bias)
+        self.delta_rot[3].bias.data[0] = 1.0
         if not rotation_only:
             self.delta_trans = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim),
@@ -577,6 +580,8 @@ class IterativeRefinementHead(nn.Module):
                 nn.Linear(hidden_dim, 3),
                 nn.Tanh(),
             )
+            nn.init.zeros_(self.delta_trans[3].weight)
+            nn.init.zeros_(self.delta_trans[3].bias)
         self.hidden_init = nn.Linear(feat_dim, hidden_dim)
 
     def forward(self, x_feat, init_T):
@@ -671,7 +676,10 @@ class BEVCalib(nn.Module):
                  correlation_fusion = False,
                  cross_correlation_fusion = False,
                  explicit_tinit = False,
+                 tinit_bev_film = False,
+                 tinit_query_film = False,
                  tinit_sensitivity_weight = 0.0,
+                 correction_quat_loss_weight = 0.0,
                  iterative_refine = 0,
                  native_cross = False,
                  native_cross_pc_groups = 128,
@@ -694,7 +702,10 @@ class BEVCalib(nn.Module):
         self.correlation_fusion = correlation_fusion or cross_correlation_fusion
         self.cross_correlation_fusion = cross_correlation_fusion
         self.explicit_tinit = explicit_tinit
+        self.use_tinit_bev_film = tinit_bev_film
+        self.use_tinit_query_film = tinit_query_film
         self.tinit_sensitivity_weight = tinit_sensitivity_weight
+        self.correction_quat_loss_weight = correction_quat_loss_weight
         if tinit_sensitivity_weight > 0:
             self.tinit_sensitivity_loss = TInitSensitivityLoss(alpha=0.1)
         self.use_mlp_head = use_mlp_head
@@ -780,6 +791,7 @@ class BEVCalib(nn.Module):
                     freeze_backbone=freeze_backbone,
                     freeze_layers=freeze_layers,
                     backbone_weights=backbone_weights,
+                    tinit_query_film=tinit_query_film,
                 )
             else:
                 self.img_branch = Cam2BEV(
@@ -807,6 +819,20 @@ class BEVCalib(nn.Module):
                 self.bev_shape = (self.img_branch.nx_x, self.img_branch.nx_y)
             self.embed_dim = self.img_branch.out_channels + self.pc_branch.out_channels
             self.cam_drop_prob = cam_drop_prob
+            if self.use_tinit_bev_film:
+                self.tinit_bev_encoder = ExplicitTInitEncoder(
+                    embed_dim=ExplicitTInitEncoder.TINIT_EMBED_DIM)
+                self.tinit_bev_film = nn.Sequential(
+                    nn.Linear(ExplicitTInitEncoder.TINIT_EMBED_DIM,
+                              ExplicitTInitEncoder.TINIT_EMBED_DIM * 2),
+                    nn.GELU(),
+                    nn.Linear(ExplicitTInitEncoder.TINIT_EMBED_DIM * 2,
+                              self.embed_dim * 2),
+                )
+                nn.init.zeros_(self.tinit_bev_film[-1].weight)
+                nn.init.zeros_(self.tinit_bev_film[-1].bias)
+                print(f"[BEVCalib] T_init BEV FiLM adapter enabled: "
+                      f"embed_dim={self.embed_dim}")
             if self.correlation_fusion:
                 if self.cross_correlation_fusion:
                     self.spatial_corr_fuser = CrossCorrelationFuser(
@@ -949,6 +975,24 @@ class BEVCalib(nn.Module):
             nn.Linear(mid_dim, out_dim),
         )
 
+    def _add_correction_quat_loss(self, loss, rotation, gt_T_to_camera, init_T_to_camera):
+        """Directly supervise the raw correction quaternion from T_init to GT."""
+        weight = float(getattr(self, 'correction_quat_loss_weight', 0.0))
+        if (not self.training) or weight <= 0:
+            return loss
+        with torch.cuda.amp.autocast(enabled=False):
+            target_R = torch.bmm(
+                init_T_to_camera[:, :3, :3].float(),
+                gt_T_to_camera[:, :3, :3].float().transpose(1, 2))
+            target_q = torch.stack(
+                [quaternion_from_matrix(target_R[i]) for i in range(target_R.shape[0])],
+                dim=0).to(rotation.device)
+            corr_loss = quaternion_distance(
+                rotation.float(), target_q, rotation.device).mean()
+        loss["total_loss"] = loss["total_loss"] + weight * corr_loss
+        loss["correction_quat_loss"] = corr_loss.detach() / math.pi * 180.0
+        return loss
+
     def get_module_profile(self, reset=True):
         """Return per-module average forward time (ms). Enable with model._profile_modules = True.
         Deferred sync: events are recorded without synchronize during forward;
@@ -983,6 +1027,18 @@ class BEVCalib(nn.Module):
                 drop_path_rate=dpr[i],
             ))
         return nn.Sequential(*layers)
+
+    def _apply_tinit_bev_film(self, x, init_T_to_camera):
+        """Condition the BEV feature map on T_init before spatial pooling."""
+        if not getattr(self, 'use_tinit_bev_film', False):
+            return x
+        tinit_feat = self.tinit_bev_encoder(init_T_to_camera)
+        film = self.tinit_bev_film(tinit_feat).to(dtype=x.dtype)
+        gamma, beta = film.chunk(2, dim=-1)
+        B, C, _, _ = x.shape
+        gamma = torch.tanh(gamma).view(B, C, 1, 1)
+        beta = beta.view(B, C, 1, 1)
+        return x * (1.0 + gamma) + beta
 
 
     def quaternion_to_rotation_matrix(self, q):
@@ -1132,15 +1188,19 @@ class BEVCalib(nn.Module):
 
         z_summary = None
         img_feat_2d = None
+        query_tinit_kwargs = {}
+        if self.cam2bev_mode == "query" and getattr(self.img_branch, 'use_tinit_query_film', False):
+            query_tinit_kwargs["tinit_T"] = init_T_to_camera
         if self.use_pitch_branch:
             cam_bev_feats, cam_bev_mask, z_summary, img_feat_2d = self.img_branch(
                 cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic,
                 post_cam2ego_T=post_cam2ego_T, imgs=img,
-                return_z_features=True)
+                return_z_features=True, **query_tinit_kwargs)
         else:
             cam_bev_feats, cam_bev_mask = self.img_branch(
                 cam2ego_T=cam2ego_T, cam_intrins=cam_intrinsic,
-                post_cam2ego_T=post_cam2ego_T, imgs=img)
+                post_cam2ego_T=post_cam2ego_T, imgs=img,
+                **query_tinit_kwargs)
 
         if profiling:
             _ev[1].record()
@@ -1195,11 +1255,14 @@ class BEVCalib(nn.Module):
                 pred_translation=translation, pred_rotation=rotation,
                 pcs=pc, gt_T_to_camera=gt_T_to_camera,
                 init_T_to_camera=init_T_to_camera, mask=masks)
+            loss = self._add_correction_quat_loss(
+                loss, rotation, gt_T_to_camera, init_T_to_camera)
             return T_gt_expected, None, loss
 
         x = self.conv_fuser(cam_bev_feats, pc_bev_feats, cam_dropped=cam_dropped)
         if self.bev_encoder_use:
             x = self.bev_encoder(x) # B, C, H, W
+        x = self._apply_tinit_bev_film(x, init_T_to_camera)
         x = x + self.pose_embed
 
         if profiling:
@@ -1271,6 +1334,8 @@ class BEVCalib(nn.Module):
     
         loss, T_gt_expected = self.loss_fn(pred_translation = translation, pred_rotation = rotation,
                             pcs = pc, gt_T_to_camera = gt_T_to_camera, init_T_to_camera = init_T_to_camera, mask = masks)
+        loss = self._add_correction_quat_loss(
+            loss, rotation, gt_T_to_camera, init_T_to_camera)
 
         if self.use_pitch_branch and z_summary is not None:
             img_summary = None

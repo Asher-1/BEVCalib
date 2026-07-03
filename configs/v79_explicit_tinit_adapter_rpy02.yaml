@@ -1,0 +1,184 @@
+# V79-explicit-tinit-adapter-rpy02
+#
+# V78 outcome:
+#   - Random sequence-median aggregate passes strict RPY02:
+#       ALL median=0.1431 deg, R/P/Y=0.1080/0.0733/0.0360 deg.
+#   - Fixed 2/2/2 recovery remains shortcut-like:
+#       residual=3.4126 deg, mean recovery=0.9%, RPY<0.2=0.0%.
+#
+# V79 adds a minimal explicit-Tinit adapter on top of the V78 low-bias prior.
+# Compared with V66, this branch is intentionally less aggressive:
+#   - train only tinit_encoder + rotation_pred;
+#   - keep backbone/BEV/fusion frozen;
+#   - lower LR and softer Jacobian/recovery weights;
+#   - strong zero-drift guard to preserve random sequence-median RPY02.
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    CUDA_VISIBLE_DEVICES: "0,1,4,5"
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    rotation_only: true
+
+    cam2bev_mode: "query"
+    backbone_type: "dinov2"
+    backbone_variant: "dinov2-small"
+    freeze_backbone: 1
+    backbone_freeze_layers: "0:-2"
+    backbone_lr_scale: 0.0
+    bev_branch_lr_scale: 0.0
+    use_mlp_head: 0
+    explicit_tinit: 1
+    tinit_sensitivity_weight: 0.018
+    trainable_prefixes: "tinit_encoder,rotation_pred"
+    drop_path_rate: 0.04
+    head_dropout: 0.06
+
+    batch_size: 8
+    learning_rate: 1.5e-05
+    wd: 0.006
+    use_ddp: true
+    ddp_gpus: 4
+    nnodes: 1
+    master_port: 29679
+    ddp_auto_scale: 0
+    no_amp: 1
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.64
+    axis_weights: "1.15,1.35,1.10"
+    use_balanced_axis_loss: 1
+
+    perturb_distribution: truncated_normal
+    zero_perturbation_prob: 0.28
+    multi_scale_perturb: "0.25:0.10,0.5:0.18,1.0:0.24,2.0:0.34,3.5:0.10,5.0:0.04"
+    per_axis_prob: 0.54
+    per_axis_weights: "0.34,0.36,0.30"
+    symmetric_perturb: 1
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 2.2
+    tinit_dropout_prob: 0.0
+    overcorrection_penalty: 0.90
+
+    use_mgda: 0
+    mgda_start_epoch: 0
+    mgda_include_inject: 1
+    mgda_include_photo: 0
+
+    jacobian_loss_weight: 0.075
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 4
+    jacobian_loss_axis_weights: "1.20,1.35,1.10"
+
+    zero_drift_loss_weight: 0.58
+    zero_drift_loss_weight_start: 0.38
+    zero_drift_loss_ramp_epochs: 4
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.30
+
+    inject_recovery_loss_weight: 0.70
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.34
+
+    augment_mount_jitter_prob: 0.06
+    augment_mount_jitter_rot_sigma: 0.25
+    augment_mount_jitter_trans_sigma: 0.003
+    augment_pitch_sign_flip_prob: 0.0
+    augment_pitch_flip_prob: 0.010
+    augment_pitch_flip_max_deg: 0.25
+    augment_color_jitter: 0.035
+    augment_pc_jitter: 0.005
+    augment_pc_dropout: 0.010
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+    max_frames_per_seq: 300
+    eval_epoches: 2
+    save_ckpt_per_epoches: 2
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 2.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.15
+    dual_gate_medw_max: 0.20
+    enable_jacobian_gate_ckpt: 1
+    jacobian_early_stop_min: 0.05
+    jacobian_early_stop_patience: 5
+    medw_eval_max_frames: 200
+
+    seed: 790
+    grad_accum_steps: 1
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "diff"
+    no_tensorboard: true
+
+experiments:
+  - name: "v79_explicit_tinit_adapter_rpy02_smoke"
+    description: "V79 smoke: explicit-Tinit adapter from V78 best MEDW, strict RPY02 + fixed recovery"
+    dataset: "all"
+    version: "v79_explicit_tinit_adapter_rpy02_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      batch_size: 8
+      ddp_gpus: 4
+      num_epochs: 10
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 10
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      max_frames_per_seq: 220
+      eval_epoches: 2
+      save_ckpt_per_epoches: 2
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v78_dinov2_query_rpy02_recovery_guard_smoke/all_training_data_scratch/checkpoint/ckpt_best_medw.pth"
+
+  - name: "v79_explicit_tinit_adapter_rpy02_full"
+    description: "V79 full: launch only if smoke recovers fixed bias without breaking random RPY02"
+    dataset: "all"
+    version: "v79_explicit_tinit_adapter_rpy02"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      batch_size: 8
+      ddp_gpus: 4
+      learning_rate: 1.1e-05
+      num_epochs: 30
+      warmup_epochs: 2
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 15
+      cosine_Tmult: 1
+      early_stopping_patience: 8
+      max_frames_per_seq: 500
+      eval_epoches: 2
+      save_ckpt_per_epoches: 2
+      inject_recovery_loss_weight: 0.58
+      inject_recovery_dedicated_ratio: 0.30
+      jacobian_loss_weight: 0.055
+      zero_drift_loss_weight: 0.62
+      zero_drift_dedicated_ratio: 0.34
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v79_explicit_tinit_adapter_rpy02_smoke/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"

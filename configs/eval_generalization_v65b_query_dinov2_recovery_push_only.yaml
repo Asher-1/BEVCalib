@@ -1,0 +1,85 @@
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v65b_query_dinov2_recovery_push_only"
+eval_script: "evaluate_checkpoint.py"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v65b-best-medw"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push"
+    ckpt: "ckpt_best_medw.pth"
+    eval_aliases: ["v65b-best-medw", "v65b-best-dual"]
+  ckpt_recovery:
+    label: "v65b-best-jacobian"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push"
+    ckpt: "ckpt_best_jacobian.pth"
+    eval_aliases: ["v65b-best-jacobian", "v65b-best-dual"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 70.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 14400
+  shortcut_diag: false
+  generalization_diag: true
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v65b-smoke-best-dual"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push_smoke"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth", "ckpt_16.pth", "ckpt_12.pth", "ckpt_8.pth", "ckpt_4.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65b smoke recovery-push best dual"
+
+  - label: "v65b-smoke-best-jacobian"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push_smoke"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth", "ckpt_16.pth", "ckpt_12.pth", "ckpt_8.pth", "ckpt_4.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65b smoke best Jacobian"
+
+  - label: "v65b-smoke-best-medw"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push_smoke"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_jacobian.pth", "ckpt_best_val.pth", "ckpt_16.pth", "ckpt_12.pth", "ckpt_8.pth", "ckpt_4.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65b smoke best MEDW"
+
+  - label: "v65b-best-dual"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_jacobian.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth", "ckpt_70.pth", "ckpt_60.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65b full best dual"
+
+  - label: "v65b-best-jacobian"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_medw.pth", "ckpt_best_val.pth", "ckpt_70.pth", "ckpt_60.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65b full best Jacobian"
+
+  - label: "v65b-best-medw"
+    dir_name: "model_small_5deg_v65b_query_dinov2_recovery_push"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_jacobian.pth", "ckpt_best_val.pth", "ckpt_70.pth", "ckpt_60.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V65b full best MEDW"

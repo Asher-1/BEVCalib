@@ -9,6 +9,7 @@ logs/
 wandb/
 *results*/
 *ckpts/
+*ckpt/
 *.avi
 *.pyc
 

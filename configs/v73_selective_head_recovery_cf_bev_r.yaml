@@ -1,0 +1,199 @@
+# V73-selective-head-recovery
+#
+# V72/V72b conclusion:
+#   - Identity-preserving ADIR adapter is very stable on random MEDW/Jacobian.
+#   - Fixed 2/2/2 recovery remains stuck around 53%, below V70's 54.3%.
+# V73 keeps the V60 anchor but selectively unfreezes the original pose/corr head
+# and query initializer, giving the model enough freedom to learn deployment
+# residuals without drifting the heavy image/point/BEV backbone.
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 5
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    gin_init_gate: 0.35
+    gin_gate_reg_weight: 0.01
+    gin_gate_reg_target: 0.35
+
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_jacg: 0
+
+    use_adir: 1
+    adir_train_only: 0
+    trainable_prefixes: "corr_head,pose_query_init,adir_refiner"
+    adir_steps: 3
+    adir_max_step_deg: 1.80
+
+    backbone_type: swin
+    backbone_lr_scale: 0.0
+    bev_branch_lr_scale: 0.0
+    head_dropout: 0.03
+    batch_size: 8
+    learning_rate: 3.5e-05
+    wd: 5.0e-05
+    use_ddp: true
+    ddp_gpus: 4
+    nnodes: 1
+    no_amp: 1
+    data_balance: 2
+    seq_weight_overrides: "00:1.45,02:1.18,03:1.10,05:1.15,06:1.45,08:1.15,10:1.45,11:1.32"
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.62
+    axis_weights: "3.4,6.2,1.6"
+    corr_alignment_weight: 0.0
+    corr_alignment_warmup: 4
+    pitch_aux_weight: 0.25
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.00
+    seq_consistency_start_epoch: 0
+
+    tinit_dropout_prob: 0.015
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 2.5
+    zero_perturbation_prob: 0.28
+    multi_scale_perturb: "0.5:0.14,1.0:0.20,2.0:0.48,3.5:0.14,5.0:0.04"
+    per_axis_prob: 0.50
+    per_axis_weights: "0.45,0.40,0.15"
+    symmetric_perturb: 1
+    overcorrection_penalty: 0.90
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.0
+
+    use_mgda: 0
+    mgda_start_epoch: 0
+    mgda_include_inject: 0
+    mgda_include_photo: 0
+
+    jacobian_loss_weight: 0.080
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 4
+    jacobian_loss_axis_weights: "1.45,1.10,1.35"
+
+    zero_drift_loss_weight: 0.52
+    zero_drift_loss_weight_start: 0.32
+    zero_drift_loss_ramp_epochs: 4
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.30
+
+    inject_recovery_loss_weight: 0.90
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.42
+
+    use_lsp_loss: 0
+    rig_consistency_weight: 0.0
+    pose_release_epoch: 0
+    freeze_backbone_epoch: 0
+
+    progressive_angle_start: 1.0
+    progressive_angle_end: 5.0
+    progressive_warmup_epochs: 4
+
+    augment_mount_jitter_prob: 0.05
+    augment_mount_jitter_rot_sigma: 0.24
+    augment_mount_jitter_trans_sigma: 0.004
+    augment_intrinsic: 0.004
+    augment_color_jitter: 0.04
+    augment_fov_crop_prob: 0.01
+    augment_fov_crop_ratio_min: 0.96
+    augment_fov_crop_ratio_max: 0.99
+    augment_lidar_sparse_prob: 0.008
+    augment_lidar_sparse_lines: "32,64"
+    augment_lidar_vertical_fov: "-25,15"
+    max_pcd_points: 16384
+    pose_aware_sampling: true
+    max_frames_per_seq: 400
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.78
+    dual_gate_medw_max: 0.26
+    enable_jacobian_gate_ckpt: 1
+    jacobian_early_stop_min: 0.55
+    jacobian_early_stop_patience: 4
+    eval_epoches: 2
+    save_ckpt_per_epoches: 2
+    seed: 73
+    no_tensorboard: true
+
+experiments:
+  - name: "v73_selective_head_recovery_smoke"
+    description: "V73 smoke: unfreeze V60 pose head/query + ADIR, strengthen fixed recovery"
+    dataset: "all"
+    version: "v73_selective_head_recovery_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      batch_size: 8
+      ddp_gpus: 4
+      num_epochs: 8
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 8
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      max_frames_per_seq: 260
+      eval_epoches: 2
+      save_ckpt_per_epoches: 2
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v60_seq_balance_pitch_guard/all_training_data_scratch/checkpoint/ckpt_15.pth"
+
+  - name: "v73_selective_head_recovery_full"
+    description: "V73 full: run only if smoke fixed full beats V70/V72b"
+    dataset: "all"
+    version: "v73_selective_head_recovery"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 32
+      warmup_epochs: 2
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 16
+      cosine_Tmult: 1
+      early_stopping_patience: 20
+      eval_epoches: 2
+      save_ckpt_per_epoches: 2
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v60_seq_balance_pitch_guard/all_training_data_scratch/checkpoint/ckpt_15.pth"

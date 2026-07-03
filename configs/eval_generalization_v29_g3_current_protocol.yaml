@@ -1,0 +1,35 @@
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v29_g3_current_protocol"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: false
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v29-g3-best-val"
+    base_dir: "logs/all_training_data/v29_quick"
+    dir_name: "model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_400.pth", "ckpt_350.pth", "ckpt_300.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V29 G3 DINOv2 query-BEV, current formal protocol sanity check"
+
+  - label: "v29-g3-ckpt400"
+    base_dir: "logs/all_training_data/v29_quick"
+    dir_name: "model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick"
+    ckpt: "ckpt_400.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_350.pth", "ckpt_300.pth"]
+    bev_zbound_step: "4.0"
+    rotation_only: 1
+    mode_desc: "V29 G3 DINOv2 query-BEV ckpt400, current formal protocol sanity check"

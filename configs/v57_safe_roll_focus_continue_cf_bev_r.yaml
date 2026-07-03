@@ -1,0 +1,171 @@
+# V57-safe-roll-focus-continue: 在 V57 最优候选上做低学习率 continuation
+#
+# 目的:
+#   1. V57 的 best MEDW200 出现在 epoch 21，说明 deploy 代理指标仍在末段改善
+#   2. 用更低学习率继续压 roll / pitch
+#   3. 进一步减少大扰动和 inject 干扰，把重心锁到 deploy MEDW400
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 5
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    gin_init_gate: 0.35
+    gin_gate_reg_weight: 0.01
+    gin_gate_reg_target: 0.35
+
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    dp_gate_deg: 1.5
+    route_loss_weight: 0.0
+    route_zd_penalty_weight: 0.0
+    use_jacg: 1
+    jacg_hidden_dim: 64
+    bias_path_in_norm: 1
+    recovery_path_layer_norm: 1
+
+    backbone_type: swin
+    backbone_lr_scale: 0.08
+    head_dropout: 0.05
+    batch_size: 16
+    learning_rate: 3.0e-06
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    no_amp: 1
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.62
+    axis_weights: "3.4,5.6,0.7"
+    corr_alignment_weight: 0.40
+    corr_alignment_warmup: 5
+    pitch_aux_weight: 0.30
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.16
+    seq_consistency_start_epoch: 0
+
+    tinit_dropout_prob: 0.10
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 3.5
+    zero_perturbation_prob: 0.60
+    multi_scale_perturb: "0.5:0.38,1.0:0.32,2.0:0.12,3.5:0.06"
+    per_axis_prob: 0.40
+    per_axis_weights: "0.62,0.25,0.13"
+    symmetric_perturb: 1
+    overcorrection_penalty: 2.0
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.12
+
+    use_mgda: 1
+    mgda_start_epoch: 0
+    mgda_include_inject: 1
+    mgda_include_photo: 0
+
+    jacobian_loss_weight: 0.06
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 4
+
+    zero_drift_loss_weight: 0.70
+    zero_drift_loss_weight_start: 0.50
+    zero_drift_loss_ramp_epochs: 6
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.60
+
+    inject_recovery_loss_weight: 0.28
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.08
+
+    use_lsp_loss: 0
+    rig_consistency_weight: 0.0
+    pose_release_epoch: 0
+    freeze_backbone_epoch: 0
+
+    progressive_angle_start: 1.0
+    progressive_angle_end: 5.0
+    progressive_warmup_epochs: 6
+
+    augment_mount_jitter_prob: 0.12
+    augment_mount_jitter_rot_sigma: 0.5
+    augment_mount_jitter_trans_sigma: 0.006
+    augment_intrinsic: 0.012
+    augment_color_jitter: 0.10
+    augment_fov_crop_prob: 0.05
+    augment_fov_crop_ratio_min: 0.88
+    augment_fov_crop_ratio_max: 0.96
+    augment_lidar_sparse_prob: 0.03
+    augment_lidar_sparse_lines: "32,64"
+    augment_lidar_vertical_fov: "-25,15"
+    max_pcd_points: 16384
+    pose_aware_sampling: true
+    max_frames_per_seq: 400
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.91
+    dual_gate_medw_max: 0.145
+    enable_jacobian_gate_ckpt: 1
+    jacobian_early_stop_min: 0.86
+    jacobian_early_stop_patience: 3
+    eval_epoches: 5
+    save_ckpt_per_epoches: 5
+    seed: 42
+    no_tensorboard: true
+
+experiments:
+  - name: "v57_safe_roll_focus_continue"
+    description: "V57 continuation: lower LR + stronger roll deploy focus"
+    dataset: "all"
+    version: "v57_safe_roll_focus_continue"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 16
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 16
+      cosine_Tmult: 1
+      early_stopping_patience: 16
+      eval_epoches: 5
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v57_safe_roll_focus/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"
+      dual_gate_medw_max: 0.145

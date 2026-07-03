@@ -1,0 +1,211 @@
+# V77-rpy02-tail-guard
+#
+# Target update:
+#   The deployment KPI is strict R/P/Y all < 0.2 deg, not 0.3 deg.
+#
+# V74e2 + adaptive-default already passes the sequence-level deployment gates:
+#   - random sequence-median: 0.3465 deg
+#   - fixed 2/2/2 recovery: 72.3%
+# but per-frame all-axis RPY<0.2 remains unsolved. V77 is a low-risk first
+# attempt: keep the V74e2 anchor, train only selective pose/corr/ADIR modules,
+# and bias training toward fine axis tail control without reopening the heavy
+# image/point/BEV backbone.
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    CUDA_VISIBLE_DEVICES: "0,1,2,5"
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 5
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    gin_init_gate: 0.35
+    gin_gate_reg_weight: 0.012
+    gin_gate_reg_target: 0.35
+
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_jacg: 0
+
+    use_adir: 1
+    adir_train_only: 0
+    trainable_prefixes: "corr_head,pose_query_init,adir_refiner,pitch_branch,pitch_conf_net"
+    adir_steps: 3
+    adir_max_step_deg: 1.55
+
+    backbone_type: swin
+    backbone_lr_scale: 0.0
+    bev_branch_lr_scale: 0.0
+    head_dropout: 0.035
+    batch_size: 8
+    learning_rate: 4.0e-06
+    wd: 6.0e-05
+    use_ddp: true
+    ddp_gpus: 4
+    nnodes: 1
+    master_port: 29677
+    no_amp: 1
+
+    data_balance: 2
+    seq_weight_overrides: "00:1.55,01:1.08,02:1.45,03:1.35,04:1.22,05:1.05,06:1.35,08:1.55,09:1.05,10:1.42,11:1.50"
+
+    enable_axis_loss: true
+    use_balanced_axis_loss: 1
+    weight_axis_rotation: 0.82
+    axis_weights: "4.0,6.6,4.2"
+    corr_alignment_weight: 0.0
+    corr_alignment_warmup: 4
+    pitch_aux_weight: 0.34
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.015
+    seq_consistency_start_epoch: 1
+
+    tinit_dropout_prob: 0.008
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 2.1
+    zero_perturbation_prob: 0.20
+    multi_scale_perturb: "0.25:0.12,0.5:0.18,1.0:0.22,2.0:0.34,3.5:0.10,5.0:0.04"
+    per_axis_prob: 0.66
+    per_axis_weights: "0.30,0.36,0.34"
+    symmetric_perturb: 1
+    overcorrection_penalty: 0.86
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.0
+
+    use_mgda: 0
+    mgda_start_epoch: 0
+    mgda_include_inject: 0
+    mgda_include_photo: 0
+
+    jacobian_loss_weight: 0.070
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 1.5
+    jacobian_loss_interval: 5
+    jacobian_loss_axis_weights: "1.15,1.30,1.30"
+
+    zero_drift_loss_weight: 0.42
+    zero_drift_loss_weight_start: 0.30
+    zero_drift_loss_ramp_epochs: 3
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.22
+
+    inject_recovery_loss_weight: 0.92
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.42
+
+    use_lsp_loss: 0
+    rig_consistency_weight: 0.0
+    pose_release_epoch: 0
+    freeze_backbone_epoch: 0
+
+    progressive_angle_start: 0.5
+    progressive_angle_end: 5.0
+    progressive_warmup_epochs: 3
+
+    augment_mount_jitter_prob: 0.025
+    augment_mount_jitter_rot_sigma: 0.12
+    augment_mount_jitter_trans_sigma: 0.0025
+    augment_intrinsic: 0.002
+    augment_color_jitter: 0.020
+    augment_fov_crop_prob: 0.004
+    augment_fov_crop_ratio_min: 0.982
+    augment_fov_crop_ratio_max: 0.996
+    augment_lidar_sparse_prob: 0.004
+    augment_lidar_sparse_lines: "32,64"
+    augment_lidar_vertical_fov: "-25,15"
+    max_pcd_points: 16384
+    pose_aware_sampling: true
+    max_frames_per_seq: 400
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.82
+    dual_gate_medw_max: 0.20
+    enable_jacobian_gate_ckpt: 1
+    jacobian_early_stop_min: 0.60
+    jacobian_early_stop_patience: 4
+    medw_eval_max_frames: 200
+    eval_epoches: 1
+    save_ckpt_per_epoches: 1
+    seed: 770
+    no_tensorboard: true
+
+experiments:
+  - name: "v77_rpy02_tail_guard_smoke"
+    description: "V77 smoke: V74e2 anchor, strict RPY<0.2 tail guard without backbone drift"
+    dataset: "all"
+    version: "v77_rpy02_tail_guard_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      batch_size: 8
+      ddp_gpus: 4
+      num_epochs: 4
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 4
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      max_frames_per_seq: 340
+      eval_epoches: 1
+      save_ckpt_per_epoches: 1
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v74_v73e8_hardseq_polish_smoke/all_training_data_scratch/checkpoint/ckpt_2.pth"
+
+  - name: "v77_rpy02_tail_guard_full"
+    description: "V77 full: launch only if smoke keeps adaptive-default gates healthy"
+    dataset: "all"
+    version: "v77_rpy02_tail_guard"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      batch_size: 8
+      ddp_gpus: 4
+      num_epochs: 10
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 5
+      cosine_Tmult: 1
+      early_stopping_patience: 6
+      max_frames_per_seq: 400
+      eval_epoches: 1
+      save_ckpt_per_epoches: 1
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v77_rpy02_tail_guard_smoke/all_training_data_scratch/checkpoint/ckpt_best_dual.pth"

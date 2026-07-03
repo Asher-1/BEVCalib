@@ -1,0 +1,189 @@
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v64_sign_mount_residual_only"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v64_sign_mount_residual_generalization"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v64-best-dual"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_best_dual.pth"
+    eval_aliases: ["v64-best-dual"]
+  ckpt_recovery:
+    label: "v64-best-val"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_best_val.pth"
+    eval_aliases: ["v64-best-val"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 70.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: false
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v64-best-dual"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth", "ckpt_16.pth", "ckpt_12.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 best-dual main candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-best-medw"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth", "ckpt_16.pth", "ckpt_12.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 best-medw candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-best-val"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_16.pth", "ckpt_12.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 best-val candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-best-jacobian"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_best_jacobian.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth", "ckpt_16.pth", "ckpt_12.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 best-jacobian candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-ckpt2"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_2.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 ckpt2 early candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-ckpt4"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_4.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 ckpt4 candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-ckpt6"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_6.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 ckpt6 candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-ckpt8"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_8.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 ckpt8 candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-ckpt12"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_12.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 ckpt12 candidate"
+    pitch_vertical_bands: 5
+
+  - label: "v64-ckpt16"
+    dir_name: "model_small_5deg_v64_sign_mount_residual"
+    ckpt: "ckpt_16.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth", "ckpt_12.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V64 ckpt16 final candidate"
+    pitch_vertical_bands: 5

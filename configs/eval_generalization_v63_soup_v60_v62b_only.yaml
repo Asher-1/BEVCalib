@@ -1,0 +1,144 @@
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_v2"
+output_dir: "logs/evaluations/generalization_v63_soup_v60_v62b_only"
+eval_script: "evaluate_checkpoint.py"
+
+bag_eval_dir: "/mnt/drtraining/user/dahailu/data/bevcalib/calibration_outputs/v63_soup_v60_v62b_generalization"
+
+deploy_policy:
+  gate_deg: 1.5
+  medw_n_frames: 400
+  ckpt_medw:
+    label: "v60-ckpt15-baseline"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_15.pth"
+    eval_aliases: ["v60-ckpt15-baseline"]
+  ckpt_recovery:
+    label: "v60-ckpt15-baseline"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_15.pth"
+    eval_aliases: ["v60-ckpt15-baseline"]
+  acceptance:
+    medw400_max_deg: 0.18
+    zd_max_rpy_max_deg: 0.10
+    genuine_recovery_2deg_min_pct: 70.0
+    multi_mag_0p5_recv_min_pct: 0.0
+    multi_mag_1p0_recv_min_pct: 0.0
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 16
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: false
+  exclude_seqs: "07"
+  eval_max_frames_per_seq: 400
+
+models:
+  - label: "v60-ckpt15-baseline"
+    dir_name: "model_small_5deg_v60_seq_balance_pitch_guard"
+    ckpt: "ckpt_15.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "V60 ckpt15 formal best baseline"
+    pitch_vertical_bands: 5
+
+  - label: "v63-soup-v62b2-a05"
+    dir_name: "model_small_5deg_v63_soup_v60_v62b"
+    ckpt: "ckpt_v60_0p95_v62b2_0p05.pth"
+    ckpt_fallback: []
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "Soup: 95% V60 ckpt15 + 5% V62b ckpt2"
+    pitch_vertical_bands: 5
+
+  - label: "v63-soup-v62b2-a10"
+    dir_name: "model_small_5deg_v63_soup_v60_v62b"
+    ckpt: "ckpt_v60_0p90_v62b2_0p10.pth"
+    ckpt_fallback: []
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "Soup: 90% V60 ckpt15 + 10% V62b ckpt2"
+    pitch_vertical_bands: 5
+
+  - label: "v63-soup-v62b2-a20"
+    dir_name: "model_small_5deg_v63_soup_v60_v62b"
+    ckpt: "ckpt_v60_0p80_v62b2_0p20.pth"
+    ckpt_fallback: []
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "Soup: 80% V60 ckpt15 + 20% V62b ckpt2"
+    pitch_vertical_bands: 5
+
+  - label: "v63-soup-v62b2-a35"
+    dir_name: "model_small_5deg_v63_soup_v60_v62b"
+    ckpt: "ckpt_v60_0p65_v62b2_0p35.pth"
+    ckpt_fallback: []
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "Soup: 65% V60 ckpt15 + 35% V62b ckpt2"
+    pitch_vertical_bands: 5
+
+  - label: "v63-soup-v62b6-a10"
+    dir_name: "model_small_5deg_v63_soup_v60_v62b"
+    ckpt: "ckpt_v60_0p90_v62b6_0p10.pth"
+    ckpt_fallback: []
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "Soup: 90% V60 ckpt15 + 10% V62b ckpt6"
+    pitch_vertical_bands: 5
+
+  - label: "v63-soup-v62bjac-a10"
+    dir_name: "model_small_5deg_v63_soup_v60_v62b"
+    ckpt: "ckpt_v60_0p90_v62bjac_0p10.pth"
+    ckpt_fallback: []
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    use_dp_head: 0
+    use_hard_route_eval: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    mode_desc: "Soup: 90% V60 ckpt15 + 10% V62b best-jacobian"
+    pitch_vertical_bands: 5

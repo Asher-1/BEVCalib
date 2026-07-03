@@ -402,6 +402,8 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         'use_contrastive_extrinsic': 'contrastive_head.encoder.0.weight',
         'domain_adversarial':       'domain_classifier.classifier.0.weight',
         'explicit_tinit':           'tinit_encoder.mlp.0.weight',
+        'tinit_bev_film':           'tinit_bev_film.0.weight',
+        'tinit_query_film':         'img_branch.tinit_query_film.0.weight',
         'native_cross':             'native_cross_head.rot_layers.0.to_q.weight',
         'native_cross_pointgpt':    'native_cross_head.point_encoder.model.encoder.first_conv.0.weight',
     }
@@ -503,6 +505,8 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
         'use_contrastive_extrinsic': ('use_contrastive_extrinsic', False),
         'domain_adversarial':        ('domain_adversarial',        False),
         'explicit_tinit':           ('explicit_tinit',           False),
+        'tinit_bev_film':           ('tinit_bev_film',           False),
+        'tinit_query_film':         ('tinit_query_film',         False),
         'native_cross':             ('native_cross',             False),
     }
     for key, (ckpt_key, default) in _BOOL_PARAMS.items():
@@ -669,6 +673,9 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
     cli_pvb = getattr(args, 'pitch_vertical_bands', None)
     if cli_pvb is not None:
         ckpt_args['pitch_vertical_bands'] = int(cli_pvb)
+    cli_hard_route = getattr(args, 'use_hard_route_eval', None)
+    if cli_hard_route is not None:
+        ckpt_args['use_hard_route_eval'] = int(cli_hard_route)
     ckpt_args = _infer_pitch_vertical_bands_from_ckpt(ckpt_args, state_dict, quiet=quiet)
     p = _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=quiet)
 
@@ -700,6 +707,7 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
             'gin_gate_reg_target', 'pitch_vertical_bands',
             'use_magnitude_head', 'decoder_pool_mode',
             'use_dp_head', 'route_loss_weight', 'zero_drift_loss_weight',
+            'use_hard_route_eval',
             'use_adir', 'adir_steps', 'adir_max_step_deg',
         ):
             if gmp_key in ckpt_args and not hasattr(eval_args, gmp_key):
@@ -766,6 +774,8 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
             backbone_variant=p.get('backbone_variant', 'dinov2-small'),
             backbone_weights=p.get('backbone_weights', None),
             explicit_tinit=p.get('explicit_tinit', False),
+            tinit_bev_film=p.get('tinit_bev_film', False),
+            tinit_query_film=p.get('tinit_query_film', False),
             tinit_sensitivity_weight=p.get('tinit_sensitivity_weight', 0.0),
             iterative_refine=p.get('iterative_refine', 0),
             native_cross=p.get('native_cross', False),
@@ -4586,6 +4596,8 @@ def main():
                        help="逗号分隔的序列ID列表，评估时跳过这些序列 (例如: seq07,seq12)")
     parser.add_argument("--pitch_vertical_bands", type=int, default=None,
                        help="FrontViewPitchBranch 垂直分带数 (None=从checkpoint自动推断)")
+    parser.add_argument("--use_hard_route_eval", type=int, default=None,
+                       help="Override DP-Head hard route eval at inference (0/1)")
     parser.add_argument("--deploy_gate", action='store_true', default=False,
                        help="双 ckpt 门控 gdiag: ZD→primary, Inject→recovery")
     parser.add_argument("--ckpt_path_recovery", type=str, default=None,

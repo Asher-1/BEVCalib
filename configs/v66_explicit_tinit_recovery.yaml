@@ -1,0 +1,173 @@
+# V66-explicit-tinit-recovery
+#
+# Motivation:
+#   V65/V65b Query-BEV+DINOv2 loads V29-G3 cleanly and keeps low MEDW,
+#   but fixed-inject/Jacobian recovery stays near zero.  V66 opens a direct
+#   T_init RPY path (`explicit_tinit`) and relies on the pretrain loader's
+#   compatible head expansion to keep the old V29 linear head stable while
+#   learning the new T_init columns.
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    rotation_only: true
+
+    cam2bev_mode: "query"
+    backbone_type: "dinov2"
+    backbone_variant: "dinov2-small"
+    freeze_backbone: 1
+    backbone_freeze_layers: "0:-2"
+    backbone_lr_scale: 0.002
+    use_mlp_head: 0
+    explicit_tinit: 1
+    tinit_sensitivity_weight: 0.08
+    drop_path_rate: 0.05
+    head_dropout: 0.08
+
+    batch_size: 8
+    learning_rate: 4.0e-05
+    wd: 0.005
+    use_ddp: true
+    ddp_gpus: 4
+    nnodes: 1
+    ddp_auto_scale: 0
+    no_amp: 1
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.45
+    axis_weights: "1.0,1.0,1.0"
+    use_balanced_axis_loss: 1
+
+    perturb_distribution: truncated_normal
+    zero_perturbation_prob: 0.10
+    multi_scale_perturb: "0.5:0.10,1.0:0.18,2.0:0.40,3.5:0.22,5.0:0.10"
+    per_axis_prob: 0.50
+    per_axis_weights: "0.34,0.33,0.33"
+    symmetric_perturb: 1
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 3.0
+    tinit_dropout_prob: 0.00
+    overcorrection_penalty: 0.45
+
+    use_mgda: 0
+    mgda_start_epoch: 0
+    mgda_include_inject: 1
+    mgda_include_photo: 0
+
+    jacobian_loss_weight: 0.18
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 2
+
+    zero_drift_loss_weight: 0.18
+    zero_drift_loss_weight_start: 0.08
+    zero_drift_loss_ramp_epochs: 6
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.10
+
+    inject_recovery_loss_weight: 1.20
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.55
+
+    augment_mount_jitter_prob: 0.22
+    augment_mount_jitter_rot_sigma: 1.0
+    augment_mount_jitter_trans_sigma: 0.005
+    augment_pitch_sign_flip_prob: 0.0
+    augment_pitch_flip_prob: 0.01
+    augment_pitch_flip_max_deg: 0.4
+    augment_color_jitter: 0.06
+    augment_pc_jitter: 0.008
+    augment_pc_dropout: 0.015
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+
+    pose_aware_sampling: true
+    max_frames_per_seq: 300
+    eval_epoches: 4
+    save_ckpt_per_epoches: 4
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 2.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.35
+    dual_gate_medw_max: 0.22
+    enable_jacobian_gate_ckpt: 1
+    jacobian_early_stop_min: 0.20
+    jacobian_early_stop_patience: 3
+
+    seed: 44
+    grad_accum_steps: 1
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "diff"
+    no_tensorboard: true
+
+experiments:
+  - name: "v66_explicit_tinit_recovery_smoke"
+    description: "V66 smoke: explicit T_init RPY path plus recovery/Jacobian supervision"
+    dataset: "all"
+    version: "v66_explicit_tinit_recovery_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 20
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 20
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      max_frames_per_seq: 200
+      eval_epoches: 4
+      save_ckpt_per_epoches: 4
+      pretrain_ckpt: "logs/all_training_data/v29_quick/model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth"
+
+  - name: "v66_explicit_tinit_recovery_full"
+    description: "V66 full: explicit T_init recovery line if smoke lifts Jacobian"
+    dataset: "all"
+    version: "v66_explicit_tinit_recovery"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      batch_size: 12
+      ddp_gpus: 8
+      learning_rate: 2.6e-05
+      backbone_lr_scale: 0.0015
+      tinit_sensitivity_weight: 0.05
+      num_epochs: 80
+      warmup_epochs: 3
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 1
+      early_stopping_patience: 18
+      max_frames_per_seq: 500
+      eval_epoches: 5
+      save_ckpt_per_epoches: 5
+      inject_recovery_dedicated_ratio: 0.50
+      inject_recovery_loss_weight: 1.05
+      jacobian_loss_weight: 0.14
+      jacobian_loss_interval: 3
+      zero_drift_dedicated_ratio: 0.14
+      zero_drift_loss_weight: 0.22
+      pretrain_ckpt: "logs/all_training_data/v29_quick/model_small_5deg_v29_G3_partial_unfreeze_dinov2_quick/all_training_data_scratch/checkpoint/ckpt_best_val.pth"

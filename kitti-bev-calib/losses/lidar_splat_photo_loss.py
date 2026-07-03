@@ -88,6 +88,8 @@ class LiDARSplatPhotoLoss(nn.Module):
         min_coverage: float = 50.0,
         ssim_window: int = 11,
         downsample: int = 4,
+        loss_clip: float = 2.0,
+        min_valid_ratio: float = 0.02,
     ):
         super().__init__()
         self.lambda_ssim = lambda_ssim
@@ -95,6 +97,8 @@ class LiDARSplatPhotoLoss(nn.Module):
         self.min_coverage = min_coverage
         self.ssim_window = ssim_window
         self.downsample = max(1, downsample)
+        self.loss_clip = max(0.0, float(loss_clip))
+        self.min_valid_ratio = max(0.0, float(min_valid_ratio))
 
     def _prepare_img(self, img: torch.Tensor) -> torch.Tensor:
         if img.dim() == 5:
@@ -164,6 +168,7 @@ class LiDARSplatPhotoLoss(nn.Module):
             depth_loss = pts.new_tensor(0.0)
             ssim_loss = pts.new_tensor(0.0)
             valid_ratio = pts.new_tensor(0.0)
+            skipped = False
 
             if in_bounds.any():
                 colors = sample_image_at_pixels(img_s, u_gt_s, v_gt_s)
@@ -184,11 +189,23 @@ class LiDARSplatPhotoLoss(nn.Module):
                 depth_loss = (depth_rel * in_bounds.float()).sum() / in_bounds.float().sum().clamp(min=1.0)
                 valid_ratio = in_bounds.float().sum() / pt_valid.float().sum().clamp(min=1.0)
 
-            total = (1.0 - self.lambda_ssim) * photo_loss + self.lambda_ssim * ssim_loss
+            if float(valid_ratio.item()) < self.min_valid_ratio:
+                skipped = True
+            else:
+                total = (1.0 - self.lambda_ssim) * photo_loss + self.lambda_ssim * ssim_loss
+                if self.loss_clip > 0:
+                    total = total.clamp(max=self.loss_clip)
+                if not torch.isfinite(total):
+                    skipped = True
+
+            if skipped:
+                total = pts.new_tensor(0.0)
+
             return {
                 'lsp_loss': total,
                 'lsp_photo': photo_loss.detach(),
                 'lsp_ssim': ssim_loss.detach(),
                 'lsp_depth': depth_loss.detach(),
                 'lsp_valid_ratio': valid_ratio.detach(),
+                'lsp_skipped': skipped,
             }

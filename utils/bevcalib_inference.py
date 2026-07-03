@@ -37,6 +37,8 @@ class BEVCalibInference(nn.Module):
         self.intrinsic_input = getattr(model, 'intrinsic_input', False)
         self.correlation_fusion = getattr(model, 'correlation_fusion', False)
         self.explicit_tinit = getattr(model, 'explicit_tinit', False)
+        self.use_tinit_bev_film = getattr(model, 'use_tinit_bev_film', False)
+        self.use_tinit_query_film = getattr(model, 'use_tinit_query_film', False)
         self.iterative_refine = getattr(model, 'iterative_refine', 0)
         self.native_cross = getattr(model, 'native_cross', False)
         self.max_attn_tokens = max_attn_tokens
@@ -78,6 +80,7 @@ class BEVCalibInference(nn.Module):
         cam_bev_feats, cam_bev_mask = m.img_branch(
             cam2ego_T=cam2ego_T, cam_intrins=K_,
             post_cam2ego_T=post_, imgs=img_,
+            **({'tinit_T': init_} if self.use_tinit_query_film else {}),
         )
 
         pc_perm = pc.permute(0, 2, 1).contiguous()
@@ -89,6 +92,8 @@ class BEVCalibInference(nn.Module):
             x = m.conv_fuser(cam_bev_feats, pc_bev_feats)
             if m.bev_encoder_use:
                 x = m.bev_encoder(x)
+            if self.use_tinit_bev_film:
+                x = m._apply_tinit_bev_film(x, init_T_to_camera)
             x = x + m.pose_embed
 
             if m.deformable:
@@ -1018,6 +1023,8 @@ def load_bevcalib_inference(
     _correlation_fusion = ckpt_args.get('correlation_fusion', False)
     _cross_correlation_fusion = ckpt_args.get('cross_correlation_fusion', False)
     _explicit_tinit = bool(int(ckpt_args.get('explicit_tinit', 0)))
+    _tinit_bev_film = bool(int(ckpt_args.get('tinit_bev_film', 0)))
+    _tinit_query_film = bool(int(ckpt_args.get('tinit_query_film', 0)))
     _iterative_refine = int(ckpt_args.get('iterative_refine', 0))
     if _iterative_refine == 0 and any(k.startswith('iter_head.') for k in state):
         _iterative_refine = 3
@@ -1029,6 +1036,10 @@ def load_bevcalib_inference(
         print(f"[load] Detected correlation_fusion=True from checkpoint args")
     if _explicit_tinit:
         print(f"[load] Detected explicit_tinit=True from checkpoint args")
+    if _tinit_bev_film:
+        print(f"[load] Detected tinit_bev_film=True from checkpoint args")
+    if _tinit_query_film:
+        print(f"[load] Detected tinit_query_film=True from checkpoint args")
     if _iterative_refine > 0:
         print(f"[load] Detected iterative_refine={_iterative_refine} from checkpoint args")
     model = BEVCalib(
@@ -1050,6 +1061,8 @@ def load_bevcalib_inference(
         correlation_fusion=_correlation_fusion,
         cross_correlation_fusion=_cross_correlation_fusion,
         explicit_tinit=_explicit_tinit,
+        tinit_bev_film=_tinit_bev_film,
+        tinit_query_film=_tinit_query_film,
         iterative_refine=_iterative_refine,
     )
 

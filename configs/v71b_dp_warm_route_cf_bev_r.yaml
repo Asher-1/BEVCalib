@@ -1,0 +1,205 @@
+# V71b-DP-warm-route: protected DP-Head smoke after V71a cold-start collapse
+#
+# V71a root-cause:
+#   - New DP router mixed bias/recovery near 0.5 from step 1.
+#   - Extra recovery-path LayerNorm changed the pretrained corr_head input
+#     distribution, destroying the V60 anchor and producing ~30° MEDW.
+#
+# V71b fixes:
+#   - recovery_path_layer_norm=0: keep V60 corr_head input distribution.
+#   - dp_train_hard_route=1: training output follows GT hard gate while router
+#     still learns BCE from route_pred_w.
+#   - lower DP recovery quat weight for a safer smoke.
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 128
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 5
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 1
+    gin_channels: 128
+    gin_init_gate: 0.35
+    gin_gate_reg_weight: 0.01
+    gin_gate_reg_target: 0.35
+
+    use_dp_head: 1
+    use_hard_route_eval: 1
+    dp_train_hard_route: 1
+    dp_gate_deg: 1.35
+    route_loss_weight: 0.18
+    route_zd_penalty_weight: 0.08
+    dp_route_input_mode: mag_only
+    dp_jacg_input_mode: mag_only
+    dp_recovery_quat_loss_weight: 0.10
+    use_jacg: 1
+    jacg_hidden_dim: 64
+    bias_path_in_norm: 1
+    recovery_path_layer_norm: 0
+
+    backbone_type: swin
+    backbone_lr_scale: 0.012
+    head_dropout: 0.05
+    batch_size: 16
+    learning_rate: 2.4e-06
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    no_amp: 1
+    data_balance: 2
+    seq_weight_overrides: "00:1.25,02:1.10,03:1.10,05:1.10,06:1.25,08:1.10,10:1.25,11:1.18"
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.54
+    axis_weights: "3.0,5.4,1.4"
+    corr_alignment_weight: 0.24
+    corr_alignment_warmup: 4
+    pitch_aux_weight: 0.30
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.10
+    seq_consistency_start_epoch: 0
+
+    tinit_dropout_prob: 0.03
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 3.2
+    zero_perturbation_prob: 0.40
+    multi_scale_perturb: "0.5:0.23,1.0:0.27,2.0:0.35,3.5:0.11,5.0:0.04"
+    per_axis_prob: 0.45
+    per_axis_weights: "0.42,0.36,0.22"
+    symmetric_perturb: 1
+    overcorrection_penalty: 1.10
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.12
+
+    use_mgda: 0
+    mgda_start_epoch: 0
+    mgda_include_inject: 0
+    mgda_include_photo: 0
+
+    jacobian_loss_weight: 0.060
+    jacobian_loss_start_epoch: 0
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 4
+    jacobian_loss_axis_weights: "1.25,1.0,1.35"
+
+    zero_drift_loss_weight: 0.36
+    zero_drift_loss_weight_start: 0.24
+    zero_drift_loss_ramp_epochs: 5
+    zero_drift_loss_start_epoch: 0
+    zero_drift_dedicated_ratio: 0.26
+
+    inject_recovery_loss_weight: 0.30
+    inject_recovery_loss_start_epoch: 0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.16
+
+    use_lsp_loss: 0
+    rig_consistency_weight: 0.0
+    pose_release_epoch: 0
+    freeze_backbone_epoch: 0
+
+    progressive_angle_start: 1.0
+    progressive_angle_end: 5.0
+    progressive_warmup_epochs: 5
+
+    augment_mount_jitter_prob: 0.07
+    augment_mount_jitter_rot_sigma: 0.34
+    augment_mount_jitter_trans_sigma: 0.005
+    augment_intrinsic: 0.006
+    augment_color_jitter: 0.06
+    augment_fov_crop_prob: 0.02
+    augment_fov_crop_ratio_min: 0.94
+    augment_fov_crop_ratio_max: 0.99
+    augment_lidar_sparse_prob: 0.01
+    augment_lidar_sparse_lines: "32,64"
+    augment_lidar_vertical_fov: "-25,15"
+    max_pcd_points: 16384
+    pose_aware_sampling: true
+    max_frames_per_seq: 400
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.75
+    dual_gate_medw_max: 0.20
+    enable_jacobian_gate_ckpt: 1
+    jacobian_early_stop_min: 0.62
+    jacobian_early_stop_patience: 3
+    eval_epoches: 2
+    save_ckpt_per_epoches: 2
+    seed: 50
+    no_tensorboard: true
+
+experiments:
+  - name: "v71b_dp_warm_route_smoke"
+    description: "V71b smoke: protected DP route warm-start, no rec-path LN"
+    dataset: "all"
+    version: "v71b_dp_warm_route_smoke"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      batch_size: 8
+      ddp_gpus: 4
+      num_epochs: 6
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 6
+      cosine_Tmult: 1
+      early_stopping_patience: 999
+      max_frames_per_seq: 220
+      eval_epoches: 2
+      save_ckpt_per_epoches: 2
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v60_seq_balance_pitch_guard/all_training_data_scratch/checkpoint/ckpt_15.pth"
+
+  - name: "v71b_dp_warm_route_full"
+    description: "V71b full: only run if smoke preserves MEDW and improves fixed recovery"
+    dataset: "all"
+    version: "v71b_dp_warm_route"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 18
+      warmup_epochs: 1
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 18
+      cosine_Tmult: 1
+      early_stopping_patience: 18
+      eval_epoches: 2
+      save_ckpt_per_epoches: 2
+      pretrain_ckpt: "logs/all_training_data/model_small_5deg_v60_seq_balance_pitch_guard/all_training_data_scratch/checkpoint/ckpt_15.pth"
