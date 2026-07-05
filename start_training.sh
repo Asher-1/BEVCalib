@@ -1112,6 +1112,11 @@ case $DATASET_CHOICE in
         DATASET_NAME="all_training_data"
         echo "ℹ️  使用全量数据集 (all_training_data)"
         ;;
+    all_training_data_c1|c1)
+        DATASET_ROOT="/mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1"
+        DATASET_NAME="all_training_data_c1"
+        echo "ℹ️  使用 camera_1 全量数据集 (all_training_data_c1, fisheye FOV~98°)"
+        ;;
     custom|CUSTOM)
         if [ -z "$CUSTOM_DATASET" ]; then
             echo "❌ 错误: 使用自定义数据集时，请设置 CUSTOM_DATASET 环境变量"
@@ -1129,12 +1134,14 @@ case $DATASET_CHOICE in
         echo ""
         echo "可用选项:"
         echo "  B26A   - B26A 数据集"
-        echo "  all    - 全量数据集"
+        echo "  all    - 全量数据集 (长焦相机)"
+        echo "  c1     - camera_1 全量数据集 (fisheye, FOV~98°)"
         echo "  custom - 自定义数据集 (需设置 CUSTOM_DATASET 环境变量)"
         echo ""
         echo "示例:"
         echo "  bash start_training.sh B26A v1"
         echo "  bash start_training.sh all v1"
+        echo "  bash start_training.sh c1 v1"
         echo "  CUSTOM_DATASET=/path bash start_training.sh custom v1"
         exit 1
         ;;

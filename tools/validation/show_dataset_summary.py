@@ -8,6 +8,8 @@ import argparse
 from pathlib import Path
 import numpy as np
 
+from validation_utils import list_sequence_images
+
 
 def load_calib_tr(calib_file):
     """加载Tr矩阵"""
@@ -56,7 +58,7 @@ def show_dataset_summary(dataset_root):
         poses_file = poses_dir / f'{seq}.txt'
         
         # 统计帧数
-        num_images = len(list(image_dir.glob('*.png'))) if image_dir.exists() else 0
+        num_images = len(list_sequence_images(image_dir))
         num_velodyne = len(list(velodyne_dir.glob('*.bin'))) if velodyne_dir.exists() else 0
         num_poses = 0
         if poses_file.exists():

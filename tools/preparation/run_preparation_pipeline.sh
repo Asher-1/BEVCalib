@@ -44,6 +44,7 @@ START_SEQUENCE=""
 RESIZE_ONLY=false
 SKIP_RESIZE=false
 DRY_RUN=false
+POSE_AWARE_SAMPLING=""
 POSITIONAL_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -75,6 +76,10 @@ while [ $# -gt 0 ]; do
             DRY_RUN=true
             shift
             ;;
+        --pose_aware_sampling|--pose-aware-sampling)
+            POSE_AWARE_SAMPLING="--pose_aware_sampling"
+            shift
+            ;;
         *)
             POSITIONAL_ARGS+=("$1")
             shift
@@ -95,6 +100,15 @@ RESIZE_WIDTH="${POSITIONAL_ARGS[2]:-640}"      # 默认640
 RESIZE_HEIGHT="${POSITIONAL_ARGS[3]:-360}"     # 默认360
 CAMERA_NAME="${POSITIONAL_ARGS[4]:-traffic_2}" # 默认traffic_2
 TARGET_FPS="${POSITIONAL_ARGS[5]:-10.0}"       # 默认10.0
+
+OUTPUT_SIZE_ARGS=""
+if [ -n "${RESIZE_WIDTH}" ] && [ -n "${RESIZE_HEIGHT}" ]; then
+    OUTPUT_SIZE_ARGS="--output_width ${RESIZE_WIDTH} --output_height ${RESIZE_HEIGHT}"
+fi
+# prepare 已集成去畸变+缩放时，跳过独立 resize 步骤
+if [ -n "$OUTPUT_SIZE_ARGS" ] && [ "$RESIZE_ONLY" = false ] && [ "$SKIP_RESIZE" = false ]; then
+    SKIP_RESIZE=true
+fi
 
 # ========== 脚本目录 ==========
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -261,7 +275,11 @@ else
     echo "  输出目录:      ${OUTPUT_DIR}"
     echo "  相机名称:      ${CAMERA_NAME}"
     echo "  目标帧率:      ${TARGET_FPS}"
-    echo "  Resize 尺寸:   ${RESIZE_WIDTH}×${RESIZE_HEIGHT}"
+    if [ -n "$OUTPUT_SIZE_ARGS" ]; then
+        echo -e "  输出分辨率:    ${YELLOW}${RESIZE_WIDTH}×${RESIZE_HEIGHT}${NC} (prepare 阶段直接去畸变+缩放，跳过 resize)"
+    else
+        echo "  Resize 尺寸:   ${RESIZE_WIDTH}×${RESIZE_HEIGHT}"
+    fi
 fi
 if [ -n "$PARALLEL_JOBS" ] && [ "$SINGLE_TRIP_MODE" = false ]; then
     echo -e "  并行处理:      ${YELLOW}${PARALLEL_JOBS}${NC}"
@@ -271,6 +289,9 @@ if [ -n "$FORCE_CONFIG" ]; then
 fi
 if [ "$DRY_RUN" = true ]; then
     echo -e "  ${YELLOW}🔍 DRY-RUN 模式：只打印命令，不实际执行${NC}"
+fi
+if [ -n "$POSE_AWARE_SAMPLING" ]; then
+    echo -e "  Pose-aware采样: ${GREEN}已启用${NC}（过滤静止/蠕行冗余帧）"
 fi
 echo "  开始时间:      $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
@@ -314,7 +335,9 @@ else
                 "--sequence_id ${SEQUENCE_ID}" \
                 "--camera_name ${CAMERA_NAME}" \
                 "--target_fps ${TARGET_FPS}" \
-                ${FORCE_CONFIG_SINGLE}
+                ${FORCE_CONFIG_SINGLE} \
+                ${OUTPUT_SIZE_ARGS} \
+                ${POSE_AWARE_SAMPLING}
             echo ""
         else
             python3 "${SINGLE_PREPARE_SCRIPT}" \
@@ -324,7 +347,9 @@ else
                 --sequence_id "${SEQUENCE_ID}" \
                 --camera_name "${CAMERA_NAME}" \
                 --target_fps "${TARGET_FPS}" \
-                ${FORCE_CONFIG_SINGLE}
+                ${FORCE_CONFIG_SINGLE} \
+                ${OUTPUT_SIZE_ARGS} \
+                ${POSE_AWARE_SAMPLING}
         fi
     else
         START_SEQ_ARG=""
@@ -341,7 +366,9 @@ else
                 "--target_fps ${TARGET_FPS}" \
                 ${FORCE_CONFIG} \
                 ${PARALLEL_JOBS} \
-                ${START_SEQ_ARG}
+                ${START_SEQ_ARG} \
+                ${OUTPUT_SIZE_ARGS} \
+                ${POSE_AWARE_SAMPLING}
             echo ""
         else
             python3 "${BATCH_PREPARE_SCRIPT}" \
@@ -351,7 +378,9 @@ else
                 --target_fps "${TARGET_FPS}" \
                 ${FORCE_CONFIG} \
                 ${PARALLEL_JOBS} \
-                ${START_SEQ_ARG}
+                ${START_SEQ_ARG} \
+                ${OUTPUT_SIZE_ARGS} \
+                ${POSE_AWARE_SAMPLING}
         fi
     fi
 
@@ -454,10 +483,14 @@ fi
 echo -e "${BLUE}输出位置:${NC}"
 echo "  数据集根目录: ${OUTPUT_DIR}"
 if [ "$RESIZE_ONLY" = false ]; then
-    echo "  原始图像: sequences/*/image_2/ (PNG格式)"
+    if [ -n "$OUTPUT_SIZE_ARGS" ]; then
+        echo "  训练图像: sequences/*/image_2/ (JPEG, 已去畸变+缩放)"
+    else
+        echo "  原始图像: sequences/*/image_2/ (PNG格式)"
+    fi
     echo "  点云数据: sequences/*/velodyne/"
 fi
-if [ "$SKIP_RESIZE" = false ]; then
+if [ "$SKIP_RESIZE" = false ] && [ -z "$OUTPUT_SIZE_ARGS" ]; then
     echo "  Resize图像: sequences/*/image_2_${RESIZE_WIDTH}x${RESIZE_HEIGHT}/ (JPEG格式)"
 fi
 echo ""
@@ -467,7 +500,7 @@ VALIDATE_SCRIPT="${SCRIPT_DIR}/../validation/validate_dataset.py"
 echo -e "${BLUE}下一步:${NC}"
 _NEXT_STEP=1
 
-if [ "$SKIP_RESIZE" = true ]; then
+if [ "$SKIP_RESIZE" = true ] && [ -z "$OUTPUT_SIZE_ARGS" ]; then
     echo "  ${_NEXT_STEP}. Resize 图像："
     echo -e "  ${YELLOW}bash $(basename "$0") --resize-only ${OUTPUT_DIR} ${RESIZE_WIDTH} ${RESIZE_HEIGHT}${NC}"
     echo ""

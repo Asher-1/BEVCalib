@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
 
+from validation_utils import resolve_image_path, PROJECTION_SCATTER_SIZE, PROJECTION_SCATTER_ALPHA
+
 
 def load_calib(calib_file):
     """加载标定文件"""
@@ -89,7 +91,10 @@ def visualize_projection(dataset_root, sequence, frame, output_file):
     print(f"\n处理 Sequence {sequence}, Frame {frame}")
     print("="*60)
     
-    img_file = seq_dir / 'image_2' / f'{frame:06d}.png'
+    img_file = resolve_image_path(seq_dir, frame)
+    if img_file is None:
+        print(f"  ❌ 未找到帧 {frame:06d} 的图像 (image_2/*.jpg|*.png)")
+        return False
     pc_file = seq_dir / 'velodyne' / f'{frame:06d}.bin'
     calib_file = seq_dir / 'calib.txt'
     
@@ -130,7 +135,7 @@ def visualize_projection(dataset_root, sequence, frame, output_file):
     
     # 深度着色
     scatter = ax.scatter(points_img[:, 0], points_img[:, 1],
-                        c=depths, cmap='jet', s=1, alpha=0.5)
+                        c=depths, cmap='jet', s=PROJECTION_SCATTER_SIZE, alpha=PROJECTION_SCATTER_ALPHA)
     plt.colorbar(scatter, ax=ax, label='Depth (m)')
     
     ax.set_title(f'Sequence {sequence} - Frame {frame:06d}\n'

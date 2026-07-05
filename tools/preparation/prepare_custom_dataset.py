@@ -34,6 +34,12 @@ import matplotlib.pyplot as plt
 import time
 from datetime import timedelta
 
+from undistort_utils import (
+    build_cpp_undistort_rectify_maps,
+    build_opencv_fisheye_undistort_maps,
+    get_cpp_focal_scale,
+)
+
 
 @dataclass
 class ImageMetadata:
@@ -631,13 +637,14 @@ def _pp_process_frame(args):
     velodyne_dir = Path(pc_dir_str)
 
     try:
+        dst_img = image_dir / f"{idx:06d}.jpg"
         if src_img_ext in ('.jpg', '.jpeg'):
-            dst_img = image_dir / f"{idx:06d}.jpg"
-        elif src_img_ext == '.png':
-            dst_img = image_dir / f"{idx:06d}.png"
+            shutil.copy2(str(src_img), str(dst_img))
         else:
-            dst_img = image_dir / f"{idx:06d}.png"
-        shutil.copy2(str(src_img), str(dst_img))
+            img = cv2.imread(str(src_img), cv2.IMREAD_COLOR)
+            if img is None:
+                raise RuntimeError(f"imread failed: {src_img}")
+            cv2.imwrite(str(dst_img), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
     except Exception:
         return None
 
@@ -2113,6 +2120,8 @@ class PointCloudParser:
 class BEVCalibDatasetPreparer:
     """BEVCalib 数据集准备器（流式处理版本）"""
     
+    IMAGE_JPEG_QUALITY = 95
+    
     # 定位 topics (按照用户要求，只使用/localization/pose)
     LOCALIZATION_TOPICS = [
         '/localization/pose',  # 优先使用这个topic，与C++参考代码一致
@@ -2137,6 +2146,10 @@ class BEVCalibDatasetPreparer:
         max_pose_gap: float = 0.5,  # 最大允许的pose间隔（秒），用于处理不连续bag数据
         force_config: bool = False,  # 强制使用lidars.cfg外参替代bag外参
         sequence_id: str = "00",  # sequence ID，用于隔离临时目录（并行安全）
+        output_width: Optional[int] = None,  # 去畸变后输出宽度（与 output_height 同时指定时生效）
+        output_height: Optional[int] = None,  # 去畸变后输出高度
+        undistort_mode: str = 'opencv',  # opencv | cpp (EquidistantCamera)
+        pose_aware_sampling: bool = False,  # 基于 pose 过滤静止/冗余帧
     ):
         self.bag_path = Path(bag_path)
         self.config_dir = Path(config_dir)
@@ -2153,6 +2166,14 @@ class BEVCalibDatasetPreparer:
         self.max_pose_gap = max_pose_gap  # 最大允许的pose间隔
         self.force_config = force_config
         self.sequence_id = sequence_id
+        if (output_width is None) ^ (output_height is None):
+            raise ValueError("output_width 与 output_height 必须同时指定或同时省略")
+        self._output_size = (int(output_width), int(output_height)) if output_width is not None else None
+        self._undist_img_size: Optional[Tuple[int, int]] = None
+        if undistort_mode not in ('opencv', 'cpp'):
+            raise ValueError(f"undistort_mode 必须是 'opencv' 或 'cpp'，收到: {undistort_mode}")
+        self._undistort_mode = undistort_mode
+        self._pose_aware_sampling = pose_aware_sampling
         
         # 点云坐标系转换状态（由_update_transforms_from_bag设置）
         self._need_sensing_to_lidar = False  # 是否需要Sensing→LiDAR转换
@@ -3120,7 +3141,9 @@ class BEVCalibDatasetPreparer:
                             image = self._undistort_image(image)
                             filename = f"{bag_hash}_{local_img_count:06d}.jpg"
                             filepath = self.temp_image_dir / filename
-                            cv2.imwrite(str(filepath), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+                            cv2.imwrite(
+                                str(filepath), cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                                [cv2.IMWRITE_JPEG_QUALITY, self.IMAGE_JPEG_QUALITY])
                             
                             out_images.append(ImageMetadata(
                                 timestamp=ts_sec,
@@ -3316,12 +3339,14 @@ class BEVCalibDatasetPreparer:
             self._save_pc_batch(pc_buffer)
     
     def _save_image_batch(self, batch: List[Tuple[float, np.ndarray]]):
-        """保存一批图像到临时目录（已去畸变）"""
+        """保存一批图像到临时目录（已去畸变，可选缩放到输出分辨率）"""
         for ts, image in batch:
             image = self._undistort_image(image)
             filename = f"{self.image_counter:06d}.jpg"
             filepath = self.temp_image_dir / filename
-            cv2.imwrite(str(filepath), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(
+                str(filepath), cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                [cv2.IMWRITE_JPEG_QUALITY, self.IMAGE_JPEG_QUALITY])
             
             self.image_metadata.append(ImageMetadata(
                 timestamp=ts,
@@ -3705,11 +3730,16 @@ class BEVCalibDatasetPreparer:
         model_type = self._undist_model_type
         
         if model_type == 'fisheye':
-            D_col = D.reshape(4, 1)
-            new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectifyMap(
-                K_scaled, D_col, (w, h), np.eye(3), balance=0, new_size=(w, h))
-            self._undist_map1, self._undist_map2 = cv2.fisheye.initUndistortRectifyMap(
-                K_scaled, D_col, np.eye(3), new_K, (w, h), cv2.CV_16SC2)
+            if self._undistort_mode == 'cpp':
+                focal_scale = get_cpp_focal_scale(self.camera_name)
+                self._undist_map1, self._undist_map2, new_K = build_cpp_undistort_rectify_maps(
+                    K_scaled[0, 0], K_scaled[1, 1], K_scaled[0, 2], K_scaled[1, 2],
+                    D[0], D[1], D[2], D[3], w, h, focal_scale)
+                print(f"    去畸变模式: C++ EquidistantCamera (focal_scale={focal_scale})")
+            else:
+                self._undist_map1, self._undist_map2, new_K = build_opencv_fisheye_undistort_maps(
+                    K_scaled, D, w, h, balance=0.0)
+                print(f"    去畸变模式: OpenCV fisheye (balance=0)")
         else:
             new_K, _roi = cv2.getOptimalNewCameraMatrix(
                 K_scaled, D, (w, h), alpha=0, newImgSize=(w, h))
@@ -3717,6 +3747,7 @@ class BEVCalibDatasetPreparer:
                 K_scaled, D, None, new_K, (w, h), cv2.CV_16SC2)
         
         self.K = new_K
+        self._undist_img_size = (w, h)
         
         print(f"\n  ✓ 图像去畸变初始化完成 (模型: {model_type}, 分辨率: {w}x{h})")
         print(f"    原始内参: fx={K_scaled[0,0]:.2f}, fy={K_scaled[1,1]:.2f}, "
@@ -3728,6 +3759,32 @@ class BEVCalibDatasetPreparer:
         else:
             print(f"    畸变系数: k1={D[0]:.6f}, k2={D[1]:.6f}, p1={D[2]:.6f}, p2={D[3]:.6f}, k3={D[4]:.6f}")
     
+    def _resize_for_output(self, image: np.ndarray) -> np.ndarray:
+        """去畸变后按需缩放到目标输出分辨率。"""
+        if self._output_size is None:
+            return image
+        ow, oh = self._output_size
+        h, w = image.shape[:2]
+        if (w, h) == (ow, oh):
+            return image
+        return cv2.resize(image, (ow, oh), interpolation=cv2.INTER_LINEAR)
+    
+    def _finalize_intrinsics_for_output(self):
+        """将去畸变内参从实际去畸变分辨率缩放到最终输出分辨率。"""
+        if self._output_size is None or self._undist_img_size is None:
+            return
+        uw, uh = self._undist_img_size
+        ow, oh = self._output_size
+        if (uw, uh) == (ow, oh):
+            return
+        sx, sy = ow / uw, oh / uh
+        self.K[0, 0] *= sx
+        self.K[0, 2] *= sx
+        self.K[1, 1] *= sy
+        self.K[1, 2] *= sy
+        print(f"\n  ✓ 内参已缩放到输出分辨率 {ow}x{oh} (from {uw}x{uh})")
+        print(f"    fx={self.K[0,0]:.2f}, fy={self.K[1,1]:.2f}, cx={self.K[0,2]:.2f}, cy={self.K[1,2]:.2f}")
+    
     def _undistort_image(self, image: np.ndarray) -> np.ndarray:
         """使用预计算的映射表对图像去畸变。
         
@@ -3735,7 +3792,10 @@ class BEVCalibDatasetPreparer:
         （常见于远程bag使用压缩/降采样图像），自动按实际分辨率重建映射表。
         """
         if self._undist_map1 is None:
-            return image
+            h_img, w_img = image.shape[:2]
+            if self._undist_img_size is None:
+                self._undist_img_size = (w_img, h_img)
+            return self._resize_for_output(image)
         
         h_img, w_img = image.shape[:2]
         h_map, w_map = self._undist_map1.shape[:2]
@@ -3746,8 +3806,9 @@ class BEVCalibDatasetPreparer:
             self._build_undistortion_maps(w_img, h_img)
             self._undist_resolution_adapted = True
         
-        return cv2.remap(image, self._undist_map1, self._undist_map2,
-                         cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        undistorted = cv2.remap(image, self._undist_map1, self._undist_map2,
+                                cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        return self._resize_for_output(undistorted)
     
     def _decode_image_msg_from_bytes(self, data: bytes) -> Optional[np.ndarray]:
         """从bytes解码图像"""
@@ -3787,16 +3848,15 @@ class BEVCalibDatasetPreparer:
         
         try:
             import shutil
+            dst_img = image_dir / f"{idx:06d}.jpg"
             if src_ext in ('.jpg', '.jpeg'):
-                dst_img = image_dir / f"{idx:06d}.jpg"
-                shutil.copy2(str(src_img), str(dst_img))
-            elif src_ext == '.png':
-                dst_img = image_dir / f"{idx:06d}.png"
                 shutil.copy2(str(src_img), str(dst_img))
             else:
-                dst_img = image_dir / f"{idx:06d}.png"
-                img = Image.open(src_img)
-                img.save(dst_img)
+                img = cv2.imread(str(src_img), cv2.IMREAD_COLOR)
+                if img is None:
+                    pil_img = Image.open(src_img)
+                    img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                cv2.imwrite(str(dst_img), img, [cv2.IMWRITE_JPEG_QUALITY, BEVCalibDatasetPreparer.IMAGE_JPEG_QUALITY])
         except Exception as e:
             if idx == 0:
                 print(f"⚠️  图像处理失败: {e}")
@@ -4191,6 +4251,12 @@ class BEVCalibDatasetPreparer:
             print(f"  ⚠️  限制处理帧数: {len(synced_pairs)} → {self.max_frames}")
             synced_pairs = synced_pairs[:self.max_frames]
         
+        # ========================================================================
+        # Pose-aware sampling: 过滤静止/冗余帧
+        # ========================================================================
+        if self._pose_aware_sampling:
+            synced_pairs = self._pose_aware_filter(synced_pairs)
+        
         sync_time = time.time() - sync_start_time
         
         print(f"\n✓ 同步完成:")
@@ -4484,6 +4550,10 @@ class BEVCalibDatasetPreparer:
             print(f"  去畸变失败跳过: {skipped_count} 帧 (不保存)")
         if self.pose_metadata:
             print(f"  位姿: {len(self.pose_metadata)} 个")
+        if self._pose_aware_sampling and hasattr(self, '_pose_aware_stats'):
+            s = self._pose_aware_stats
+            print(f"  Pose-aware采样: {s['before']} → {s['after']} 帧 "
+                  f"(过滤 {s['removed']} 帧, {s['ratio']:.1f}% 静止/冗余)")
         
         print(f"\n⏱️  耗时统计:")
         if hasattr(self, '_extract_time'):
@@ -4526,6 +4596,8 @@ class BEVCalibDatasetPreparer:
         - 不使用BAG中的 LiDAR→Sensing（BAG的仅用于点云坐标转换）
         """
         calib_path = seq_dir / 'calib.txt'
+        
+        self._finalize_intrinsics_for_output()
         
         P2 = np.zeros((3, 4))
         P2[:3, :3] = self.K
@@ -4578,7 +4650,143 @@ class BEVCalibDatasetPreparer:
         print(f"  ✓ T_cam2sensing: Camera→Sensing (cameras.cfg相机外参)")
         
         print(f"  ✓ 图像已在prepare阶段去畸变，D=0")
+        if self._output_size is not None:
+            print(f"  ✓ 内参与图像均为输出分辨率 {self._output_size[0]}x{self._output_size[1]}")
     
+    def _pose_aware_filter(self, synced_pairs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """基于 pose 智能过滤冗余帧（停车/蠕行），保留有信息量的帧。
+
+        策略（与 custom_dataset.py 一致）:
+        - 停车帧 (d<0.05m, ΔR<0.1°): 每个连续停车段保留首+尾+1随机帧
+        - 蠕行/慢行 (d<0.3m): 按弧长间隔 0.3m 采样
+        - 正常行驶 (d>=1.0m): 全部保留
+        - 转弯帧 (ΔR>=1°): 全部保留
+        """
+        if not self.pose_metadata or len(synced_pairs) < 2:
+            print("  ⚠️  pose_aware_sampling: 无 pose 数据，跳过")
+            return synced_pairs
+
+        n = len(synced_pairs)
+        poses_4x4 = []
+        for img_idx, _ in synced_pairs:
+            img_ts = self.image_metadata[img_idx].timestamp
+            result = UndistortionUtils.motion_interpolate(self.pose_metadata, img_ts)
+            if result is not None:
+                R, t = result
+                T = np.eye(4)
+                T[:3, :3] = R
+                T[:3, 3] = t
+                poses_4x4.append(T)
+            else:
+                result2 = UndistortionUtils.motion_extrapolate(self.pose_metadata, img_ts)
+                if result2 is not None:
+                    R, t = result2
+                    T = np.eye(4)
+                    T[:3, :3] = R
+                    T[:3, 3] = t
+                    poses_4x4.append(T)
+                else:
+                    poses_4x4.append(None)
+
+        valid_mask = [p is not None for p in poses_4x4]
+        if sum(valid_mask) < 2:
+            print("  ⚠️  pose_aware_sampling: 插值成功帧太少，跳过")
+            return synced_pairs
+
+        positions = np.array([p[:3, 3] if p is not None else [0, 0, 0] for p in poses_4x4])
+        dists = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+
+        rot_changes = np.zeros(n - 1)
+        for i in range(n - 1):
+            if poses_4x4[i] is not None and poses_4x4[i + 1] is not None:
+                R_rel = poses_4x4[i][:3, :3].T @ poses_4x4[i + 1][:3, :3]
+                cos_a = np.clip((np.trace(R_rel) - 1) / 2, -1, 1)
+                rot_changes[i] = np.degrees(np.arccos(cos_a))
+
+        keep = set()
+        stopped_run_start = None
+        stopped_run_indices = []
+
+        for i in range(n - 1):
+            if not valid_mask[i]:
+                keep.add(i)
+                continue
+
+            d, r = dists[i], rot_changes[i]
+
+            if r >= 1.0:
+                keep.add(i)
+                keep.add(i + 1)
+                if stopped_run_start is not None:
+                    self._finalize_stopped_run(stopped_run_indices, keep)
+                    stopped_run_start = None
+                    stopped_run_indices = []
+                continue
+
+            if d >= 1.0:
+                keep.add(i)
+                keep.add(i + 1)
+                if stopped_run_start is not None:
+                    self._finalize_stopped_run(stopped_run_indices, keep)
+                    stopped_run_start = None
+                    stopped_run_indices = []
+                continue
+
+            if d < 0.05 and r < 0.1:
+                if stopped_run_start is None:
+                    stopped_run_start = i
+                    stopped_run_indices = [i]
+                else:
+                    stopped_run_indices.append(i)
+            else:
+                if stopped_run_start is not None:
+                    keep.add(i)
+                    self._finalize_stopped_run(stopped_run_indices, keep)
+                    stopped_run_start = None
+                    stopped_run_indices = []
+
+        if stopped_run_start is not None:
+            self._finalize_stopped_run(stopped_run_indices, keep)
+
+        cumulative_dist = np.cumsum(dists)
+        last_sampled_dist = 0.0
+        for i in range(n - 1):
+            if i in keep:
+                last_sampled_dist = cumulative_dist[i]
+                continue
+            d = dists[i]
+            step = 0.3 if d < 0.3 else 0.8
+            if cumulative_dist[i] - last_sampled_dist >= step:
+                keep.add(i)
+                last_sampled_dist = cumulative_dist[i]
+
+        keep.add(n - 1)
+        keep_sorted = sorted(keep)
+        filtered_pairs = [synced_pairs[i] for i in keep_sorted]
+
+        removed = n - len(filtered_pairs)
+        print(f"  ✓ pose_aware_sampling: {n} → {len(filtered_pairs)} 帧 "
+              f"(过滤 {removed} 帧, {100*removed/n:.1f}% 静止/冗余)")
+        self._pose_aware_stats = {
+            'before': n,
+            'after': len(filtered_pairs),
+            'removed': removed,
+            'ratio': 100 * removed / n if n > 0 else 0,
+        }
+        return filtered_pairs
+
+    @staticmethod
+    def _finalize_stopped_run(indices, keep):
+        """连续停车段仅保留首帧+尾帧+1随机帧。"""
+        if not indices:
+            return
+        keep.add(indices[0])
+        keep.add(indices[-1])
+        if len(indices) > 2:
+            import random
+            mid = random.choice(indices[1:-1])
+            keep.add(mid)
+
     def _save_poses_file(self, synced_pairs: List[Tuple[int, int]], sequence_id: str):
         """保存位姿文件（KITTI-Odometry 格式）
         
@@ -4767,6 +4975,17 @@ def main():
                             '默认行为：优先使用bag中提取的合格外参生成calib.txt，'
                             '不合格则fallback到lidars.cfg。'
                             '加此选项后，所有环节强制使用lidars.cfg中的参数。')
+    parser.add_argument('--output_width', type=int, default=None,
+                       help='去畸变后输出图像宽度（需与 --output_height 同时指定）')
+    parser.add_argument('--output_height', type=int, default=None,
+                       help='去畸变后输出图像高度（需与 --output_width 同时指定）')
+    parser.add_argument('--undistort_mode', type=str, default='opencv',
+                       choices=['opencv', 'cpp'],
+                       help='鱼眼去畸变方式: opencv=OpenCV balance=0; '
+                            'cpp=C++ EquidistantCamera focal_scale (camera_*=-0.7, tra*=-1.0)')
+    parser.add_argument('--pose_aware_sampling', action='store_true', default=False,
+                       help='启用基于 pose 的智能采样: 过滤车辆静止帧、蠕行冗余帧，'
+                            '保留转弯/正常行驶帧。可减少 30-60%% 无效帧。')
     args = parser.parse_args()
     
     trip_name = Path(args.bag_dir).parent.parent.name if '/bags/' in args.bag_dir else Path(args.bag_dir).name
@@ -4787,6 +5006,11 @@ def main():
     print(f"  最大pose间隔: {args.max_pose_gap}s（用于处理不连续bag数据）")
     if args.force_config:
         print(f"  ⚠️  强制使用lidars.cfg外参（忽略bag中的lidar外参）")
+    if args.output_width is not None and args.output_height is not None:
+        print(f"  输出分辨率: {args.output_width}x{args.output_height} (去畸变后直接保存，不保留4K原图)")
+    print(f"  去畸变模式: {args.undistort_mode}")
+    if args.pose_aware_sampling:
+        print(f"  Pose-aware采样: 已启用（过滤静止/蠕行冗余帧）")
     
     total_start_time = time.time()
     
@@ -4806,6 +5030,10 @@ def main():
         max_pose_gap=args.max_pose_gap,
         force_config=args.force_config,
         sequence_id=args.sequence_id,
+        output_width=args.output_width,
+        output_height=args.output_height,
+        undistort_mode=args.undistort_mode,
+        pose_aware_sampling=args.pose_aware_sampling,
     )
     
     preparer.extract_data_from_bag()

@@ -12,6 +12,8 @@ import cv2
 import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
+
+from validation_utils import list_sequence_images, resolve_image_path, PROJECTION_SCATTER_SIZE, PROJECTION_SCATTER_ALPHA
 import json
 from datetime import datetime
 
@@ -87,11 +89,11 @@ def visualize_projection(dataset_root, sequence, frame, output_file):
     seq_dir = dataset_root / 'sequences' / sequence
     
     # 加载数据
-    img_file = seq_dir / 'image_2' / f'{frame:06d}.png'
+    img_file = resolve_image_path(seq_dir, frame)
     pc_file = seq_dir / 'velodyne' / f'{frame:06d}.bin'
     calib_file = seq_dir / 'calib.txt'
     
-    if not img_file.exists() or not pc_file.exists() or not calib_file.exists():
+    if img_file is None or not pc_file.exists() or not calib_file.exists():
         print(f"  ⚠️ 文件不存在，跳过帧 {frame}")
         return None
     
@@ -114,7 +116,7 @@ def visualize_projection(dataset_root, sequence, frame, output_file):
     
     # 深度着色
     scatter = ax.scatter(points_img[:, 0], points_img[:, 1],
-                        c=depths, cmap='jet', s=1, alpha=0.5)
+                        c=depths, cmap='jet', s=PROJECTION_SCATTER_SIZE, alpha=PROJECTION_SCATTER_ALPHA)
     plt.colorbar(scatter, ax=ax, label='Depth (m)')
     
     ax.set_title(f'Sequence {sequence} - Frame {frame:06d}\n'
@@ -193,7 +195,7 @@ def validate_sequence(dataset_root, sequence, output_base_dir):
         print(f"  ❌ 序列 {sequence}: 图像目录不存在")
         return None
     
-    images = sorted(image_dir.glob('*.png'))
+    images = list_sequence_images(image_dir)
     num_frames = len(images)
     
     if num_frames == 0:

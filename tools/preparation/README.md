@@ -87,6 +87,24 @@ cd tools/preparation
     640 360 traffic_2 10.0 --start-sequence 11 -j 11
 ```
 
+cd /mnt/drtraining/user/dahailu/code/BEVCalib/tools/preparation
+
+./run_preparation_pipeline.sh \
+  /mnt/drtraining/user/dahailu/data/bevcalib/trips \
+  /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1 \
+  1920 1080 camera_1 10.0 --pose_aware_sampling -j 8
+
+  python tools/validation/validate_dataset.py full /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1 --output-dir /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1/validation_results
+
+
+./run_preparation_pipeline.sh \
+  /mnt/drtraining/user/dahailu/data/bevcalib/test_trips \
+  /mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1 \
+  1920 1080 camera_1 10.0 --pose_aware_sampling -j 8
+
+python tools/validation/validate_dataset.py full /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1 --output-dir /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1/validation_results
+
+
 | 参数 | 说明 | 默认值 |
 |----------|------|--------|
 | `$1` input_dir | trips 根目录（含多个 trip 子目录）**或**单个 trip 目录（含 `bags/` 和 `configs/`） | 必填 |
@@ -123,6 +141,7 @@ python batch_prepare_trips.py \
 | `--target_fps` | 目标帧率 | 10.0 |
 | `--start_sequence` | 起始 sequence ID | 0 |
 | `--force-config` | 强制使用 lidars.cfg 中的外参替代 bag 外参 | 不启用 |
+| `--pose_aware_sampling` | 基于 pose 智能采样: 过滤静止/蠕行冗余帧 | 不启用 |
 
 #### 步骤 1b：单 trip 数据准备
 
@@ -144,8 +163,44 @@ python prepare_custom_dataset.py \
 | `--sequence_id` | 生成的 sequence 编号 | 0 |
 | `--camera_name` | 相机名称 | traffic_2 |
 | `--target_fps` | 目标帧率 | 10.0 |
+| `--pose_aware_sampling` | 基于 pose 智能采样: 过滤静止/蠕行冗余帧 | 不启用 |
+| `--undistort_mode` | 鱼眼去畸变方式: `opencv` 或 `cpp` | opencv |
+| `--output_width` / `--output_height` | 去畸变后输出分辨率（需同时指定） | 不缩放 |
 
 执行完成后脚本会自动提示步骤 2 的命令。
+
+#### Pose-Aware Sampling（智能帧采样）
+
+启用 `--pose_aware_sampling` 后，数据准备阶段会根据车辆的位姿变化自动过滤冗余帧：
+
+| 场景 | 策略 |
+|------|------|
+| **停车** (d<0.05m, ΔR<0.1°) | 每个连续停车段仅保留首帧+尾帧+1随机帧 |
+| **蠕行/慢行** (d<0.3m) | 按弧长间隔 0.3m 均匀采样 |
+| **正常行驶** (d≥1.0m) | 全部保留 |
+| **转弯** (ΔR≥1°) | 全部保留 |
+
+典型效果：过滤 30–60% 的停车/等红灯/低速蠕行帧，保留信息量高的帧。
+
+```bash
+# 单 trip + pose-aware 采样
+python prepare_custom_dataset.py \
+    --bag_dir /path/to/trip/bags/unimportant \
+    --config_dir /path/to/trip/configs \
+    --output_dir /path/to/output \
+    --camera_name camera_1 \
+    --output_width 1920 --output_height 1080 \
+    --pose_aware_sampling
+
+# 批量 + pose-aware
+python batch_prepare_trips.py \
+    --trips_dir /path/to/trips \
+    --output_dir /path/to/output \
+    --camera_name camera_1 \
+    --pose_aware_sampling -j 4
+```
+
+> **注意**: 该功能依赖 bag 中的 pose 数据（`/localization/pose` topic）。如果 bag 中无 pose 数据，此选项自动跳过，不影响正常流程。
 
 #### 步骤 2：图像 Resize
 

@@ -28,6 +28,8 @@ TOOLS_DIR = Path(__file__).parent.parent  # tools/ 根目录
 VALIDATION_DIR = Path(__file__).parent     # tools/validation/
 sys.path.insert(0, str(VALIDATION_DIR))
 
+from validation_utils import list_sequence_images
+
 
 def run_summary(args):
     """运行快速摘要"""
@@ -140,7 +142,7 @@ def _collect_dataset_statistics(dataset_root):
         times_file = seq_dir / 'times.txt'
         poses_file = poses_dir / f'{seq}.txt'
         
-        num_images = len(list(image_dir.glob('*.png'))) if image_dir.exists() else 0
+        num_images = len(list_sequence_images(image_dir))
         num_velodyne = len(list(velodyne_dir.glob('*.bin'))) if velodyne_dir.exists() else 0
         num_poses = 0
         if poses_file.exists():
@@ -148,7 +150,7 @@ def _collect_dataset_statistics(dataset_root):
                 num_poses = sum(1 for _ in f)
         
         vel_bytes = sum(f.stat().st_size for f in velodyne_dir.glob('*.bin')) if velodyne_dir.exists() else 0
-        img_bytes = sum(f.stat().st_size for f in image_dir.glob('*.png')) if image_dir.exists() else 0
+        img_bytes = sum(f.stat().st_size for f in list_sequence_images(image_dir))
         
         duration = 0.0
         fps = 0.0
@@ -210,7 +212,7 @@ def _collect_dataset_statistics(dataset_root):
         
         img_resolution = None
         if image_dir.exists():
-            sample_imgs = sorted(image_dir.glob('*.png'))[:1]
+            sample_imgs = list_sequence_images(image_dir)[:1]
             if sample_imgs:
                 import cv2
                 img = cv2.imread(str(sample_imgs[0]))

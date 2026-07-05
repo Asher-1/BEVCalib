@@ -137,8 +137,10 @@ class CustomDataset(Dataset):
                     if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'velodyne',
                                                        base_name + '.bin')):
                         continue
-                    if not os.path.exists(os.path.join(self.dataset_root, 'sequences', seq, 'image_2',
-                                                       base_name + suf)):
+                    img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', base_name + suf)
+                    if not os.path.exists(img_path) and suf == '.png':
+                        img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', base_name + '.jpg')
+                    if not os.path.exists(img_path):
                         continue
                     seq_files.append(os.path.join(seq, base_name))
                 
@@ -381,7 +383,9 @@ class CustomDataset(Dataset):
             if not os.path.exists(img_path):
                 img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
         else:
-            img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
+            img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.jpg')
+            if not os.path.exists(img_path):
+                img_path = os.path.join(self.dataset_root, 'sequences', seq, 'image_2', id+'.png')
         
         if not os.path.exists(img_path) or not os.path.exists(pcd_path):
             import sys; print(f'[CustomDataset] File not exist: img={img_path}, pcd={pcd_path}', file=sys.stderr)

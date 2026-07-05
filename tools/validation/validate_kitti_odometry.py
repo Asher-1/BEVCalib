@@ -7,6 +7,8 @@ import numpy as np
 from pathlib import Path
 import argparse
 
+from validation_utils import list_sequence_images
+
 
 class KITTIOdometryValidator:
     """KITTI-Odometry 格式验证器"""
@@ -166,7 +168,7 @@ class KITTIOdometryValidator:
         if not image_dir.exists():
             return
         
-        images = sorted(image_dir.glob('*.png'))
+        images = list_sequence_images(image_dir)
         
         if not images:
             self.errors.append(f"❌ image_2/ 目录为空")
@@ -174,8 +176,9 @@ class KITTIOdometryValidator:
         
         self.passed.append(f"✓ 图像数量: {len(images)} 张")
         
-        # 验证命名格式 (000000.png, 000001.png, ...)
-        expected_names = [f"{i:06d}.png" for i in range(len(images))]
+        # 验证命名格式 (000000.jpg/png, 000001.jpg/png, ...)
+        ext = images[0].suffix
+        expected_names = [f"{i:06d}{ext}" for i in range(len(images))]
         actual_names = [img.name for img in images]
         
         if actual_names == expected_names:
@@ -250,7 +253,7 @@ class KITTIOdometryValidator:
         counts = {}
         
         if image_dir.exists():
-            counts['images'] = len(list(image_dir.glob('*.png')))
+            counts['images'] = len(list_sequence_images(image_dir))
         
         if velodyne_dir.exists():
             counts['velodyne'] = len(list(velodyne_dir.glob('*.bin')))

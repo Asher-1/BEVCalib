@@ -82,8 +82,8 @@ KITTI_INTRINSIC_STATS = {
     "std":  [1.0, 1.0, 1.0, 1.0],
 }
 CUSTOM_INTRINSIC_STATS = {
-    "mean": [7184.76, 7287.10, 1922.60, 1084.05],
-    "std":  [38.19, 38.35, 17.53, 13.38],
+    "mean": [837.95, 837.68, 960.87, 539.97],
+    "std":  [1.97, 1.93, 5.07, 2.21],
 }
 
 if DATASET_TYPE.lower() == "kitti":

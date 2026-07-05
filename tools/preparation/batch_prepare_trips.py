@@ -36,7 +36,9 @@ def find_bag_directory(trip_dir):
 
 
 def _build_prepare_cmd(trip_dir, sequence_id, output_base_dir, camera_name, target_fps,
-                       force_config, num_workers, batch_size):
+                       force_config, num_workers, batch_size,
+                       output_width=None, output_height=None, undistort_mode='opencv',
+                       pose_aware_sampling=False):
     """构建 prepare_custom_dataset.py 命令"""
     trip_dir = Path(trip_dir)
     bag_dir = find_bag_directory(trip_dir)
@@ -61,12 +63,20 @@ def _build_prepare_cmd(trip_dir, sequence_id, output_base_dir, camera_name, targ
     ]
     if force_config:
         cmd.append('--force-config')
+    if output_width is not None and output_height is not None:
+        cmd.extend(['--output_width', str(output_width), '--output_height', str(output_height)])
+    if undistort_mode and undistort_mode != 'opencv':
+        cmd.extend(['--undistort_mode', undistort_mode])
+    if pose_aware_sampling:
+        cmd.append('--pose_aware_sampling')
     return cmd, bag_dir, config_dir
 
 
 def process_trip_serial(trip_dir, sequence_id, output_base_dir, log_file,
                         camera_name='traffic_2', target_fps=10.0, force_config=False,
-                        num_workers=32, batch_size=800):
+                        num_workers=32, batch_size=800,
+                        output_width=None, output_height=None, undistort_mode='opencv',
+                        pose_aware_sampling=False):
     """串行模式：处理单个 trip，实时输出日志（带 trip 前缀标识）"""
     trip_dir = Path(trip_dir)
     trip_name = trip_dir.name
@@ -87,7 +97,8 @@ def process_trip_serial(trip_dir, sequence_id, output_base_dir, log_file,
     try:
         cmd, bag_dir, config_dir = _build_prepare_cmd(
             trip_dir, sequence_id, output_base_dir, camera_name, target_fps,
-            force_config, num_workers, batch_size)
+            force_config, num_workers, batch_size, output_width, output_height,
+            undistort_mode, pose_aware_sampling)
 
         _log(f"Bag 目录: {bag_dir}")
         _log(f"配置目录: {config_dir}")
@@ -165,7 +176,8 @@ def _process_trip_worker(args):
     完整日志写入 per_trip_log_path。
     """
     trip_dir, sequence_id, output_base_dir, per_trip_log_path, \
-        camera_name, target_fps, force_config, num_workers, batch_size = args
+        camera_name, target_fps, force_config, num_workers, batch_size, \
+        output_width, output_height, undistort_mode, pose_aware_sampling = args
 
     trip_dir = Path(trip_dir)
     trip_name = trip_dir.name
@@ -175,7 +187,8 @@ def _process_trip_worker(args):
     try:
         cmd, bag_dir, config_dir = _build_prepare_cmd(
             trip_dir, sequence_id, output_base_dir, camera_name, target_fps,
-            force_config, num_workers, batch_size)
+            force_config, num_workers, batch_size, output_width, output_height,
+            undistort_mode, pose_aware_sampling)
 
         with open(per_trip_log_path, 'w') as lf:
             lf.write(f"Trip: {trip_name}\n")
@@ -244,6 +257,15 @@ def main():
                        help='每个trip内部的工作线程数（默认: 串行32, 并行自动计算）')
     parser.add_argument('--batch_size', type=int, default=800,
                        help='点云处理批次大小（默认: 800）')
+    parser.add_argument('--output_width', type=int, default=None,
+                       help='去畸变后输出图像宽度（需与 --output_height 同时指定）')
+    parser.add_argument('--output_height', type=int, default=None,
+                       help='去畸变后输出图像高度（需与 --output_width 同时指定）')
+    parser.add_argument('--undistort_mode', type=str, default='opencv',
+                       choices=['opencv', 'cpp'],
+                       help='鱼眼去畸变: opencv 或 cpp (EquidistantCamera)')
+    parser.add_argument('--pose_aware_sampling', action='store_true', default=False,
+                       help='启用基于 pose 的智能采样: 过滤静止/冗余帧')
 
     args = parser.parse_args()
 
@@ -286,6 +308,11 @@ def main():
     print(f"每trip线程数: {workers_per_trip}")
     if args.force_config:
         print(f"⚠️  强制使用lidars.cfg外参（忽略bag中的lidar外参）")
+    if args.output_width is not None and args.output_height is not None:
+        print(f"输出分辨率: {args.output_width}x{args.output_height} (prepare 阶段直接去畸变+缩放)")
+    print(f"去畸变模式: {args.undistort_mode}")
+    if args.pose_aware_sampling:
+        print(f"Pose-aware采样: 已启用（过滤静止/蠕行冗余帧）")
 
     print(f"\n找到 {n_trips} 个 trip 目录:")
     trip_plan = []
@@ -330,7 +357,9 @@ def main():
                 worker_args.append((
                     str(td), seq_id, str(output_dir), str(per_log),
                     args.camera_name, args.target_fps, args.force_config,
-                    workers_per_trip, args.batch_size
+                    workers_per_trip, args.batch_size,
+                    args.output_width, args.output_height, args.undistort_mode,
+                    args.pose_aware_sampling,
                 ))
 
             with ProcessPoolExecutor(max_workers=parallel) as executor:
@@ -377,6 +406,10 @@ def main():
                     force_config=args.force_config,
                     num_workers=workers_per_trip,
                     batch_size=args.batch_size,
+                    output_width=args.output_width,
+                    output_height=args.output_height,
+                    undistort_mode=args.undistort_mode,
+                    pose_aware_sampling=args.pose_aware_sampling,
                 )
                 elapsed = ""  # serial mode doesn't track per-trip time separately
                 results.append((success, trip_name, sid, error, elapsed))
@@ -416,7 +449,7 @@ def main():
             status = "FAILED" if td.name in failed_names else "OK"
             seq_img_dir = output_dir / 'sequences' / seq_id / 'image_2'
             if seq_img_dir.exists():
-                sample_count = len(list(seq_img_dir.glob('*.png')))
+                sample_count = len(list(seq_img_dir.glob('*.jpg'))) or len(list(seq_img_dir.glob('*.png')))
             else:
                 sample_count = 0
             total_samples += sample_count
