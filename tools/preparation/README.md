@@ -94,7 +94,7 @@ cd /mnt/drtraining/user/dahailu/code/BEVCalib/tools/preparation
   /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1 \
   1920 1080 camera_1 10.0 --pose_aware_sampling -j 8
 
-  python tools/validation/validate_dataset.py full /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1 --output-dir /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1/validation_results
+python tools/validation/validate_dataset.py full /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1 --output-dir /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1/validation_results
 
 
 ./run_preparation_pipeline.sh \
@@ -102,7 +102,7 @@ cd /mnt/drtraining/user/dahailu/code/BEVCalib/tools/preparation
   /mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1 \
   1920 1080 camera_1 10.0 --pose_aware_sampling -j 8
 
-python tools/validation/validate_dataset.py full /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1 --output-dir /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1/validation_results
+python tools/validation/validate_dataset.py full /mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1 --output-dir /mnt/drtraining/user/dahailu/data/bevcalib/all_training_data_c1/test_data_c1
 
 
 | 参数 | 说明 | 默认值 |

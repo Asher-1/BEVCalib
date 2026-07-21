@@ -68,10 +68,14 @@
 set -e  # Exit on error
 
 # Quote CLI values that start with '-' (e.g. augment_lidar_vertical_fov=-25,15)
+# Comma lists are safe in --flag=value form; only quote < > and other shell metacharacters.
 _quote_cli_val() {
     case "$1" in
-        -*|*[[:space:],]*)
+        *\'*)
             printf '%q' "$1"
+            ;;
+        -*|*'<'*|*'>'*|*'&'*|*'|'*|*';'*|*[[:space:]]*)
+            printf "'%s'" "$1"
             ;;
         *)
             printf '%s' "$1"
@@ -483,6 +487,24 @@ while [[ $# -gt 0 ]]; do
             DUAL_GATE_JACOBIAN_MIN="$2"; shift 2 ;;
         --dual_gate_medw_max)
             DUAL_GATE_MEDW_MAX="$2"; shift 2 ;;
+        --dual_gate_recovery_min)
+            DUAL_GATE_RECOVERY_MIN="$2"; shift 2 ;;
+        --dual_gate_zd_max)
+            DUAL_GATE_ZD_MAX="$2"; shift 2 ;;
+        --enable_recovery_gate_ckpt)
+            ENABLE_RECOVERY_GATE_CKPT="$2"; shift 2 ;;
+        --enable_zd_gate_ckpt)
+            ENABLE_ZD_GATE_CKPT="$2"; shift 2 ;;
+        --dual_gate_inject_recovery_min)
+            DUAL_GATE_INJECT_RECOVERY_MIN="$2"; shift 2 ;;
+        --dual_gate_pred_indep_max)
+            DUAL_GATE_PRED_INDEP_MAX="$2"; shift 2 ;;
+        --enable_inject_recovery_eval)
+            ENABLE_INJECT_RECOVERY_EVAL="$2"; shift 2 ;;
+        --inject_recovery_eval_deg)
+            INJECT_RECOVERY_EVAL_DEG="$2"; shift 2 ;;
+        --inject_recovery_eval_batches)
+            INJECT_RECOVERY_EVAL_BATCHES="$2"; shift 2 ;;
         --vis_samples)
             VIS_SAMPLES="$2"; shift 2 ;;
         --vis_points)
@@ -557,6 +579,14 @@ while [[ $# -gt 0 ]]; do
             TINIT_SENSITIVITY_WEIGHT="$2"; shift 2 ;;
         --iterative_refine)
             ITERATIVE_REFINE="$2"; shift 2 ;;
+        --iterative_refine_weight)
+            ITERATIVE_REFINE_WEIGHT="$2"; shift 2 ;;
+        --iterative_refine_start_epoch)
+            ITERATIVE_REFINE_START_EPOCH="$2"; shift 2 ;;
+        --iterative_refine_use_synthetic_init)
+            ITERATIVE_REFINE_USE_SYNTHETIC_INIT="$2"; shift 2 ;;
+        --iterative_refine_synthetic_residual_deg)
+            ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG="$2"; shift 2 ;;
         --native_cross)
             NATIVE_CROSS="$2"; shift 2 ;;
         --native_cross_pc_groups)
@@ -659,10 +689,15 @@ while [[ $# -gt 0 ]]; do
         *)
             if [[ "$1" == --* ]]; then
                 if [[ $# -ge 2 && "$2" != --* ]]; then
-                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1 $2"
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1 $(_quote_cli_val "$2")"
                     shift 2
                 elif [[ "$1" == *=* ]]; then
-                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    _pt_val="${1#*=}"
+                    if [[ "$_pt_val" == *'<'* || "$_pt_val" == *'>'* ]]; then
+                        PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS ${1%%=*}=$(_quote_cli_val "$_pt_val")"
+                    else
+                        PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    fi
                     shift
                 else
                     PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
@@ -1324,6 +1359,15 @@ OPTIM_FLAGS=""
 [ -n "$ENABLE_DUAL_GATE_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_dual_gate_ckpt $ENABLE_DUAL_GATE_CKPT"
 [ -n "$DUAL_GATE_JACOBIAN_MIN" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_jacobian_min $DUAL_GATE_JACOBIAN_MIN"
 [ -n "$DUAL_GATE_MEDW_MAX" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_medw_max $DUAL_GATE_MEDW_MAX"
+[ -n "$DUAL_GATE_RECOVERY_MIN" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_recovery_min $DUAL_GATE_RECOVERY_MIN"
+[ -n "$DUAL_GATE_ZD_MAX" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_zd_max $DUAL_GATE_ZD_MAX"
+[ -n "$ENABLE_RECOVERY_GATE_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_recovery_gate_ckpt $ENABLE_RECOVERY_GATE_CKPT"
+[ -n "$ENABLE_ZD_GATE_CKPT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_zd_gate_ckpt $ENABLE_ZD_GATE_CKPT"
+[ -n "$DUAL_GATE_INJECT_RECOVERY_MIN" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_inject_recovery_min $DUAL_GATE_INJECT_RECOVERY_MIN"
+[ -n "$DUAL_GATE_PRED_INDEP_MAX" ] && OPTIM_FLAGS="$OPTIM_FLAGS --dual_gate_pred_indep_max $DUAL_GATE_PRED_INDEP_MAX"
+[ -n "$ENABLE_INJECT_RECOVERY_EVAL" ] && OPTIM_FLAGS="$OPTIM_FLAGS --enable_inject_recovery_eval $ENABLE_INJECT_RECOVERY_EVAL"
+[ -n "$INJECT_RECOVERY_EVAL_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --inject_recovery_eval_deg $INJECT_RECOVERY_EVAL_DEG"
+[ -n "$INJECT_RECOVERY_EVAL_BATCHES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --inject_recovery_eval_batches $INJECT_RECOVERY_EVAL_BATCHES"
 [ -n "$VIS_SAMPLES" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_samples $VIS_SAMPLES"
 [ -n "$VIS_POINTS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_points $VIS_POINTS"
 [ -n "$VIS_POINT_RADIUS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --vis_point_radius $VIS_POINT_RADIUS"
@@ -1362,6 +1406,10 @@ OPTIM_FLAGS=""
 [ -n "$TINIT_QUERY_FILM" ] && OPTIM_FLAGS="$OPTIM_FLAGS --tinit_query_film $TINIT_QUERY_FILM"
 [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
 [ -n "$ITERATIVE_REFINE" ] && OPTIM_FLAGS="$OPTIM_FLAGS --iterative_refine $ITERATIVE_REFINE"
+[ -n "$ITERATIVE_REFINE_WEIGHT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --iterative_refine_weight $ITERATIVE_REFINE_WEIGHT"
+[ -n "$ITERATIVE_REFINE_START_EPOCH" ] && OPTIM_FLAGS="$OPTIM_FLAGS --iterative_refine_start_epoch $ITERATIVE_REFINE_START_EPOCH"
+[ -n "$ITERATIVE_REFINE_USE_SYNTHETIC_INIT" ] && OPTIM_FLAGS="$OPTIM_FLAGS --iterative_refine_use_synthetic_init $ITERATIVE_REFINE_USE_SYNTHETIC_INIT"
+[ -n "$ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG" ] && OPTIM_FLAGS="$OPTIM_FLAGS --iterative_refine_synthetic_residual_deg $ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG"
 [ -n "$NATIVE_CROSS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross $NATIVE_CROSS"
 [ -n "$NATIVE_CROSS_PC_GROUPS" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_pc_groups $NATIVE_CROSS_PC_GROUPS"
 [ -n "$NATIVE_CROSS_N_HARMONIC" ] && OPTIM_FLAGS="$OPTIM_FLAGS --native_cross_n_harmonic $NATIVE_CROSS_N_HARMONIC"

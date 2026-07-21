@@ -1,0 +1,228 @@
+# V69: Correspondence-First Dual-Path Recovery
+#
+# 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080)
+# 目标: Genuine Recovery >80% (single) / >60% (iter=2), BEST MEDW400 <0.30°, ZD <0.35°
+#
+# ========================================================================
+# 设计思路 (结合 V62/V67 教训 + IJCV2026 BEV Alignment 论文)
+# ========================================================================
+#
+# 论文核心: Implicit Alignment (点-像素对应 + coarse calib) → BEV Alignment 精修
+# CF-BEV-R 对应: use_sim_loss + use_coarse_refine (V60 CoarseRotationHead)
+#
+# V67 失败根因:
+#   - 迭代监督从 model pred (近GT) 出发 → 学微调不学大 inject 校正
+#   - mount_jitter + 强 aug → 学域偏置 (ZD) 而非 perturbation-responsive
+#   - overcorrection_penalty=0 → 允许过度矫正 ZD 路径
+#
+# V69 策略: 分两阶段, 解耦 Recovery 与 ZD
+#
+# Phase A (Recovery Core, 80ep):
+#   - 论文 coarse→fine: use_coarse_refine=1
+#   - V62 级 sim_loss + overcorrection_penalty
+#   - 禁用 mount_jitter / 迭代监督 (纯大角度矫正)
+#   - warm-start from V62
+#
+# Phase B (Domain Polish, 120ep):
+#   - 部署对齐迭代监督: synthetic residual init (非 model pred)
+#   - 轻度 mount_jitter + zero_perturb 教 ZD
+#   - warm-start from Phase A ckpt_best_dual
+#
+# V68 决策门控: 若 V68 Recovery<40% 且 PredIndep>0.7 → 直接启动 Phase A
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v69_correspondence_dual_path_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === 网络结构 (CF-BEV-R, same as V62) ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # === 论文对齐: 点-像素对应 + coarse→fine ===
+    use_sim_loss: 1
+    sim_loss_weight: 3.0
+    sim_loss_warmup: 5
+    sim_loss_soft_radius: 0.0
+    sim_n_layers: 3
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.5
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 1
+    coarse_refine_detach_epoch: 40
+
+    # === 分辨率 ===
+    target_width: 960
+    target_height: 540
+
+    # === Backbone ===
+    backbone_type: swin
+    backbone_lr_scale: 0.05
+    head_dropout: 0.1
+
+    # === DDP 8卡 ===
+    batch_size: 8
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,2.5"
+    use_geodesic_loss: 1
+    corr_alignment_weight: 0.5
+    corr_alignment_warmup: 10
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+
+    # === 扰动 ===
+    multi_scale_perturb: "1.0:0.20,2.0:0.30,3.0:0.30,5.0:0.20"
+    symmetric_perturb: 1
+    per_axis_prob: 0.5
+    per_axis_weights: "1.0,1.5,1.5"
+    perturb_distribution: uniform
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 5.0
+
+    # === 数据 ===
+    xyz_only: 1
+    max_pcd_points: 16384
+    max_frames_per_seq: 500
+    foreground: true
+    pitch_vertical_bands: 3
+
+    # === 评估 & checkpoint ===
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 3
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.90
+    dual_gate_medw_max: 0.08
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    resume_ckpt: auto
+
+experiments:
+  # ===== Phase A: Recovery Core (论文 coarse→fine + V62 矫正力) =====
+  - name: "c1_v69_corr_dual_A1"
+    description: "V69-A: coarse_refine + sim_loss3.0 + OC=0.4, 无mount_jitter/无iter, V62 warm-start, 80ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v69_corr_dual_A1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 80
+      warmup_epochs: 3
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 40
+      eval_epoches: 10
+
+      # Phase A: 纯 Recovery, 不做域偏置
+      iterative_refine: 0
+      overcorrection_penalty: 0.4
+      zero_perturbation_prob: 0.02
+      zero_drift_loss_weight: 0.0
+      augment_mount_jitter_prob: 0.0
+      augment_color_jitter: 0.15
+      jacobian_loss_weight: 0.15
+      jacobian_loss_start_epoch: 10
+      jacobian_loss_probe_deg: 2.0
+      jacobian_loss_interval: 5
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v62_pure_recovery_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+
+  # ===== Phase B: Domain Polish + Deploy-Matched Iterative =====
+  - name: "c1_v69_corr_dual_B1"
+    description: "V69-B: synthetic iter + 轻mount_jitter + ZD, Phase-A warm-start, 120ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v69_corr_dual_B1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 3
+      learning_rate: 3e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      early_stopping_patience: 50
+      eval_epoches: 10
+
+      # Phase B: 部署对齐迭代 + 轻度域适应
+      iterative_refine: 2
+      iterative_refine_weights: "0.3,0.7"
+      iterative_refine_start_epoch: 5
+      iterative_refine_use_synthetic_init: 1
+      iterative_refine_synthetic_residual_deg: "1.0,0.5"
+      overcorrection_penalty: 0.3
+      zero_perturbation_prob: 0.10
+      zero_drift_loss_weight: 0.1
+      zero_drift_loss_start_epoch: 10
+      augment_mount_jitter_prob: 0.3
+      augment_mount_jitter_rot_sigma: 1.5
+      augment_mount_jitter_trans_sigma: 0.01
+      augment_color_jitter: 0.25
+      jacobian_loss_weight: 0.1
+      jacobian_loss_start_epoch: 15
+      jacobian_loss_probe_deg: 1.5
+      jacobian_loss_interval: 5
+      multi_scale_perturb: "0.5:0.15,1.0:0.20,2.0:0.25,3.0:0.25,5.0:0.15"
+
+      # A1 dual gate 未 PASS → 无 ckpt_best_dual；按 MEDW → last → val 链式 fallback
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v69_corr_dual_A1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+      pretrain_ckpt_fallback: "logs/all_training_data_c1/model_small_5deg_c1_v69_corr_dual_A1/all_training_data_c1_scratch/checkpoint/ckpt_best_medw.pth,logs/all_training_data_c1/model_small_5deg_c1_v69_corr_dual_A1/all_training_data_c1_scratch/checkpoint/ckpt_80.pth,logs/all_training_data_c1/model_small_5deg_c1_v69_corr_dual_A1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"

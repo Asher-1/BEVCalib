@@ -1,0 +1,482 @@
+# C1 全量模型泛化评估配置
+#
+# 评估 all_training_data_c1 上训练的所有模型在 test_data_c1 上的泛化性能
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/c1_retrain/eval_generalization_c1.yaml --parallel -1 --eval_max_frames_per_seq 400
+#   python run_generalization_eval.py --config configs/c1_retrain/eval_generalization_c1.yaml --generalization_diag --parallel -1 --eval_max_frames_per_seq 400
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_all"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 8
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+
+models:
+
+  # ========================================================================
+  # V48a Multi-Scale (无GIN, 无consistency)
+  # ========================================================================
+
+  - label: "c1-v48a-S1-best-val"
+    dir_name: "model_small_5deg_c1_v48a_multiscale_S1"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a S1: Multi-Scale + 无consistency (best-val ep121)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v48a-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v48a_multiscale_S1"
+    ckpt: "ckpt_best_medw.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a S1: Multi-Scale + 无consistency (best-medw)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v48a-S1-last-ep200"
+    dir_name: "model_small_5deg_c1_v48a_multiscale_S1"
+    ckpt: "ckpt_200.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a S1: Multi-Scale (last epoch 200)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v48a-S2-best-val"
+    dir_name: "model_small_3deg_c1_v48a_multiscale_S2"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v48a-S2-best-medw"
+    dir_name: "model_small_3deg_c1_v48a_multiscale_S2"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a S2: ±3° finetune (best-medw)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v48a-S2-last-ep150"
+    dir_name: "model_small_3deg_c1_v48a_multiscale_S2"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a S2: ±3° finetune (last epoch 150)"
+    pitch_vertical_bands: 3
+
+  # ========================================================================
+  # Baseline V45c (256 groups, 有 consistency)
+  # ========================================================================
+
+  - label: "c1-baseline-v45c-S1-best-val"
+    dir_name: "model_small_5deg_c1_baseline_v45c_S1"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 Baseline v45c S1: 256 groups + consistency (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-baseline-v45c-S1-best-medw"
+    dir_name: "model_small_5deg_c1_baseline_v45c_S1"
+    ckpt: "ckpt_best_medw.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 Baseline v45c S1: 256 groups + consistency (best-medw)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-baseline-v45c-S1-last-ep150"
+    dir_name: "model_small_5deg_c1_baseline_v45c_S1"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 Baseline v45c S1: 256 groups + consistency (last epoch 150)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-baseline-v45c-S2-best-val"
+    dir_name: "model_small_3deg_c1_baseline_v45c_S2"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 Baseline v45c S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-baseline-v45c-S2-last-ep120"
+    dir_name: "model_small_3deg_c1_baseline_v45c_S2"
+    ckpt: "ckpt_120.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 Baseline v45c S2: ±3° finetune (last epoch 120)"
+    pitch_vertical_bands: 3
+
+  # ========================================================================
+  # V45a (128 groups, 无IN, step schedule)
+  # ========================================================================
+
+  - label: "c1-v45a-S1-best-val"
+    dir_name: "model_small_5deg_c1_v45a_no_in_S1"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V45a S1: 128 groups, 无IN, step schedule (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v45a-S1-last-ep150"
+    dir_name: "model_small_5deg_c1_v45a_no_in_S1"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V45a S1: 128 groups, 无IN (last epoch 150)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v45a-S2-best-val"
+    dir_name: "model_small_3deg_c1_v45a_no_in_S2"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V45a S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v45a-S2-last-ep120"
+    dir_name: "model_small_3deg_c1_v45a_no_in_S2"
+    ckpt: "ckpt_120.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V45a S2: ±3° finetune (last epoch 120)"
+    pitch_vertical_bands: 3
+
+  # ========================================================================
+  # V50a (Optuna超参 + 无consistency)
+  # ========================================================================
+
+  - label: "c1-v50a-S1-best-val"
+    dir_name: "model_small_5deg_c1_v50a_optuna_no_cons_S1"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V50a: Optuna超参 + 无consistency (best-val)"
+    pitch_vertical_bands: 5
+
+  - label: "c1-v50a-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v50a_optuna_no_cons_S1"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V50a: Optuna超参 + 无consistency (best-medw)"
+    pitch_vertical_bands: 5
+
+  - label: "c1-v50a-S1-last-ep150"
+    dir_name: "model_small_5deg_c1_v50a_optuna_no_cons_S1"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V50a: Optuna超参 + 无consistency (last epoch 150)"
+    pitch_vertical_bands: 5
+
+  # ========================================================================
+  # V44 (高Recovery基准)
+  # ========================================================================
+
+  - label: "c1-v44-recovery-S1-best-val"
+    dir_name: "model_small_5deg_c1_v44_high_recovery_S1"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V44: 高Recovery基准 (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v44-recovery-S1-last-ep150"
+    dir_name: "model_small_5deg_c1_v44_high_recovery_S1"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V44: 高Recovery基准 (last epoch 150)"
+    pitch_vertical_bands: 3
+
+  # ========================================================================
+  # V8 Pure Baseline (最纯净基座, 验证网络结构本身能力)
+  # ========================================================================
+
+  - label: "c1-v8-pure-S1-best-val"
+    dir_name: "model_small_5deg_c1_v8_pure_baseline_S1"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V8 pure baseline: step + minimal aug (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v8-pure-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v8_pure_baseline_S1"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V8 pure baseline: step + minimal aug (best-medw)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v8-pure-S1-last-ep150"
+    dir_name: "model_small_5deg_c1_v8_pure_baseline_S1"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V8 pure baseline: step + minimal aug (last epoch 150)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v8-pure-S2-best-val"
+    dir_name: "model_small_3deg_c1_v8_pure_baseline_S2"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V8 pure baseline S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+
+  - label: "c1-v8-pure-S2-last-ep100"
+    dir_name: "model_small_3deg_c1_v8_pure_baseline_S2"
+    ckpt: "ckpt_100.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V8 pure baseline S2: ±3° finetune (last epoch 100)"
+    pitch_vertical_bands: 3
+
+  # ========================================================================
+  # V60 Implicit Alignment (论文优化: L_sim + Registry + 3DPE + FOV)
+  # ========================================================================
+
+  - label: "c1-v60-S1-best-val"
+    dir_name: "model_small_5deg_c1_v60_implicit_align_S1"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60: SimLoss+Registry+3DPE+FoV S1 (best-val)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v60_implicit_align_S1"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60: SimLoss+Registry+3DPE+FoV S1 (best-medw)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60-S1-last-ep200"
+    dir_name: "model_small_5deg_c1_v60_implicit_align_S1"
+    ckpt: "ckpt_200.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60: SimLoss+Registry+3DPE+FoV S1 (last epoch 200)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60-S2-best-val"
+    dir_name: "model_small_3deg_c1_v60_implicit_align_S2"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60 S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60-S2-last-ep100"
+    dir_name: "model_small_3deg_c1_v60_implicit_align_S2"
+    ckpt: "ckpt_100.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60 S2: ±3° finetune (last epoch 100)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60-S3-best-val"
+    dir_name: "model_small_1.5deg_c1_v60_implicit_align_S3"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60 S3: ±1.5° precision push (best-val)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60-S3-last-ep60"
+    dir_name: "model_small_1.5deg_c1_v60_implicit_align_S3"
+    ckpt: "ckpt_60.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60 S3: ±1.5° precision push (last epoch 60)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  # ========================================================================
+  # V48a Hi-Res 960×540 (解决亚像素精度瓶颈)
+  # ========================================================================
+
+  - label: "c1-v48a-hires-S1-best-val"
+    dir_name: "model_small_5deg_c1_v48a_hires_960x540_S1"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a Hi-Res 960x540 S1 (best-val)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v48a-hires-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v48a_hires_960x540_S1"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a Hi-Res 960x540 S1 (best-medw)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v48a-hires-S1-last-ep200"
+    dir_name: "model_small_5deg_c1_v48a_hires_960x540_S1"
+    ckpt: "ckpt_200.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a Hi-Res 960x540 S1 (last epoch 200)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v48a-hires-S2-best-val"
+    dir_name: "model_small_3deg_c1_v48a_hires_960x540_S2"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a Hi-Res 960x540 S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v48a-hires-S2-last-ep150"
+    dir_name: "model_small_3deg_c1_v48a_hires_960x540_S2"
+    ckpt: "ckpt_150.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V48a Hi-Res 960x540 S2: ±3° finetune (last epoch 150)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540

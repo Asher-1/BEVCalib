@@ -1,0 +1,239 @@
+# C1 V63: Mild ZD + High Recovery (温和ZD约束 + 追求高矫正力)
+#
+# 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080, FOV~98°)
+# 目标: Recovery > 70%, 同时 per-sequence ZD max(R,P,Y) < 0.15°
+#
+# ========================================================================
+# 设计思路 (基于 V61/V62 实验数据)
+# ========================================================================
+#
+# 关键发现:
+#   - V61 (ZD_weight=0.5): Recovery=22.7%, ZD=0.236° — ZD约束太强, 压制输出
+#   - V60 (ZD_weight=0): Recovery=79%, ZD=0.499° — 无约束, ZD过高
+#   - Per-sequence ZD 变化巨大 (0.04°~0.86°), 不是常数, 不能后处理消除
+#
+# V63 策略: "Margin-based ZD + 延迟启动"
+#   1. zero_drift_loss_weight = 0.15 (比V61的0.5低3x)
+#   2. zero_drift_loss_margin_deg = 0.08 (只惩罚ZD>0.08°的部分)
+#      → 允许模型有0.08°以内的"自然偏置", 不强制归零
+#      → 这比全局归零更合理: 0.08°是聚合后可接受的噪声水平
+#   3. zero_drift_loss_start_epoch = 50 (延迟到模型先学会矫正)
+#      → 前50 epochs 纯学矫正力, 不受ZD干扰
+#   4. overcorrection_penalty = 0.8 (比V61的1.5低, 比V62的0.5高)
+#   5. sim_loss_weight = 2.5 (保持V62的强对应关系)
+#   6. 960×540 高分辨率
+#
+# 预期: Recovery ~60-70%, per-seq ZD < 0.15°, BEST聚合 < 0.15°
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === 网络结构 ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # === V63: Similarity Loss (保持强对应关系) ===
+    use_sim_loss: 1
+    sim_loss_weight: 2.5
+    sim_loss_warmup: 5
+    sim_loss_soft_radius: 0.0
+    sim_n_layers: 3
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.5
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 0
+    coarse_refine_detach_epoch: 30
+
+    # === 高分辨率 ===
+    target_width: 960
+    target_height: 540
+
+    # === 训练参数 ===
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.1
+
+    batch_size: 8
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # Loss
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.3
+    corr_alignment_warmup: 10
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.0
+    consistency_loss_weight: 0.0
+    consistency_loss_start_epoch: 999
+
+    # Multi-Scale Perturbation
+    multi_scale_perturb: "0.5:0.10,1.0:0.10,2.0:0.10"
+    symmetric_perturb: 1
+
+    # === V63 核心: Margin-based ZD + 延迟启动 ===
+    zero_perturbation_prob: 0.15
+    zero_drift_loss_weight: 0.15
+    zero_drift_loss_start_epoch: 50
+    zero_drift_loss_ramp_epochs: 20
+    zero_drift_loss_weight_start: 0.05
+    zero_drift_loss_margin_deg: 0.08
+
+    # Anti-shortcut (温和)
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 5.0
+    overcorrection_penalty: 0.8
+
+    # Augmentation
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    augment_color_jitter: 0.15
+
+    # Data
+    xyz_only: 1
+    max_pcd_points: 16384
+    max_frames_per_seq: 500
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    foreground: true
+    pitch_vertical_bands: 3
+
+    # Eval & save
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: ±5° 带温和ZD约束 =====
+  - name: "c1_v63_mild_zd_S1"
+    description: "C1 V63: HiRes960 + SimLoss2.5(3L) + margin-ZD(0.15@ep50)"
+    dataset: "all_training_data_c1"
+    version: "c1_v63_mild_zd_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 250
+      warmup_epochs: 10
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      early_stopping_patience: 60
+      eval_epoches: 10
+      rocr_detach_epochs: 999
+      pretrain_ckpt: null
+
+  # ===== S2: ±3° fine-tune =====
+  - name: "c1_v63_mild_zd_S2"
+    description: "C1 V63 S2: ±3° finetune, margin-ZD"
+    dataset: "all_training_data_c1"
+    version: "c1_v63_mild_zd_S2"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 5
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 30
+      cosine_Tmult: 2
+      early_stopping_patience: 30
+      eval_epoches: 5
+      rocr_detach_epochs: 999
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 3.0
+      zero_drift_loss_start_epoch: 10
+      zero_drift_loss_ramp_epochs: 10
+      zero_drift_loss_weight_start: 0.05
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v63_mild_zd_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+
+  # ===== S3: ±1.5° precision =====
+  - name: "c1_v63_mild_zd_S3"
+    description: "C1 V63 S3: ±1.5° precision"
+    dataset: "all_training_data_c1"
+    version: "c1_v63_mild_zd_S3"
+    params:
+      angle_range_deg: 1.5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 80
+      warmup_epochs: 3
+      learning_rate: 2e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 25
+      eval_epoches: 3
+      rocr_detach_epochs: 999
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 2.0
+      zero_drift_loss_start_epoch: 5
+      zero_drift_loss_ramp_epochs: 5
+      zero_drift_loss_weight_start: 0.05
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_3deg_c1_v63_mild_zd_S2/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"

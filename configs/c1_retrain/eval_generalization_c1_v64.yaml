@@ -1,0 +1,75 @@
+# V64 AccFilter 泛化评估配置
+# V64 = V63 + 加速度帧过滤 (对照实验)
+
+eval_config:
+  test_data_root: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+  perturb_angle_deg: 5.0
+  perturb_trans_m: 0.0
+  output_dir: "logs/evaluations/generalization_c1_v64"
+  
+  enable_generalization_diagnostics: true
+  gdiag_inject_angle_deg: 2.0
+  gdiag_multi_magnitude: [0.5, 1.0, 2.0]
+  gdiag_per_axis: true
+
+models:
+  # ===== S1: ±5° with margin-ZD + AccFilter =====
+  - tag: "c1-v64-S1-best-val"
+    description: "C1 V64 S1: V63+AccFilter (best-val)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_5deg_c1_v64_accfilter_S1"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v64_accfilter_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v64-S1-best-dual"
+    description: "C1 V64 S1: V63+AccFilter (best-dual)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_5deg_c1_v64_accfilter_S1"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+    train_config: "configs/c1_retrain/c1_v64_accfilter_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v64-S1-last-ep250"
+    description: "C1 V64 S1: V63+AccFilter (last epoch 250)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_5deg_c1_v64_accfilter_S1"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_250.pth"
+    ckpt_fallback:
+      - "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v64_accfilter_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  # ===== S2: ±3° finetune =====
+  - tag: "c1-v64-S2-best-val"
+    description: "C1 V64 S2: ±3° finetune (best-val)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_3deg_c1_v64_accfilter_S2"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v64_accfilter_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v64-S2-best-dual"
+    description: "C1 V64 S2: ±3° finetune (best-dual)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_3deg_c1_v64_accfilter_S2"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+    train_config: "configs/c1_retrain/c1_v64_accfilter_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  # ===== S3: ±1.5° precision =====
+  - tag: "c1-v64-S3-best-val"
+    description: "C1 V64 S3: ±1.5° precision (best-val)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_1.5deg_c1_v64_accfilter_S3"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v64_accfilter_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v64-S3-best-dual"
+    description: "C1 V64 S3: ±1.5° precision (best-dual)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_1.5deg_c1_v64_accfilter_S3"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+    train_config: "configs/c1_retrain/c1_v64_accfilter_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540

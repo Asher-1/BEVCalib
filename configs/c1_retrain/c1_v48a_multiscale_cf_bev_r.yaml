@@ -140,7 +140,7 @@ defaults:
     resume_ckpt: auto
 
 experiments:
-  # ===== S1: ±5° Multi-Scale 从头训练 =====
+  # ===== S1: ±5° Multi-Scale 从头训练 (已完成 200ep) =====
   - name: "c1_v48a_multiscale_S1"
     description: "C1 v48a: Multi-Scale + 无consistency + rotation-only, scratch"
     dataset: "all_training_data_c1"
@@ -177,7 +177,7 @@ experiments:
       cosine_Tmult: 2
       early_stopping_patience: 30
       eval_epoches: 5
-      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v48a_multiscale_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v48a_multiscale_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
       rocr_detach_epochs: 999
       seq_consistency_start_epoch: 0
       per_axis_prob: 0.5

@@ -1,0 +1,97 @@
+# V68 Ultimate Recovery 泛化评估配置
+#
+# ⚠️  本文件供 run_generalization_eval.py 使用，字段格式必须与 v62/v66 一致：
+#     label + dir_name + ckpt  (不要用 model_dir / checkpoint / eval_settings)
+#     参考模板: eval_generalization_c1_v62.yaml
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_v68"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 8
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+
+models:
+  # V68: 3轮迭代监督 + 强Jacobian + 极端域增强 + 硬负样本
+  - label: "c1-v68-ultimate-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v68_ultimate_S1"
+    ckpt: "ckpt_best_medw.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V68 Ultimate Recovery (best-medw)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v68-ultimate-S1-best-val"
+    dir_name: "model_small_5deg_c1_v68_ultimate_S1"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V68 Ultimate Recovery (best-val)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v68-ultimate-S1-best-dual"
+    dir_name: "model_small_5deg_c1_v68_ultimate_S1"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V68 Ultimate Recovery (best-dual, fallback if gate not met)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v68-ultimate-S1-last"
+    dir_name: "model_small_5deg_c1_v68_ultimate_S1"
+    ckpt: "ckpt_290.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V68 Ultimate Recovery (last saved ep290)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  # 对照组
+  - label: "c1-v67-iter-domain-S1-best-dual"
+    dir_name: "model_small_5deg_c1_v67_iterative_domain_S1"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V67 Iterative+Domain (best-dual, comparison)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-baseline"
+    dir_name: "model_small_5deg_c1_v62_pure_recovery_S1"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V62 baseline (warm-start source)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540

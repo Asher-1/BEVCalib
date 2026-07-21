@@ -1050,309 +1050,328 @@ def evaluate_checkpoint(args):
     eval_seed = getattr(args, 'eval_seed', 42)
     np.random.seed(eval_seed)
     torch.manual_seed(eval_seed)
-    
-    print(f"\n4. 开始评估...")
-    print(f"   输出目录: {eval_dir}")
-    print(f"   扰动参数: {args.angle_range_deg}°, {args.trans_range}m")
-    print(f"   评估seed: {eval_seed} (固定perturbation保证可复现)")
-    
-    # 创建外参结果文件
+
     extrinsics_file = os.path.join(eval_dir, "extrinsics_and_errors.txt")
-    
-    # 累积误差统计
-    all_errors = {
-        'trans_error': [], 'fwd_error': [], 'lat_error': [], 'ht_error': [],
-        'rot_error': [], 'roll_error': [], 'pitch_error': [], 'yaw_error': []
-    }
-    sample_sequences = []  # per-sample sequence ID
-    all_T_pred = []        # per-sample predicted T (4x4) for temporal aggregation
-    all_T_gt = []          # per-sample ground truth T (4x4)
-    vis_data_cache = []    # cached data for temporal projection viz
-    gt_extrinsics_written = False
-    
+    _gdiag_only = getattr(args, 'gdiag_only', False)
+    all_T_pred = []
+    all_T_gt = []
+    sample_sequences = []
+    vis_data_cache = []
     sample_count = 0
-    max_batches = args.max_batches if args.max_batches > 0 else len(val_loader)
-    
-    with torch.no_grad():
-        for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(val_loader):
-            if batch_index >= max_batches:
-                break
-            
-            gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
-            _paw = None
-            if getattr(args, 'per_axis_weights', '') and args.per_axis_weights:
-                _paw = tuple(float(x) for x in args.per_axis_weights.split(','))
-            init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
-                gt_T_to_camera_np,
-                angle_range_deg=args.angle_range_deg,
-                trans_range=args.trans_range,
-                rotation_only=rotation_only,
-                distribution=getattr(args, 'perturb_distribution', 'uniform'),
-                per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
-                per_axis_weights=_paw,
-            )
-            
-            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
-            if getattr(args, 'zero_image', False):
-                resize_imgs = torch.zeros_like(resize_imgs)
-            pcs_np = np.array(pcs)[:, :, :3] if args.xyz_only > 0 else np.array(pcs)
-            pcs = torch.from_numpy(pcs_np).float().to(device)
-            gt_T_to_camera_torch = torch.from_numpy(gt_T_to_camera_np).float().to(device)
-            init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device)
-            post_cam2ego_T = torch.eye(4).unsqueeze(0).repeat(gt_T_to_camera_torch.shape[0], 1, 1).float().to(device)
-            intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device)
-            
-            masks_tensor = torch.from_numpy(np.array(masks)).float().to(device)
-            if _dp_model is not None:
-                T_pred = _dp_model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
-                                   post_cam2ego_T, intrinsic_matrix, masks=masks_tensor, out_init_loss=False)
-            else:
-                T_pred, _, _ = model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
-                                     post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
 
-            imgs_np = np.array(imgs)
-            masks_np = np.array(masks)
-            T_pred_np = T_pred.detach().cpu().numpy()
+    if _gdiag_only:
+        print(f"\n4. [gdiag_only] 跳过主评估，直接运行泛化诊断...")
+        print(f"   输出目录: {eval_dir}")
+        if os.path.isfile(extrinsics_file):
+            with open(extrinsics_file, 'r') as _ef:
+                for _line in _ef:
+                    if _line.startswith("Total samples evaluated:"):
+                        try:
+                            sample_count = int(_line.split(":")[-1].strip())
+                        except ValueError:
+                            pass
+            if sample_count > 0:
+                print(f"   已有主评估结果: {sample_count} 样本")
+    else:
+        print(f"\n4. 开始评估...")
+        print(f"   输出目录: {eval_dir}")
+        print(f"   扰动参数: {args.angle_range_deg}°, {args.trans_range}m")
+        print(f"   评估seed: {eval_seed} (固定perturbation保证可复现)")
+    
+        # 累积误差统计
+        all_errors = {
+            'trans_error': [], 'fwd_error': [], 'lat_error': [], 'ht_error': [],
+            'rot_error': [], 'roll_error': [], 'pitch_error': [], 'yaw_error': []
+        }
+        sample_sequences = []  # per-sample sequence ID
+        all_T_pred = []        # per-sample predicted T (4x4) for temporal aggregation
+        all_T_gt = []          # per-sample ground truth T (4x4)
+        vis_data_cache = []    # cached data for temporal projection viz
+        gt_extrinsics_written = False
+    
+        sample_count = 0
+        max_batches = args.max_batches if args.max_batches > 0 else len(val_loader)
+    
+        with torch.no_grad():
+            for batch_index, (imgs, pcs, masks, gt_T_to_camera, intrinsics) in enumerate(val_loader):
+                if batch_index >= max_batches:
+                    break
             
-            # 为每个样本计算误差，按间隔生成可视化
-            vis_interval = args.vis_interval
-            for i in range(len(imgs_np)):
-                sample_idx = sample_count + i
+                gt_T_to_camera_np = np.array(gt_T_to_camera).astype(np.float32)
+                _paw = None
+                if getattr(args, 'per_axis_weights', '') and args.per_axis_weights:
+                    _paw = tuple(float(x) for x in args.per_axis_weights.split(','))
+                init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
+                    gt_T_to_camera_np,
+                    angle_range_deg=args.angle_range_deg,
+                    trans_range=args.trans_range,
+                    rotation_only=rotation_only,
+                    distribution=getattr(args, 'perturb_distribution', 'uniform'),
+                    per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                    per_axis_weights=_paw,
+                )
+            
+                resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+                if getattr(args, 'zero_image', False):
+                    resize_imgs = torch.zeros_like(resize_imgs)
+                pcs_np = np.array(pcs)[:, :, :3] if args.xyz_only > 0 else np.array(pcs)
+                pcs = torch.from_numpy(pcs_np).float().to(device)
+                gt_T_to_camera_torch = torch.from_numpy(gt_T_to_camera_np).float().to(device)
+                init_T_to_camera = torch.from_numpy(init_T_to_camera_np).float().to(device)
+                post_cam2ego_T = torch.eye(4).unsqueeze(0).repeat(gt_T_to_camera_torch.shape[0], 1, 1).float().to(device)
+                intrinsic_matrix = torch.from_numpy(np.array(intrinsics)).float().to(device)
+            
+                masks_tensor = torch.from_numpy(np.array(masks)).float().to(device)
+                if _dp_model is not None:
+                    T_pred = _dp_model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
+                                       post_cam2ego_T, intrinsic_matrix, masks=masks_tensor, out_init_loss=False)
+                else:
+                    T_pred, _, _ = model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
+                                         post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+
+                imgs_np = np.array(imgs)
+                masks_np = np.array(masks)
+                T_pred_np = T_pred.detach().cpu().numpy()
+            
+                # 为每个样本计算误差，按间隔生成可视化
+                vis_interval = args.vis_interval
+                for i in range(len(imgs_np)):
+                    sample_idx = sample_count + i
                 
-                save_vis = (vis_interval > 0 and sample_idx % vis_interval == 0)
+                    save_vis = (vis_interval > 0 and sample_idx % vis_interval == 0)
                 
-                _seq_tag = f" [Seq {_get_sequence_for_sample(sample_idx)}]"
-                if save_vis:
-                    print(f"   处理样本 {sample_idx}{_seq_tag} (含可视化)...", end='', flush=True)
-                elif sample_idx % 50 == 0:
-                    print(f"   处理样本 {sample_idx}/{max_batches * args.batch_size}{_seq_tag}...", end='', flush=True)
+                    _seq_tag = f" [Seq {_get_sequence_for_sample(sample_idx)}]"
+                    if save_vis:
+                        print(f"   处理样本 {sample_idx}{_seq_tag} (含可视化)...", end='', flush=True)
+                    elif sample_idx % 50 == 0:
+                        print(f"   处理样本 {sample_idx}/{max_batches * args.batch_size}{_seq_tag}...", end='', flush=True)
                 
-                if save_vis:
-                    vis_image = visualize_batch_projection(
-                        images=imgs_np[i:i+1],
-                        points_batch=pcs_np[i:i+1],
-                        init_T_batch=init_T_to_camera_np[i:i+1],
-                        gt_T_batch=gt_T_to_camera_np[i:i+1],
-                        pred_T_batch=T_pred_np[i:i+1],
-                        K_batch=np.array(intrinsics)[i:i+1],
-                        masks=masks_np[i:i+1],
-                        num_samples=1,
-                        max_points=args.vis_points,
-                        point_radius=args.vis_point_radius,
-                        rotation_only=rotation_only,
-                        phase="Eval",
-                        epoch=epoch if isinstance(epoch, int) else -1,
-                        epoch_train_errors=ckpt_train_errors,
-                        epoch_val_errors=ckpt_val_errors,
-                    )
-                    _perframe_vis_dir = os.path.join(eval_dir, "perframe_projections")
-                    os.makedirs(_perframe_vis_dir, exist_ok=True)
-                    vis_image_path = os.path.join(_perframe_vis_dir, f"sample_{sample_idx:04d}.png")
-                    cv2.imwrite(vis_image_path, vis_image)
-                    vis_data_cache.append({
-                        'sample_idx': sample_idx,
-                        'image': imgs_np[i].copy(),
-                        'points': pcs_np[i].copy(),
-                        'gt_T': gt_T_to_camera_np[i].copy(),
-                        'init_T': init_T_to_camera_np[i].copy(),
-                        'pred_T': T_pred_np[i].copy(),
-                        'K': np.array(intrinsics)[i].copy(),
-                        'mask': masks_np[i].copy(),
-                    })
+                    if save_vis:
+                        vis_image = visualize_batch_projection(
+                            images=imgs_np[i:i+1],
+                            points_batch=pcs_np[i:i+1],
+                            init_T_batch=init_T_to_camera_np[i:i+1],
+                            gt_T_batch=gt_T_to_camera_np[i:i+1],
+                            pred_T_batch=T_pred_np[i:i+1],
+                            K_batch=np.array(intrinsics)[i:i+1],
+                            masks=masks_np[i:i+1],
+                            num_samples=1,
+                            max_points=args.vis_points,
+                            point_radius=args.vis_point_radius,
+                            rotation_only=rotation_only,
+                            phase="Eval",
+                            epoch=epoch if isinstance(epoch, int) else -1,
+                            epoch_train_errors=ckpt_train_errors,
+                            epoch_val_errors=ckpt_val_errors,
+                        )
+                        _perframe_vis_dir = os.path.join(eval_dir, "perframe_projections")
+                        os.makedirs(_perframe_vis_dir, exist_ok=True)
+                        vis_image_path = os.path.join(_perframe_vis_dir, f"sample_{sample_idx:04d}.png")
+                        cv2.imwrite(vis_image_path, vis_image)
+                        vis_data_cache.append({
+                            'sample_idx': sample_idx,
+                            'image': imgs_np[i].copy(),
+                            'points': pcs_np[i].copy(),
+                            'gt_T': gt_T_to_camera_np[i].copy(),
+                            'init_T': init_T_to_camera_np[i].copy(),
+                            'pred_T': T_pred_np[i].copy(),
+                            'K': np.array(intrinsics)[i].copy(),
+                            'mask': masks_np[i].copy(),
+                        })
                 
-                # 计算误差
-                errors = compute_pose_errors(T_pred_np[i], gt_T_to_camera_np[i])
+                    # 计算误差
+                    errors = compute_pose_errors(T_pred_np[i], gt_T_to_camera_np[i])
                 
-                # 记录 sequence 归属
-                seq_id = _get_sequence_for_sample(sample_idx)
-                sample_sequences.append(seq_id)
-                all_T_pred.append(T_pred_np[i].copy())
-                all_T_gt.append(gt_T_to_camera_np[i].copy())
+                    # 记录 sequence 归属
+                    seq_id = _get_sequence_for_sample(sample_idx)
+                    sample_sequences.append(seq_id)
+                    all_T_pred.append(T_pred_np[i].copy())
+                    all_T_gt.append(gt_T_to_camera_np[i].copy())
                 
-                # 累积误差
-                for key in all_errors:
-                    all_errors[key].append(errors[key])
+                    # 累积误差
+                    for key in all_errors:
+                        all_errors[key].append(errors[key])
                 
-                # 保存外参和误差信息到文件
-                with open(extrinsics_file, 'a') as f:
-                    if not gt_extrinsics_written:
-                        eval_mode = "全量数据集泛化测试" if args.use_full_dataset else "验证集评估"
-                        f.write(f"Checkpoint: {os.path.basename(args.ckpt_path)}\n")
-                        f.write(f"Epoch: {epoch}\n")
-                        f.write(f"Dataset: {args.dataset_root}\n")
-                        f.write(f"Mode: {eval_mode}\n")
-                        f.write(f"Perturbation: {args.angle_range_deg}deg, {args.trans_range}m\n")
-                        if seq_boundaries:
-                            f.write(f"\nSequence Boundaries:\n")
-                            for sb_seq, sb_s, sb_e in seq_boundaries:
-                                f.write(f"  Seq {sb_seq}: samples {sb_s} - {sb_e} ({sb_e - sb_s + 1} frames)\n")
-                        f.write(f"="*80 + "\n\n")
+                    # 保存外参和误差信息到文件
+                    with open(extrinsics_file, 'a') as f:
+                        if not gt_extrinsics_written:
+                            eval_mode = "全量数据集泛化测试" if args.use_full_dataset else "验证集评估"
+                            f.write(f"Checkpoint: {os.path.basename(args.ckpt_path)}\n")
+                            f.write(f"Epoch: {epoch}\n")
+                            f.write(f"Dataset: {args.dataset_root}\n")
+                            f.write(f"Mode: {eval_mode}\n")
+                            f.write(f"Perturbation: {args.angle_range_deg}deg, {args.trans_range}m\n")
+                            if seq_boundaries:
+                                f.write(f"\nSequence Boundaries:\n")
+                                for sb_seq, sb_s, sb_e in seq_boundaries:
+                                    f.write(f"  Seq {sb_seq}: samples {sb_s} - {sb_e} ({sb_e - sb_s + 1} frames)\n")
+                            f.write(f"="*80 + "\n\n")
                         
-                        f.write("Ground Truth Extrinsics (LiDAR → Camera):\n")
-                        for row in gt_T_to_camera_np[i]:
+                            f.write("Ground Truth Extrinsics (LiDAR → Camera):\n")
+                            for row in gt_T_to_camera_np[i]:
+                                f.write(f"  {row[0]:10.6f} {row[1]:10.6f} {row[2]:10.6f} {row[3]:10.6f}\n")
+                            f.write("\n" + "="*80 + "\n\n")
+                            gt_extrinsics_written = True
+                    
+                        f.write(f"Sample {sample_idx:04d} [Seq {seq_id}]\n")
+                        f.write("-" * 80 + "\n")
+                    
+                        f.write("\nPredicted Extrinsics (LiDAR → Camera):\n")
+                        for row in T_pred_np[i]:
                             f.write(f"  {row[0]:10.6f} {row[1]:10.6f} {row[2]:10.6f} {row[3]:10.6f}\n")
+                    
+                        if not rotation_only:
+                            f.write("\nTranslation Errors (in LiDAR coordinate system):\n")
+                            f.write(f"  Total:   {errors['trans_error']:.6f} m\n")
+                            f.write(f"  X (Fwd): {errors['fwd_error']:.6f} m\n")
+                            f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
+                            f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
+                    
+                        f.write("\nRotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
+                        f.write(f"  Total:            {errors['rot_error']:.6f} deg\n")
+                        f.write(f"  Roll  (LiDAR X):  {errors['roll_error']:.6f} deg\n")
+                        f.write(f"  Pitch (LiDAR Y):  {errors['pitch_error']:.6f} deg\n")
+                        f.write(f"  Yaw   (LiDAR Z):  {errors['yaw_error']:.6f} deg\n")
+                    
                         f.write("\n" + "="*80 + "\n\n")
-                        gt_extrinsics_written = True
-                    
-                    f.write(f"Sample {sample_idx:04d} [Seq {seq_id}]\n")
-                    f.write("-" * 80 + "\n")
-                    
-                    f.write("\nPredicted Extrinsics (LiDAR → Camera):\n")
-                    for row in T_pred_np[i]:
-                        f.write(f"  {row[0]:10.6f} {row[1]:10.6f} {row[2]:10.6f} {row[3]:10.6f}\n")
-                    
-                    if not rotation_only:
-                        f.write("\nTranslation Errors (in LiDAR coordinate system):\n")
-                        f.write(f"  Total:   {errors['trans_error']:.6f} m\n")
-                        f.write(f"  X (Fwd): {errors['fwd_error']:.6f} m\n")
-                        f.write(f"  Y (Lat): {errors['lat_error']:.6f} m\n")
-                        f.write(f"  Z (Ht):  {errors['ht_error']:.6f} m\n")
-                    
-                    f.write("\nRotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
-                    f.write(f"  Total:            {errors['rot_error']:.6f} deg\n")
-                    f.write(f"  Roll  (LiDAR X):  {errors['roll_error']:.6f} deg\n")
-                    f.write(f"  Pitch (LiDAR Y):  {errors['pitch_error']:.6f} deg\n")
-                    f.write(f"  Yaw   (LiDAR Z):  {errors['yaw_error']:.6f} deg\n")
-                    
-                    f.write("\n" + "="*80 + "\n\n")
                 
-                if save_vis or sample_idx % 50 == 0:
-                    if rotation_only:
-                        print(f" ✓ (Rot: {errors['rot_error']:.2f}°)")
-                    else:
-                        print(f" ✓ (Trans: {errors['trans_error']:.4f}m, Rot: {errors['rot_error']:.2f}°)")
+                    if save_vis or sample_idx % 50 == 0:
+                        if rotation_only:
+                            print(f" ✓ (Rot: {errors['rot_error']:.2f}°)")
+                        else:
+                            print(f" ✓ (Trans: {errors['trans_error']:.4f}m, Rot: {errors['rot_error']:.2f}°)")
             
-            sample_count += len(imgs_np)
+                sample_count += len(imgs_np)
     
-    # 写入统计摘要（含最大值、最小值、中位数、百分位数）
-    with open(extrinsics_file, 'a') as f:
-        f.write("\n" + "="*80 + "\n")
-        f.write("EVALUATION STATISTICS\n")
-        f.write("="*80 + "\n\n")
-        f.write(f"Total samples evaluated: {sample_count}\n\n")
-
-        avg_errors = {k: np.mean(v) for k, v in all_errors.items()}
-        std_errors = {k: np.std(v) for k, v in all_errors.items()}
-        max_errors = {k: np.max(v) for k, v in all_errors.items()}
-        min_errors = {k: np.min(v) for k, v in all_errors.items()}
-        med_errors = {k: np.median(v) for k, v in all_errors.items()}
-        p90_errors = {k: np.percentile(v, 90) for k, v in all_errors.items()}
-        p95_errors = {k: np.percentile(v, 95) for k, v in all_errors.items()}
-        p99_errors = {k: np.percentile(v, 99) for k, v in all_errors.items()}
-
-        def write_metric_block(f, label, keys, unit):
-            header = f"{'Metric':<14} {'Mean':>10} {'Std':>10} {'Min':>10} {'Median':>10} {'P90':>10} {'P95':>10} {'P99':>10} {'Max':>10}"
-            f.write(f"{label} ({unit}):\n")
-            f.write(f"  {header}\n")
-            f.write(f"  {'-'*len(header)}\n")
-            name_map = {
-                'trans_error': 'Total', 'fwd_error': 'X (Fwd)', 'lat_error': 'Y (Lat)', 'ht_error': 'Z (Ht)',
-                'rot_error': 'Total', 'roll_error': 'Roll (LiDAR-X)', 'pitch_error': 'Pitch (LiDAR-Y)', 'yaw_error': 'Yaw (LiDAR-Z)',
-            }
-            for k in keys:
-                name = name_map.get(k, k)
-                f.write(f"  {name:<14} {avg_errors[k]:>10.6f} {std_errors[k]:>10.6f} {min_errors[k]:>10.6f} "
-                        f"{med_errors[k]:>10.6f} {p90_errors[k]:>10.6f} {p95_errors[k]:>10.6f} "
-                        f"{p99_errors[k]:>10.6f} {max_errors[k]:>10.6f}\n")
-            f.write("\n")
-
-        trans_keys = ['trans_error', 'fwd_error', 'lat_error', 'ht_error']
-        rot_keys = ['rot_error', 'roll_error', 'pitch_error', 'yaw_error']
-        if not rotation_only:
-            write_metric_block(f, "Translation Errors", trans_keys, "m")
-        write_metric_block(f, "Rotation Errors", rot_keys, "deg")
-
-        f.write("="*80 + "\n")
-        f.write("AVERAGE ERRORS ACROSS ALL SAMPLES\n")
-        f.write("="*80 + "\n\n")
-        f.write(f"Total samples evaluated: {sample_count}\n\n")
-
-        if not rotation_only:
-            f.write("Average Translation Errors (in LiDAR coordinate system):\n")
-            f.write(f"  Total:   {avg_errors['trans_error']:.6f} ± {std_errors['trans_error']:.6f} m\n")
-            f.write(f"  X (Fwd): {avg_errors['fwd_error']:.6f} ± {std_errors['fwd_error']:.6f} m\n")
-            f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
-            f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
-
-        f.write("\nAverage Rotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
-        f.write(f"  Total:            {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
-        f.write(f"  Roll  (LiDAR X):  {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
-        f.write(f"  Pitch (LiDAR Y):  {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
-        f.write(f"  Yaw   (LiDAR Z):  {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
-
-        # Per-sequence statistics
-        if sample_sequences and seq_boundaries:
+        # 写入统计摘要（含最大值、最小值、中位数、百分位数）
+        with open(extrinsics_file, 'a') as f:
             f.write("\n" + "="*80 + "\n")
-            f.write("PER-SEQUENCE STATISTICS\n")
+            f.write("EVALUATION STATISTICS\n")
             f.write("="*80 + "\n\n")
-            rot_arr = np.array(all_errors['rot_error'])
-            roll_arr = np.array(all_errors['roll_error'])
-            pitch_arr = np.array(all_errors['pitch_error'])
-            yaw_arr = np.array(all_errors['yaw_error'])
-            seq_arr = np.array(sample_sequences)
+            f.write(f"Total samples evaluated: {sample_count}\n\n")
 
-            header = f"{'Seq':<6} {'Samples':>8} {'Rot Mean':>10} {'Rot Std':>10} {'Rot Med':>10} {'Rot P95':>10} {'Rot Max':>10} {'Roll':>8} {'Pitch':>8} {'Yaw':>8}"
-            f.write(f"  {header}\n")
-            f.write(f"  {'-'*len(header)}\n")
-            seq_means = {'rot': [], 'roll': [], 'pitch': [], 'yaw': []}
-            for sb_seq, sb_s, sb_e in seq_boundaries:
-                mask = seq_arr == sb_seq
-                n = int(mask.sum())
-                if n == 0:
-                    continue
-                sr = rot_arr[mask]
-                seq_means['rot'].append(np.mean(sr))
-                seq_means['roll'].append(np.mean(roll_arr[mask]))
-                seq_means['pitch'].append(np.mean(pitch_arr[mask]))
-                seq_means['yaw'].append(np.mean(yaw_arr[mask]))
-                f.write(f"  {sb_seq:<6} {n:>8} {np.mean(sr):>10.4f} {np.std(sr):>10.4f} "
-                        f"{np.median(sr):>10.4f} {np.percentile(sr, 95):>10.4f} {np.max(sr):>10.4f} "
-                        f"{np.mean(roll_arr[mask]):>8.4f} {np.mean(pitch_arr[mask]):>8.4f} {np.mean(yaw_arr[mask]):>8.4f}\n")
-            f.write("\n")
+            avg_errors = {k: np.mean(v) for k, v in all_errors.items()}
+            std_errors = {k: np.std(v) for k, v in all_errors.items()}
+            max_errors = {k: np.max(v) for k, v in all_errors.items()}
+            min_errors = {k: np.min(v) for k, v in all_errors.items()}
+            med_errors = {k: np.median(v) for k, v in all_errors.items()}
+            p90_errors = {k: np.percentile(v, 90) for k, v in all_errors.items()}
+            p95_errors = {k: np.percentile(v, 95) for k, v in all_errors.items()}
+            p99_errors = {k: np.percentile(v, 99) for k, v in all_errors.items()}
 
-            if seq_means['rot']:
-                macro_rot = np.mean(seq_means['rot'])
-                macro_roll = np.mean(seq_means['roll'])
-                macro_pitch = np.mean(seq_means['pitch'])
-                macro_yaw = np.mean(seq_means['yaw'])
-                f.write("  Macro-Averaged (equal weight per sequence):\n")
-                f.write(f"    Rot: {macro_rot:.6f}° "
-                        f"(Roll:{macro_roll:.4f}° "
-                        f"Pitch:{macro_pitch:.4f}° "
-                        f"Yaw:{macro_yaw:.4f}°)\n")
-                f.write(f"    Micro (sample-level): {avg_errors['rot_error']:.6f}°\n")
-                f.write(f"    Macro (sequence-level): {macro_rot:.6f}°\n")
-                use_macro = getattr(args, 'data_balance', 0) > 0
-                primary = "Macro" if use_macro else "Micro"
-                primary_val = macro_rot if use_macro else avg_errors['rot_error']
-                f.write(f"    PRIMARY_METRIC: {primary} {primary_val:.6f}°\n\n")
-        f.write("\n" + "="*80 + "\n")
+            def write_metric_block(f, label, keys, unit):
+                header = f"{'Metric':<14} {'Mean':>10} {'Std':>10} {'Min':>10} {'Median':>10} {'P90':>10} {'P95':>10} {'P99':>10} {'Max':>10}"
+                f.write(f"{label} ({unit}):\n")
+                f.write(f"  {header}\n")
+                f.write(f"  {'-'*len(header)}\n")
+                name_map = {
+                    'trans_error': 'Total', 'fwd_error': 'X (Fwd)', 'lat_error': 'Y (Lat)', 'ht_error': 'Z (Ht)',
+                    'rot_error': 'Total', 'roll_error': 'Roll (LiDAR-X)', 'pitch_error': 'Pitch (LiDAR-Y)', 'yaw_error': 'Yaw (LiDAR-Z)',
+                }
+                for k in keys:
+                    name = name_map.get(k, k)
+                    f.write(f"  {name:<14} {avg_errors[k]:>10.6f} {std_errors[k]:>10.6f} {min_errors[k]:>10.6f} "
+                            f"{med_errors[k]:>10.6f} {p90_errors[k]:>10.6f} {p95_errors[k]:>10.6f} "
+                            f"{p99_errors[k]:>10.6f} {max_errors[k]:>10.6f}\n")
+                f.write("\n")
 
-    # ========== 生成评估可视化图表 ==========
-    print(f"\n5. 生成评估图表...")
-    _generate_eval_charts(all_errors, eval_dir, sample_count, args,
-                          rotation_only=rotation_only,
-                          sample_sequences=sample_sequences,
-                          seq_boundaries=seq_boundaries)
+            trans_keys = ['trans_error', 'fwd_error', 'lat_error', 'ht_error']
+            rot_keys = ['rot_error', 'roll_error', 'pitch_error', 'yaw_error']
+            if not rotation_only:
+                write_metric_block(f, "Translation Errors", trans_keys, "m")
+            write_metric_block(f, "Rotation Errors", rot_keys, "deg")
 
-    # ========== Test-Time Adaptation (可选) ==========
-    if getattr(args, 'tta', False) and all_T_pred and seq_boundaries:
-        print(f"\n6. Test-Time Adaptation (per-sequence consistency fine-tuning)...")
-        _run_tta_evaluation(model, args, device, all_T_pred, all_T_gt,
-                            sample_sequences, seq_boundaries, eval_dir,
-                            rotation_only)
+            f.write("="*80 + "\n")
+            f.write("AVERAGE ERRORS ACROSS ALL SAMPLES\n")
+            f.write("="*80 + "\n\n")
+            f.write(f"Total samples evaluated: {sample_count}\n\n")
 
-    # ========== 多帧时序聚合分析 ==========
-    T_agg_per_sample = None
-    if all_T_pred and sample_sequences and seq_boundaries:
-        T_agg_per_sample = _temporal_aggregation_analysis(
-            all_T_pred, all_T_gt, sample_sequences, seq_boundaries,
-            eval_dir, rotation_only)
+            if not rotation_only:
+                f.write("Average Translation Errors (in LiDAR coordinate system):\n")
+                f.write(f"  Total:   {avg_errors['trans_error']:.6f} ± {std_errors['trans_error']:.6f} m\n")
+                f.write(f"  X (Fwd): {avg_errors['fwd_error']:.6f} ± {std_errors['fwd_error']:.6f} m\n")
+                f.write(f"  Y (Lat): {avg_errors['lat_error']:.6f} ± {std_errors['lat_error']:.6f} m\n")
+                f.write(f"  Z (Ht):  {avg_errors['ht_error']:.6f} ± {std_errors['ht_error']:.6f} m\n")
 
-    # ========== 时序聚合投影图 ==========
-    if T_agg_per_sample is not None and vis_data_cache:
-        _generate_temporal_projections(
-            vis_data_cache, T_agg_per_sample, eval_dir, rotation_only, args)
+            f.write("\nAverage Rotation Errors (axis-angle, LiDAR frame: X=Fwd, Y=Left, Z=Up):\n")
+            f.write(f"  Total:            {avg_errors['rot_error']:.6f} ± {std_errors['rot_error']:.6f} deg\n")
+            f.write(f"  Roll  (LiDAR X):  {avg_errors['roll_error']:.6f} ± {std_errors['roll_error']:.6f} deg\n")
+            f.write(f"  Pitch (LiDAR Y):  {avg_errors['pitch_error']:.6f} ± {std_errors['pitch_error']:.6f} deg\n")
+            f.write(f"  Yaw   (LiDAR Z):  {avg_errors['yaw_error']:.6f} ± {std_errors['yaw_error']:.6f} deg\n")
+
+            # Per-sequence statistics
+            if sample_sequences and seq_boundaries:
+                f.write("\n" + "="*80 + "\n")
+                f.write("PER-SEQUENCE STATISTICS\n")
+                f.write("="*80 + "\n\n")
+                rot_arr = np.array(all_errors['rot_error'])
+                roll_arr = np.array(all_errors['roll_error'])
+                pitch_arr = np.array(all_errors['pitch_error'])
+                yaw_arr = np.array(all_errors['yaw_error'])
+                seq_arr = np.array(sample_sequences)
+
+                header = f"{'Seq':<6} {'Samples':>8} {'Rot Mean':>10} {'Rot Std':>10} {'Rot Med':>10} {'Rot P95':>10} {'Rot Max':>10} {'Roll':>8} {'Pitch':>8} {'Yaw':>8}"
+                f.write(f"  {header}\n")
+                f.write(f"  {'-'*len(header)}\n")
+                seq_means = {'rot': [], 'roll': [], 'pitch': [], 'yaw': []}
+                for sb_seq, sb_s, sb_e in seq_boundaries:
+                    mask = seq_arr == sb_seq
+                    n = int(mask.sum())
+                    if n == 0:
+                        continue
+                    sr = rot_arr[mask]
+                    seq_means['rot'].append(np.mean(sr))
+                    seq_means['roll'].append(np.mean(roll_arr[mask]))
+                    seq_means['pitch'].append(np.mean(pitch_arr[mask]))
+                    seq_means['yaw'].append(np.mean(yaw_arr[mask]))
+                    f.write(f"  {sb_seq:<6} {n:>8} {np.mean(sr):>10.4f} {np.std(sr):>10.4f} "
+                            f"{np.median(sr):>10.4f} {np.percentile(sr, 95):>10.4f} {np.max(sr):>10.4f} "
+                            f"{np.mean(roll_arr[mask]):>8.4f} {np.mean(pitch_arr[mask]):>8.4f} {np.mean(yaw_arr[mask]):>8.4f}\n")
+                f.write("\n")
+
+                if seq_means['rot']:
+                    macro_rot = np.mean(seq_means['rot'])
+                    macro_roll = np.mean(seq_means['roll'])
+                    macro_pitch = np.mean(seq_means['pitch'])
+                    macro_yaw = np.mean(seq_means['yaw'])
+                    f.write("  Macro-Averaged (equal weight per sequence):\n")
+                    f.write(f"    Rot: {macro_rot:.6f}° "
+                            f"(Roll:{macro_roll:.4f}° "
+                            f"Pitch:{macro_pitch:.4f}° "
+                            f"Yaw:{macro_yaw:.4f}°)\n")
+                    f.write(f"    Micro (sample-level): {avg_errors['rot_error']:.6f}°\n")
+                    f.write(f"    Macro (sequence-level): {macro_rot:.6f}°\n")
+                    use_macro = getattr(args, 'data_balance', 0) > 0
+                    primary = "Macro" if use_macro else "Micro"
+                    primary_val = macro_rot if use_macro else avg_errors['rot_error']
+                    f.write(f"    PRIMARY_METRIC: {primary} {primary_val:.6f}°\n\n")
+            f.write("\n" + "="*80 + "\n")
+
+        # ========== 生成评估可视化图表 ==========
+        print(f"\n5. 生成评估图表...")
+        _generate_eval_charts(all_errors, eval_dir, sample_count, args,
+                              rotation_only=rotation_only,
+                              sample_sequences=sample_sequences,
+                              seq_boundaries=seq_boundaries)
+
+        # ========== Test-Time Adaptation (可选) ==========
+        if getattr(args, 'tta', False) and all_T_pred and seq_boundaries:
+            print(f"\n6. Test-Time Adaptation (per-sequence consistency fine-tuning)...")
+            _run_tta_evaluation(model, args, device, all_T_pred, all_T_gt,
+                                sample_sequences, seq_boundaries, eval_dir,
+                                rotation_only)
+
+        # ========== 多帧时序聚合分析 ==========
+        T_agg_per_sample = None
+        if all_T_pred and sample_sequences and seq_boundaries:
+            T_agg_per_sample = _temporal_aggregation_analysis(
+                all_T_pred, all_T_gt, sample_sequences, seq_boundaries,
+                eval_dir, rotation_only)
+
+        # ========== 时序聚合投影图 ==========
+        if T_agg_per_sample is not None and vis_data_cache:
+            _generate_temporal_projections(
+                vis_data_cache, T_agg_per_sample, eval_dir, rotation_only, args)
 
     if getattr(args, 'shortcut_diag', False):
         print(f"\n{'='*80}")
@@ -1377,7 +1396,7 @@ def evaluate_checkpoint(args):
             traceback.print_exc()
 
     # ========== 泛化诊断: 零漂移 + 注入扰动 + shortcut 检测 ==========
-    if getattr(args, 'generalization_diag', False) and all_T_pred:
+    if getattr(args, 'generalization_diag', False) and (all_T_pred or _gdiag_only):
         print(f"\n{'='*80}")
         print("泛化诊断 (Zero-Drift / Inject / Shortcut)")
         print(f"{'='*80}")
@@ -1419,6 +1438,22 @@ def evaluate_checkpoint(args):
     print("=" * 80)
 
 
+def _gdiag_model_forward(active_model, resize_imgs, pcs_t, gt_T_t, init_T_t, post_T, K,
+                         masks, masks_t, use_dp, n_iter_steps=0):
+    """Run single-step forward or CF-BEV-R iterative_inference for gdiag."""
+    raw_model = active_model.module if hasattr(active_model, 'module') else active_model
+    if n_iter_steps > 0 and hasattr(raw_model, 'iterative_inference'):
+        return raw_model.iterative_inference(
+            resize_imgs, pcs_t, init_T_t, K,
+            n_iters=n_iter_steps, pcd_mask=masks_t)
+    if use_dp:
+        return active_model(resize_imgs, pcs_t, gt_T_t, init_T_t, post_T, K,
+                            masks=masks_t, out_init_loss=False)
+    T_pred, _, _ = active_model(resize_imgs, pcs_t, gt_T_t, init_T_t, post_T, K,
+                                masks=masks, out_init_loss=False)
+    return T_pred
+
+
 def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                                      rotation_only, _eval_idx_to_seq,
                                      seq_boundaries, use_dp=False,
@@ -1443,6 +1478,10 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         if deploy_gate_routing and model_recovery is not None and for_inject:
             return model_recovery
         return model
+    _cf_iter_steps = int(getattr(args, 'cf_bev_r_iter_steps', 0) or 0)
+    if _cf_iter_steps > 0:
+        print(f"   CF-BEV-R iterative inference enabled: n_iters={_cf_iter_steps} "
+              f"(inject/shortcut tests only; zero-drift stays single-pass)")
     inject_deg = getattr(args, 'gdiag_inject_deg', 2.0)
     max_batches = getattr(args, 'gdiag_max_batches', 0) or args.max_batches
     if max_batches <= 0:
@@ -1453,7 +1492,7 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
     vis_dir = os.path.join(eval_dir, "gdiag_projections")
     os.makedirs(vis_dir, exist_ok=True)
 
-    # Pre-cache batches from val_loader to avoid repeated disk I/O and tensor creation
+    # Pre-cache batches on CPU to avoid GPU OOM (moved to device per forward pass)
     _cached_batches = []
     print(f"   Pre-caching {max_batches} batches for generalization diagnostics...")
     _cache_t0 = time.time()
@@ -1463,14 +1502,14 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                 break
             gt_T_np = np.array(gt_T).astype(np.float32)
             B = gt_T_np.shape[0]
-            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
+            resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float()
             pcs_np = np.array(pcs)[:, :, :3] if args.xyz_only > 0 else np.array(pcs)
-            pcs_t = torch.from_numpy(pcs_np).float().to(device)
-            gt_T_t = torch.from_numpy(gt_T_np).float().to(device)
-            post_T = torch.eye(4).unsqueeze(0).repeat(B, 1, 1).float().to(device)
-            K = torch.from_numpy(np.array(intrinsics)).float().to(device)
+            pcs_t = torch.from_numpy(pcs_np).float()
+            gt_T_t = torch.from_numpy(gt_T_np).float()
+            post_T = torch.eye(4).unsqueeze(0).repeat(B, 1, 1).float()
+            K = torch.from_numpy(np.array(intrinsics)).float()
             masks_np = np.array(masks)
-            masks_t = torch.from_numpy(masks_np).float().to(device)
+            masks_t = torch.from_numpy(masks_np).float()
             _cached_batches.append({
                 'imgs_raw': np.array(imgs), 'pcs_np': pcs_np,
                 'gt_T_np': gt_T_np, 'B': B,
@@ -1479,7 +1518,19 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                 'masks': masks, 'masks_t': masks_t, 'masks_np': masks_np,
                 'intrinsics_np': np.array(intrinsics),
             })
-    print(f"   Cached {len(_cached_batches)} batches in {time.time()-_cache_t0:.1f}s")
+    print(f"   Cached {len(_cached_batches)} batches (CPU) in {time.time()-_cache_t0:.1f}s")
+
+    def _batch_to_device(cb):
+        """Move one cached batch to GPU for forward pass."""
+        return {
+            **cb,
+            'resize_imgs': cb['resize_imgs'].to(device, non_blocking=True),
+            'pcs_t': cb['pcs_t'].to(device, non_blocking=True),
+            'gt_T_t': cb['gt_T_t'].to(device, non_blocking=True),
+            'post_T': cb['post_T'].to(device, non_blocking=True),
+            'K': cb['K'].to(device, non_blocking=True),
+            'masks_t': cb['masks_t'].to(device, non_blocking=True),
+        }
 
     def _medw_aggregate_per_seq(seq_preds, seq_gts):
         """MEDW aggregate predictions per-sequence, compute RPY errors vs GT.
@@ -1565,6 +1616,7 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         vis_interval = max(1, len(_cached_batches) // max(save_vis_samples, 1)) if save_vis_samples > 0 else 0
         with torch.no_grad():
             for batch_idx, cb in enumerate(_cached_batches):
+                cb = _batch_to_device(cb)
                 gt_T_np = cb['gt_T_np']
                 B = cb['B']
 
@@ -1589,14 +1641,13 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                 original_init_T_np = init_T_np.copy()
                 init_T_t = torch.from_numpy(init_T_np.astype(np.float32)).float().to(device)
 
-                if use_dp:
-                    T_pred = active_model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
-                                   init_T_t, cb['post_T'], cb['K'],
-                                   masks=cb['masks_t'], out_init_loss=False)
-                else:
-                    T_pred, _, _ = active_model(cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
-                                         init_T_t, cb['post_T'], cb['K'],
-                                         masks=cb['masks'], out_init_loss=False)
+                _n_iter = (_cf_iter_steps if (fixed_inject_rpy is not None
+                                              or (not use_identity and angle_range > 0))
+                           else 0)
+                T_pred = _gdiag_model_forward(
+                    active_model, cb['resize_imgs'], cb['pcs_t'], cb['gt_T_t'],
+                    init_T_t, cb['post_T'], cb['K'],
+                    cb['masks'], cb['masks_t'], use_dp, n_iter_steps=_n_iter)
                 T_pred_np = T_pred.detach().cpu().numpy()
 
                 for i in range(B):
@@ -1710,143 +1761,163 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         ("mag-1.0",    [1.0, 1.0, 1.0]),
         ("neg-inject", [-inject_deg, -inject_deg, -inject_deg]),
     ]
-    _MAX_CONFIGS_PER_PASS = getattr(args, 'gdiag_configs_per_pass', 3)
-    gpu_mem = -1
-    try:
-        gpu_mem = torch.cuda.get_device_properties(device).total_memory / (1024**3)
-        if gpu_mem < 48:
-            _MAX_CONFIGS_PER_PASS = min(_MAX_CONFIGS_PER_PASS, 2)
-        if gpu_mem < 32:
-            _MAX_CONFIGS_PER_PASS = 1
-    except Exception:
-        pass
-    n_configs = len(_batched_configs)
-    n_sub = (n_configs + _MAX_CONFIGS_PER_PASS - 1) // _MAX_CONFIGS_PER_PASS
-    print(f"\n   [3/3] Batched: {n_configs} tests in {n_sub} sub-pass(es) "
-          f"(max {_MAX_CONFIGS_PER_PASS} per pass{f', GPU ~{gpu_mem:.0f}GB' if gpu_mem > 0 else ''})...")
-    t0 = time.time()
-    _batched_seq_preds = {cfg[0]: {} for cfg in _batched_configs}
-    _batched_seq_gts = {cfg[0]: {} for cfg in _batched_configs}
-    _batched_seq_inits = {cfg[0]: {} for cfg in _batched_configs}
-    _batched_cumulative_offset = 0
-    with torch.no_grad():
-        for batch_idx, cb in enumerate(_cached_batches):
-            gt_T_np = cb['gt_T_np']
-            B = cb['B']
-            _sub_idx = 0
-            while _sub_idx < n_configs:
-                sub_cfgs = _batched_configs[_sub_idx:_sub_idx + _MAX_CONFIGS_PER_PASS]
-                n_sub_c = len(sub_cfgs)
-                stacked_imgs = cb['resize_imgs'].repeat(n_sub_c, 1, 1, 1)
-                stacked_pcs = cb['pcs_t'].repeat(n_sub_c, 1, 1)
-                stacked_gt = cb['gt_T_t'].repeat(n_sub_c, 1, 1)
-                stacked_post = cb['post_T'].repeat(n_sub_c, 1, 1)
-                stacked_K = cb['K'].repeat(n_sub_c, 1, 1)
-                if use_dp:
-                    stacked_masks = cb['masks_t'].repeat(n_sub_c, 1, 1)
-                else:
-                    masks_list = cb['masks']
-                    stacked_masks_raw = masks_list * n_sub_c
-
-                all_init_T = []
-                for cfg_label, rpy in sub_cfgs:
-                    rpy_rad = np.deg2rad(rpy)
-                    dR = _ScipyRot.from_euler('xyz', rpy_rad).as_matrix().astype(np.float32)
-                    init_np = gt_T_np.copy()
-                    for bi in range(B):
-                        init_np[bi, :3, :3] = gt_T_np[bi, :3, :3] @ dR
-                    all_init_T.append(init_np)
-                stacked_init_np = np.concatenate(all_init_T, axis=0)
-                stacked_init_t = torch.from_numpy(stacked_init_np).float().to(device)
-
-                batched_model = _pick_model(for_inject=True)
-                try:
+    _cfg_results = {}
+    if _cf_iter_steps > 0:
+        print(f"\n   [3/3] Sequential shortcut tests (iterative n={_cf_iter_steps}, "
+              f"no batch stacking)...")
+        t0 = time.time()
+        for cfg_label, rpy in _batched_configs:
+            _cfg_results[cfg_label] = _run_single_pass(
+                fixed_inject_rpy=rpy, label=cfg_label, for_inject=True)
+            inj_s = _cfg_results[cfg_label].get('inject', {})
+            print(f"     {cfg_label}: residual={inj_s.get('mean_residual', -1):.4f}° "
+                  f"recovery={inj_s.get('mean_recovery_pct', -1):.1f}%")
+        print(f"   Sequential shortcut tests: {time.time()-t0:.1f}s total")
+    else:
+        # Batched: run configs in sub-passes by stacking along batch dim
+        _MAX_CONFIGS_PER_PASS = getattr(args, 'gdiag_configs_per_pass', 3)
+        gpu_mem = -1
+        try:
+            gpu_mem = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+            if gpu_mem < 48:
+                _MAX_CONFIGS_PER_PASS = min(_MAX_CONFIGS_PER_PASS, 2)
+            if gpu_mem < 32:
+                _MAX_CONFIGS_PER_PASS = 1
+        except Exception:
+            pass
+        n_configs = len(_batched_configs)
+        n_sub = (n_configs + _MAX_CONFIGS_PER_PASS - 1) // _MAX_CONFIGS_PER_PASS
+        print(f"\n   [3/3] Batched: {n_configs} tests in {n_sub} sub-pass(es) "
+              f"(max {_MAX_CONFIGS_PER_PASS} per pass"
+              f"{f', GPU ~{gpu_mem:.0f}GB' if gpu_mem > 0 else ''})...")
+        t0 = time.time()
+        _batched_seq_preds = {cfg[0]: {} for cfg in _batched_configs}
+        _batched_seq_gts = {cfg[0]: {} for cfg in _batched_configs}
+        _batched_seq_inits = {cfg[0]: {} for cfg in _batched_configs}
+        _batched_cumulative_offset = 0
+        with torch.no_grad():
+            for batch_idx, cb in enumerate(_cached_batches):
+                cb_dev = _batch_to_device(cb)
+                gt_T_np = cb_dev['gt_T_np']
+                B = cb_dev['B']
+                _sub_idx = 0
+                while _sub_idx < n_configs:
+                    sub_cfgs = _batched_configs[_sub_idx:_sub_idx + _MAX_CONFIGS_PER_PASS]
+                    n_sub_c = len(sub_cfgs)
+                    stacked_imgs = cb_dev['resize_imgs'].repeat(n_sub_c, 1, 1, 1)
+                    stacked_pcs = cb_dev['pcs_t'].repeat(n_sub_c, 1, 1)
+                    stacked_gt = cb_dev['gt_T_t'].repeat(n_sub_c, 1, 1)
+                    stacked_post = cb_dev['post_T'].repeat(n_sub_c, 1, 1)
+                    stacked_K = cb_dev['K'].repeat(n_sub_c, 1, 1)
                     if use_dp:
-                        T_pred_all = batched_model(stacked_imgs, stacked_pcs, stacked_gt,
-                                           stacked_init_t, stacked_post, stacked_K,
-                                           masks=stacked_masks, out_init_loss=False)
+                        stacked_masks = cb_dev['masks_t'].repeat(n_sub_c, 1, 1)
                     else:
-                        T_pred_all, _, _ = batched_model(stacked_imgs, stacked_pcs, stacked_gt,
-                                                 stacked_init_t, stacked_post, stacked_K,
-                                                 masks=stacked_masks_raw, out_init_loss=False)
-                except RuntimeError as _oom_e:
-                    if 'out of memory' in str(_oom_e).lower() and n_sub_c > 1:
-                        del stacked_imgs, stacked_pcs, stacked_gt, stacked_post, stacked_K, stacked_init_t
+                        masks_list = cb_dev['masks']
+                        stacked_masks_raw = masks_list * n_sub_c
+
+                    all_init_T = []
+                    for cfg_label, rpy in sub_cfgs:
+                        rpy_rad = np.deg2rad(rpy)
+                        dR = _ScipyRot.from_euler('xyz', rpy_rad).as_matrix().astype(np.float32)
+                        init_np = gt_T_np.copy()
+                        for bi in range(B):
+                            init_np[bi, :3, :3] = gt_T_np[bi, :3, :3] @ dR
+                        all_init_T.append(init_np)
+                    stacked_init_np = np.concatenate(all_init_T, axis=0)
+                    stacked_init_t = torch.from_numpy(stacked_init_np).float().to(device)
+
+                    batched_model = _pick_model(for_inject=True)
+                    try:
                         if use_dp:
-                            del stacked_masks
-                        torch.cuda.empty_cache()
-                        _MAX_CONFIGS_PER_PASS = max(1, n_sub_c - 1)
-                        print(f"   [OOM] Reducing configs per pass to {_MAX_CONFIGS_PER_PASS}, retrying...")
-                        continue
-                    raise
-                T_pred_all_np = T_pred_all.detach().cpu().numpy()
-                del stacked_imgs, stacked_pcs, stacked_gt, stacked_post, stacked_K, stacked_init_t, T_pred_all
-                torch.cuda.empty_cache()
+                            T_pred_all = batched_model(stacked_imgs, stacked_pcs, stacked_gt,
+                                               stacked_init_t, stacked_post, stacked_K,
+                                               masks=stacked_masks, out_init_loss=False)
+                        else:
+                            T_pred_all, _, _ = batched_model(stacked_imgs, stacked_pcs, stacked_gt,
+                                                     stacked_init_t, stacked_post, stacked_K,
+                                                     masks=stacked_masks_raw, out_init_loss=False)
+                    except RuntimeError as _oom_e:
+                        if 'out of memory' in str(_oom_e).lower() and n_sub_c > 1:
+                            del stacked_imgs, stacked_pcs, stacked_gt, stacked_post, stacked_K, stacked_init_t
+                            if use_dp:
+                                del stacked_masks
+                            torch.cuda.empty_cache()
+                            _MAX_CONFIGS_PER_PASS = max(1, n_sub_c - 1)
+                            print(f"   [OOM] Reducing configs per pass to {_MAX_CONFIGS_PER_PASS}, retrying...")
+                            continue
+                        raise
+                    T_pred_all_np = T_pred_all.detach().cpu().numpy()
+                    del stacked_imgs, stacked_pcs, stacked_gt, stacked_post, stacked_K, stacked_init_t, T_pred_all
+                    torch.cuda.empty_cache()
 
-                for ci, (cfg_label, rpy) in enumerate(sub_cfgs):
-                    cfg_pred = T_pred_all_np[ci*B:(ci+1)*B]
-                    cfg_init = stacked_init_np[ci*B:(ci+1)*B]
-                    for i in range(B):
-                        sample_idx = _batched_cumulative_offset + i
-                        seq_id = _eval_idx_to_seq.get(sample_idx, 'unk')
-                        _batched_seq_preds[cfg_label].setdefault(seq_id, []).append(cfg_pred[i])
-                        _batched_seq_gts[cfg_label].setdefault(seq_id, []).append(gt_T_np[i])
-                        _batched_seq_inits[cfg_label].setdefault(seq_id, []).append(cfg_init[i])
-                _sub_idx += n_sub_c
-            _batched_cumulative_offset += B
+                    for ci, (cfg_label, rpy) in enumerate(sub_cfgs):
+                        cfg_pred = T_pred_all_np[ci*B:(ci+1)*B]
+                        cfg_init = stacked_init_np[ci*B:(ci+1)*B]
+                        for i in range(B):
+                            sample_idx = _batched_cumulative_offset + i
+                            seq_id = _eval_idx_to_seq.get(sample_idx, 'unk')
+                            _batched_seq_preds[cfg_label].setdefault(seq_id, []).append(cfg_pred[i])
+                            _batched_seq_gts[cfg_label].setdefault(seq_id, []).append(gt_T_np[i])
+                            _batched_seq_inits[cfg_label].setdefault(seq_id, []).append(cfg_init[i])
+                    _sub_idx += n_sub_c
+                _batched_cumulative_offset += B
 
-    def _assemble_result(cfg_label):
-        """MEDW-aggregate per-sequence predictions, then compute errors vs GT."""
-        sp = _batched_seq_preds[cfg_label]
-        sg = _batched_seq_gts[cfg_label]
-        si = _batched_seq_inits[cfg_label]
-        agg = _medw_aggregate_per_seq(sp, sg)
-        n_total = sum(len(v) for v in sp.values())
-        r = {
-            'n_samples': n_total,
-            'n_seqs': agg['n_seqs'],
-            'rot_mean': agg['rot_mean'],
-            'rot_std': agg.get('rot_std', 0),
-            'roll_mean': agg['roll_mean'],
-            'pitch_mean': agg['pitch_mean'],
-            'yaw_mean': agg['yaw_mean'],
-            'max_rpy': agg['max_rpy'],
-            'roll_signed_mean': agg.get('roll_signed_mean', 0),
-            'pitch_signed_mean': agg.get('pitch_signed_mean', 0),
-            'yaw_signed_mean': agg.get('yaw_signed_mean', 0),
-        }
-        if agg.get('per_seq'):
-            r['per_seq'] = agg['per_seq']
-        if si:
-            inj_agg = _medw_aggregate_per_seq(si, sg)
-            all_inj, all_res, all_rec = [], [], []
-            all_roll_res, all_pitch_res, all_yaw_res = [], [], []
-            for sid in sorted(set(agg.get('per_seq', {}).keys()) & set(inj_agg.get('per_seq', {}).keys())):
-                injected = inj_agg['per_seq'][sid]['rot']
-                residual = agg['per_seq'][sid]['rot']
-                recovery = (injected - residual) / injected * 100 if injected > 1e-6 else 100.0
-                all_inj.append(injected)
-                all_res.append(residual)
-                all_rec.append(recovery)
-                all_roll_res.append(agg['per_seq'][sid]['roll'])
-                all_pitch_res.append(agg['per_seq'][sid]['pitch'])
-                all_yaw_res.append(agg['per_seq'][sid]['yaw'])
-            if all_inj:
-                r['inject'] = {
-                    'mean_injected': float(np.mean(all_inj)),
-                    'mean_residual': float(np.mean(all_res)),
-                    'mean_recovery_pct': float(np.mean(all_rec)),
-                    'median_recovery_pct': float(np.median(all_rec)),
-                    'roll_residual': float(np.mean(all_roll_res)),
-                    'pitch_residual': float(np.mean(all_pitch_res)),
-                    'yaw_residual': float(np.mean(all_yaw_res)),
-                }
-        return r
+        def _assemble_result(cfg_label):
+            """MEDW-aggregate per-sequence predictions, then compute errors vs GT."""
+            sp = _batched_seq_preds[cfg_label]
+            sg = _batched_seq_gts[cfg_label]
+            si = _batched_seq_inits[cfg_label]
+            agg = _medw_aggregate_per_seq(sp, sg)
+            n_total = sum(len(v) for v in sp.values())
+            r = {
+                'n_samples': n_total,
+                'n_seqs': agg['n_seqs'],
+                'rot_mean': agg['rot_mean'],
+                'rot_std': agg.get('rot_std', 0),
+                'roll_mean': agg['roll_mean'],
+                'pitch_mean': agg['pitch_mean'],
+                'yaw_mean': agg['yaw_mean'],
+                'max_rpy': agg['max_rpy'],
+                'roll_signed_mean': agg.get('roll_signed_mean', 0),
+                'pitch_signed_mean': agg.get('pitch_signed_mean', 0),
+                'yaw_signed_mean': agg.get('yaw_signed_mean', 0),
+            }
+            if agg.get('per_seq'):
+                r['per_seq'] = agg['per_seq']
+            if si:
+                inj_agg = _medw_aggregate_per_seq(si, sg)
+                all_inj, all_res, all_rec = [], [], []
+                all_roll_res, all_pitch_res, all_yaw_res = [], [], []
+                for sid in sorted(set(agg.get('per_seq', {}).keys()) & set(inj_agg.get('per_seq', {}).keys())):
+                    injected = inj_agg['per_seq'][sid]['rot']
+                    residual = agg['per_seq'][sid]['rot']
+                    recovery = (injected - residual) / injected * 100 if injected > 1e-6 else 100.0
+                    all_inj.append(injected)
+                    all_res.append(residual)
+                    all_rec.append(recovery)
+                    all_roll_res.append(agg['per_seq'][sid]['roll'])
+                    all_pitch_res.append(agg['per_seq'][sid]['pitch'])
+                    all_yaw_res.append(agg['per_seq'][sid]['yaw'])
+                if all_inj:
+                    r['inject'] = {
+                        'mean_injected': float(np.mean(all_inj)),
+                        'mean_residual': float(np.mean(all_res)),
+                        'mean_recovery_pct': float(np.mean(all_rec)),
+                        'median_recovery_pct': float(np.median(all_rec)),
+                        'roll_residual': float(np.mean(all_roll_res)),
+                        'pitch_residual': float(np.mean(all_pitch_res)),
+                        'yaw_residual': float(np.mean(all_yaw_res)),
+                    }
+            return r
+
+        for cfg_label, _ in _batched_configs:
+            _cfg_results[cfg_label] = _assemble_result(cfg_label)
+        print(f"   Batched all-in-one: {time.time()-t0:.1f}s total")
 
     shortcut_results = {}
     axis_key_map = {"Roll": "roll_residual", "Pitch": "pitch_residual", "Yaw": "yaw_residual"}
     for axis_name, cfg_label in [("Roll", "sc-R"), ("Pitch", "sc-P"), ("Yaw", "sc-Y")]:
-        res = _assemble_result(cfg_label)
+        res = _cfg_results[cfg_label]
         sc_inj = res.get('inject', {})
         axis_residual = sc_inj.get(axis_key_map[axis_name], -1)
         axis_recovery = ((inject_deg - axis_residual) / inject_deg * 100
@@ -1867,7 +1938,7 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         'recovery_pct': fi_inj.get('mean_recovery_pct', -1),
     }
     for mag, cfg_label in [(0.5, "mag-0.5"), (1.0, "mag-1.0")]:
-        res = _assemble_result(cfg_label)
+        res = _cfg_results[cfg_label]
         mg_inj = res.get('inject', {})
         multi_mag[str(mag)] = {
             'rot_mean': res['rot_mean'],
@@ -1878,11 +1949,10 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
               f"recovery={mg_inj.get('mean_recovery_pct', -1):.1f}%")
     results['multi_magnitude'] = multi_mag
 
-    results['neg_inject'] = _assemble_result("neg-inject")
+    results['neg_inject'] = _cfg_results["neg-inject"]
     neg_inj = results['neg_inject'].get('inject', {})
     print(f"     Neg-inject: residual={neg_inj.get('mean_residual', -1):.4f}° "
           f"recovery={neg_inj.get('mean_recovery_pct', -1):.1f}%")
-    print(f"   Batched all-in-one: {time.time()-t0:.1f}s total (3 shortcut + 2 multimag + neg)")
 
     # Cross-axis leakage: when injecting one axis, do other axes leak?
     _zd_rpy_for_leak = [results['zero_drift']['roll_mean'],
@@ -1919,17 +1989,12 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         for mag_s, cfg_label in [('0.5', 'mag-0.5'), ('1.0', 'mag-1.0'),
                                   (str(inject_deg), None)]:
             if cfg_label:
-                src = _batched_seq_preds.get(cfg_label, {})
+                r = _cfg_results.get(cfg_label, {})
             else:
-                src = None
-            if cfg_label and src:
-                r = _assemble_result(cfg_label)
+                r = results['fixed_inject']
+            if r:
                 signed_preds.append(r.get(f'{axis}_signed_mean',
                                           r.get(f'{axis}_mean', signed_zd)))
-            elif cfg_label is None:
-                signed_preds.append(results['fixed_inject'].get(
-                    f'{axis}_signed_mean',
-                    results['fixed_inject'].get(f'{axis}_mean', signed_zd)))
             magnitudes.append(float(mag_s))
         if len(signed_preds) >= 2:
             pred_range = max(signed_preds) - min(signed_preds)
@@ -2290,9 +2355,23 @@ def _axis_angle_to_rotation(aa):
     return ScipyRot.from_rotvec(aa).as_matrix()
 
 
+def _aa_list_from_rotations(R_list):
+    """Stack rotations into (N, 3) axis-angle array (handles N=1)."""
+    if not R_list:
+        return np.zeros((0, 3), dtype=np.float64)
+    aa_list = np.asarray([_rotation_to_axis_angle(R) for R in R_list], dtype=np.float64)
+    if aa_list.ndim == 1:
+        aa_list = aa_list.reshape(1, -1)
+    return aa_list
+
+
 def _robust_median_rotation(R_list):
     """Median-based robust rotation estimation via axis-angle space."""
-    aa_list = np.array([_rotation_to_axis_angle(R) for R in R_list])
+    aa_list = _aa_list_from_rotations(R_list)
+    if len(aa_list) == 0:
+        return np.eye(3)
+    if len(aa_list) == 1:
+        return _axis_angle_to_rotation(aa_list[0])
     aa_median = np.median(aa_list, axis=0)
     return _axis_angle_to_rotation(aa_median)
 
@@ -2300,8 +2379,12 @@ def _robust_median_rotation(R_list):
 def _trimmed_mean_rotation(R_list, trim_pct=0.1):
     """Trimmed mean in axis-angle space: drop top/bottom trim_pct outliers
     per axis, then average and project back to SO(3)."""
-    aa_list = np.array([_rotation_to_axis_angle(R) for R in R_list])
+    aa_list = _aa_list_from_rotations(R_list)
     n = len(aa_list)
+    if n == 0:
+        return np.eye(3)
+    if n == 1:
+        return _axis_angle_to_rotation(aa_list[0])
     k = max(1, int(n * trim_pct))
     trimmed = np.zeros(3)
     for ax in range(3):
@@ -4590,6 +4673,11 @@ def main():
                        help="Injection magnitude for generalization_diag fixed-inject test (default: 2.0°)")
     parser.add_argument("--gdiag_max_batches", type=int, default=0,
                        help="Max batches for generalization_diag sub-tests (0=same as main eval)")
+    parser.add_argument("--gdiag_only", action='store_true', default=False,
+                       help="Skip main evaluation; run generalization_diag only (requires existing output_dir)")
+    parser.add_argument("--cf_bev_r_iter_steps", type=int, default=0,
+                       help="CF-BEV-R: iterative_inference steps for gdiag inject/shortcut tests "
+                            "(0=single-pass, 3=deploy-matched; zero-drift always single-pass)")
     parser.add_argument("--native_cross_iter_steps", type=int, default=0,
                        help="V36 native_cross: iterative_inference steps at eval (0=single, 3=recommended)")
     parser.add_argument("--exclude_seqs", type=str, default=None,

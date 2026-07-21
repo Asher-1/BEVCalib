@@ -1,0 +1,172 @@
+# C1 V66: DINOv2 + CF-BEV-R (解决 Domain Gap / Zero-Drift)
+#
+# 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080, FOV~98°)
+# 目标: 利用 DINOv2 的域无关特征减少 train→test Zero-Drift
+#
+# ========================================================================
+# 设计思路
+# ========================================================================
+#
+# 核心问题:
+#   V62-S1 在 test_data_c1 上存在 ~0.87° 的 Zero-Drift
+#   迭代推理 inject 3° 后 3次迭代仍有 0.93° 残差
+#   根本原因: SwinT 特征在 train/test 场景间存在 domain gap
+#
+# V66 策略: "DINOv2 域无关特征"
+#   - DINOv2-small 自监督预训练, 天然域不变
+#   - 保持 CF-BEV-R 架构 (RoCR + CrossAttention + PoseDecoder)
+#   - 冻结 DINOv2 backbone 大部分层, 仅微调最后 2 层
+#   - 1280×720 高分辨率 (DINOv2 patch=14 → 91×51=4641 tokens)
+#   - bs=12/卡, 有效batch=96, 8卡DDP
+#   - 无 Zero-Drift 约束 (先验证 DINOv2 是否减少 ZD)
+#
+# 预期: DINOv2 强泛化特征 + 高分辨率 → ZD < 0.2° → 迭代推理 Recovery > 95%
+# 显存: ~33GB/卡 (L20 46GB)
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v66_dinov2_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === DINOv2 Backbone ===
+    backbone_type: "dinov2"
+    backbone_variant: "dinov2-small"
+    freeze_backbone: 1
+    backbone_freeze_layers: "0:-2"
+    backbone_lr_scale: 0.01
+
+    # === 网络结构 (CF-BEV-R) ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    # DLA + Pitch Branch
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # === Similarity Loss (disabled: DINOv2 feat map size differs) ===
+    use_sim_loss: 0
+    sim_loss_weight: 0.0
+    sim_n_layers: 3
+
+    # === 损失函数 ===
+    axis_weights: "1.5,4.0,2.5"
+    weight_axis_rotation: 0.6
+    use_geodesic_loss: 1
+    head_dropout: 0.08
+    overcorrection_penalty: 0.3
+
+    # Correlation alignment
+    corr_alignment_weight: 0.3
+    corr_alignment_warmup: 10
+
+    # === 训练参数 ===
+    batch_size: 12
+    num_epochs: 300
+    learning_rate: 0.0004
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 100
+    cosine_Tmult: 2
+    warmup_epochs: 10
+
+    # DDP 多卡
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # 分辨率 (1280x720 → DINOv2 91×51=4641 tokens)
+    target_width: 1280
+    target_height: 720
+    xyz_only: 1
+
+    # 扰动
+    angle_range_deg: 5
+    trans_range: 0.0
+    multi_scale_perturb: "0.5:0.15,1.0:0.15,2.0:0.20,3.0:0.20,5.0:0.30"
+    symmetric_perturb: 1
+    per_axis_prob: 0.4
+    per_axis_weights: "1.0,1.5,1.5"
+    perturb_distribution: uniform
+    zero_perturbation_prob: 0.05
+    continuous_noise_max_deg: 3.0
+
+    # 数据增强
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_color_jitter: 0.15
+
+    # 数据
+    max_frames_per_seq: 500
+    max_pcd_points: 16384
+    foreground: true
+    pitch_vertical_bands: 3
+
+    # 评估 & checkpoint
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.90
+    dual_gate_medw_max: 0.08
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  - name: "c1_v66_dinov2_hires_S1"
+    description: "V66: DINOv2-Small 1280x720 bs12, 8卡DDP, 300ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v66_dinov2_hires_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 300
+      early_stopping_patience: 80
+      eval_epoches: 10

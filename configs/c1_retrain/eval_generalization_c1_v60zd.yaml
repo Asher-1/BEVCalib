@@ -1,0 +1,198 @@
+# C1 V60-ZD (ZeroDrift Fix) 泛化评估配置
+#
+# 评估 V60-ZD 三阶段模型在 test_data_c1 上的泛化性能
+# 对比原 V60 系列, 验证 ZeroDrift 修复效果
+#
+# 用法:
+#   python run_generalization_eval.py --config configs/c1_retrain/eval_generalization_c1_v60zd.yaml --parallel -1 --eval_max_frames_per_seq 400
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_v60zd"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 8
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+
+models:
+
+  # ========================================================================
+  # V60-ZD S1 (±5°, ZeroDrift Fix)
+  # ========================================================================
+
+  - label: "c1-v60zd-S1-best-val"
+    dir_name: "model_small_5deg_c1_v60_zerodrift_fix_S1"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S1: SimLoss1.5 + ZeroDrift-Loss (best-val)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v60_zerodrift_fix_S1"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S1: SimLoss1.5 + ZeroDrift-Loss (best-medw)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S1-last-ep200"
+    dir_name: "model_small_5deg_c1_v60_zerodrift_fix_S1"
+    ckpt: "ckpt_200.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S1: SimLoss1.5 + ZeroDrift-Loss (last epoch 200)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  # ========================================================================
+  # V60-ZD S2 (±3° finetune)
+  # ========================================================================
+
+  - label: "c1-v60zd-S2-best-val"
+    dir_name: "model_small_3deg_c1_v60_zerodrift_fix_S2"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S2-best-medw"
+    dir_name: "model_small_3deg_c1_v60_zerodrift_fix_S2"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S2: ±3° finetune (best-medw)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S2-best-dual"
+    dir_name: "model_small_3deg_c1_v60_zerodrift_fix_S2"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S2: ±3° finetune (best-dual)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S2-last-ep100"
+    dir_name: "model_small_3deg_c1_v60_zerodrift_fix_S2"
+    ckpt: "ckpt_100.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S2: ±3° finetune (last epoch 100)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  # ========================================================================
+  # V60-ZD S3 (±1.5° precision push)
+  # ========================================================================
+
+  - label: "c1-v60zd-S3-best-val"
+    dir_name: "model_small_1.5deg_c1_v60_zerodrift_fix_S3"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S3: ±1.5° precision push (best-val)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S3-best-medw"
+    dir_name: "model_small_1.5deg_c1_v60_zerodrift_fix_S3"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S3: ±1.5° precision push (best-medw)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S3-best-dual"
+    dir_name: "model_small_1.5deg_c1_v60_zerodrift_fix_S3"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S3: ±1.5° precision push (best-dual)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1
+
+  - label: "c1-v60zd-S3-last-ep60"
+    dir_name: "model_small_1.5deg_c1_v60_zerodrift_fix_S3"
+    ckpt: "ckpt_60.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V60-ZD S3: ±1.5° precision push (last epoch 60)"
+    pitch_vertical_bands: 3
+    use_sim_loss: 1
+    use_registry_token: 1
+    use_3d_pos_encoding: 1
+    use_fov_cls_loss: 1

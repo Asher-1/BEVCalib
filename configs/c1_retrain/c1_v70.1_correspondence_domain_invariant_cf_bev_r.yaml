@@ -1,0 +1,387 @@
+# V70.1: Correspondence-Grounded Domain Invariance (优化版)
+#
+# 部署目标: Genuine Recovery(iter3) >= 95% + ZD < 0.30° + MEDW400 < 0.25°
+# 训练验收: 每阶段 mini inject eval (gdiag 对齐) + 三 ckpt 门控
+#
+# V70.1 相对 V70 的关键改进:
+#   1. inject_recovery_loss + mini inject eval (替代纯 Jacobian 代理)
+#   2. gdiag 右乘 inject 约定 (_gdiag_inject_T)
+#   3. S1 起启用 GIN (避免 S3 冷启动)
+#   4. S4 拆分为 Recovery 保持 (S4R) + ZD 精修 (S4Z)
+#   5. pretrain_ckpt_fallback 链式容错
+#
+# V70.1 审核优化 (2026-07-16):
+#   6. Partial GIN (gin_channels=128): 128通道保扰动敏感性, 128通道控域不变性
+#   7. GIN Gate正则化 (gin_gate_reg_weight=0.01): 防止gate漂移杀Recovery或杀ZD
+#   8. S4R/S4Z参数方向修正: S4R降低overcorrection(0.30)+提高gate(0.6)推Recovery;
+#      S4Z提高overcorrection(0.45)+降低gate(0.3)推ZD
+#   9. magnitude_head: 预测矫正幅度, 区分大扰动vs小扰动
+#  10. S3 iterative_refine延迟到ep8: 让DANN+GIN先稳定
+#  11. S4R延长至30ep: 给95% Recovery更多训练时间
+#  12. S2显式zero_drift_loss_weight=0.0: 防止意外ZD约束
+#  13. S4R/S4Z添加seq_weight_overrides: 维持困难序列关注
+#  14. 放宽S1门控阈值: 避免warm-start阶段无法保存任何checkpoint
+#  15. inject_recovery_eval_batches: 2→4: 更稳定的recovery估计
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v70.1_correspondence_domain_invariant_cf_bev_r.yaml
+#   bash batch_train.sh --skip-pattern "S2|S3|S4" configs/c1_retrain/c1_v70.1_correspondence_domain_invariant_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 1
+    gin_init_gate: 0.7
+    # Partial GIN: 128/256 channels走GIN控制域不变性, 另128通道走LayerNorm保持扰动敏感性
+    gin_channels: 128
+    # Gate正则化: 防止gate漂移到极端值(0=全IN杀Recovery, 1=全bypass杀ZD)
+    gin_gate_reg_weight: 0.01
+    gin_gate_reg_target: 0.5
+
+    use_sim_loss: 1
+    sim_loss_weight: 3.5
+    sim_loss_warmup: 5
+    sim_n_layers: 3
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.5
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 1
+    coarse_refine_detach_epoch: 45
+
+    target_width: 960
+    target_height: 540
+    backbone_type: swin
+    backbone_lr_scale: 0.05
+    head_dropout: 0.1
+
+    batch_size: 8
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,2.5"
+    use_geodesic_loss: 1
+    corr_alignment_weight: 0.6
+    corr_alignment_warmup: 10
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+
+    multi_scale_perturb: "1.0:0.20,2.0:0.30,3.0:0.30,5.0:0.20"
+    symmetric_perturb: 1
+    per_axis_prob: 0.5
+    per_axis_weights: "1.0,1.5,1.5"
+    perturb_distribution: uniform
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 5.0
+
+    xyz_only: 1
+    max_pcd_points: 16384
+    max_frames_per_seq: 500
+    foreground: true
+    pitch_vertical_bands: 3
+    pose_aware_sampling: true
+
+    hard_negative_mining: false
+    augment_mount_jitter_prob: 0.0
+
+    # === Magnitude Head: 预测矫正幅度, 区分大扰动(需大矫正)和小扰动(需精修) ===
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.10
+
+    # === 显式禁用MGDA: 避免ZD-only task domination (V70 all_training_data线教训) ===
+    use_mgda: 0
+
+    # === gdiag 对齐 inject 监督 ===
+    inject_recovery_loss_weight: 0.4
+    inject_recovery_loss_start_epoch: 5
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.25
+
+    # === mini inject eval + 三 ckpt 门控 ===
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_inject_recovery_eval: 1
+    inject_recovery_eval_deg: 2.0
+    inject_recovery_eval_batches: 4
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 3
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    enable_recovery_gate_ckpt: 1
+    enable_zd_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.09
+    dual_gate_inject_recovery_min: 50.0
+    dual_gate_pred_indep_max: 0.55
+    dual_gate_zd_max: 0.30
+
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    save_ckpt_per_epoches: 10
+    seed: 42
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: Correspondence + Inject Core (80ep) =====
+  - name: "c1_v70.1_corr_domain_S1"
+    description: "V70.1-S1: coarse_refine+inject_loss+GIN0.7, 无iter/无DANN, V62 warm-start, 80ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70.1_corr_domain_S1"
+    params:
+      num_epochs: 80
+      warmup_epochs: 3
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 40
+      eval_epoches: 5
+      angle_range_deg: 5
+      eval_angle_range_deg: 5
+      trans_range: 0.0
+
+      iterative_refine: 0
+      overcorrection_penalty: 0.45
+      zero_perturbation_prob: 0.02
+      zero_drift_loss_weight: 0.0
+      augment_color_jitter: 0.15
+      domain_adversarial: 0
+      data_balance: 0
+
+      dual_gate_inject_recovery_min: 35.0
+      dual_gate_jacobian_min: 0.80
+      dual_gate_medw_max: 0.12
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v62_pure_recovery_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+      # V69-A 完成后可改:
+      # pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v69_corr_dual_A1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+
+  # ===== S2: OOD Jacobian + Trip Balance (50ep) =====
+  - name: "c1_v70.1_corr_domain_S2"
+    description: "V70.1-S2: data_balance+seq_weight+Jacobian课程+inject, S1 warm-start, 50ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70.1_corr_domain_S2"
+    params:
+      num_epochs: 50
+      warmup_epochs: 2
+      learning_rate: 4e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 25
+      cosine_Tmult: 2
+      early_stopping_patience: 30
+      eval_epoches: 5
+      angle_range_deg: 5
+      eval_angle_range_deg: 5
+      trans_range: 0.0
+
+      iterative_refine: 0
+      overcorrection_penalty: 0.40
+      inject_recovery_loss_weight: 0.35
+      zero_drift_loss_weight: 0.0
+      data_balance: 1
+      seq_weight_overrides: "03:1.35,07:1.35,00:1.25,06:1.25"
+      domain_adversarial: 0
+
+      jacobian_loss_weight: 0.2
+      jacobian_loss_start_epoch: 3
+      jacobian_loss_probe_deg: 2.0
+      jacobian_loss_interval: 4
+      jacobian_loss_progressive: true
+      jacobian_loss_probe_schedule: "epoch<30:3.0,epoch>=30:1.0"
+
+      dual_gate_inject_recovery_min: 50.0
+      dual_gate_jacobian_min: 0.85
+      dual_gate_medw_max: 0.09
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_recovery.pth"
+      pretrain_ckpt_fallback: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+
+  # ===== S3: Domain Invariant + Synthetic Iter (40ep) =====
+  - name: "c1_v70.1_corr_domain_S3"
+    description: "V70.1-S3: DANN+iter2 synthetic, gin_gate_reg→0.4, S2 warm-start, 40ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70.1_corr_domain_S3"
+    params:
+      num_epochs: 40
+      warmup_epochs: 2
+      learning_rate: 3e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 20
+      cosine_Tmult: 2
+      early_stopping_patience: 25
+      eval_epoches: 5
+      angle_range_deg: 5
+      eval_angle_range_deg: 5
+      trans_range: 0.0
+
+      gin_init_gate: 0.5
+      gin_gate_reg_target: 0.4
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.05
+      num_domains: 21
+      data_balance: 1
+      seq_weight_overrides: "03:1.35,07:1.35,00:1.25,06:1.25"
+
+      iterative_refine: 2
+      iterative_refine_weights: "0.3,0.7"
+      iterative_refine_start_epoch: 8
+      iterative_refine_use_synthetic_init: 1
+      iterative_refine_synthetic_residual_deg: "1.0,0.5"
+
+      overcorrection_penalty: 0.38
+      inject_recovery_loss_weight: 0.25
+      inject_recovery_dedicated_ratio: 0.20
+      zero_perturbation_prob: 0.06
+      zero_drift_loss_weight: 0.03
+      zero_drift_loss_start_epoch: 8
+      augment_color_jitter: 0.35
+      multi_scale_perturb: "0.5:0.15,1.0:0.20,2.0:0.25,3.0:0.25,5.0:0.15"
+
+      jacobian_loss_weight: 0.12
+      jacobian_loss_start_epoch: 5
+      jacobian_loss_probe_deg: 1.5
+      jacobian_loss_interval: 5
+
+      dual_gate_inject_recovery_min: 48.0
+      dual_gate_pred_indep_max: 0.50
+      dual_gate_jacobian_min: 0.84
+      dual_gate_medw_max: 0.08
+      dual_gate_zd_max: 0.32
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S2/all_training_data_c1_scratch/checkpoint/ckpt_best_recovery.pth"
+      pretrain_ckpt_fallback: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S2/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+
+  # ===== S4R: Recovery Preserve (30ep, 不伤 inject 能力) =====
+  - name: "c1_v70.1_corr_domain_S4R"
+    description: "V70.1-S4R: 保持Recovery+iter2, 无ZD loss, S3 recovery ckpt, 30ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70.1_corr_domain_S4R"
+    params:
+      num_epochs: 30
+      warmup_epochs: 1
+      learning_rate: 2e-5
+      lr_schedule: cosine
+      early_stopping_patience: 20
+      eval_epoches: 5
+      angle_range_deg: 5
+      eval_angle_range_deg: 5
+      trans_range: 0.0
+
+      gin_init_gate: 0.6
+      gin_gate_reg_target: 0.6
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.03
+      data_balance: 1
+      seq_weight_overrides: "03:1.25,07:1.25,00:1.15,06:1.15"
+
+      iterative_refine: 2
+      iterative_refine_weights: "0.3,0.7"
+      iterative_refine_start_epoch: 1
+      iterative_refine_use_synthetic_init: 1
+      iterative_refine_synthetic_residual_deg: "1.0,0.5"
+
+      overcorrection_penalty: 0.30
+      inject_recovery_loss_weight: 0.35
+      inject_recovery_dedicated_ratio: 0.25
+      zero_perturbation_prob: 0.04
+      zero_drift_loss_weight: 0.0
+      augment_color_jitter: 0.25
+
+      dual_gate_inject_recovery_min: 48.0
+      dual_gate_pred_indep_max: 0.48
+      dual_gate_jacobian_min: 0.84
+      dual_gate_medw_max: 0.09
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S3/all_training_data_c1_scratch/checkpoint/ckpt_best_recovery.pth"
+      pretrain_ckpt_fallback: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S3/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+
+  # ===== S4Z: ZD Polish Only (20ep, 独立 ZD ckpt) =====
+  - name: "c1_v70.1_corr_domain_S4Z"
+    description: "V70.1-S4Z: ZD精修专用, 低inject, S3 zd ckpt, 20ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70.1_corr_domain_S4Z"
+    params:
+      num_epochs: 20
+      warmup_epochs: 1
+      learning_rate: 1e-5
+      lr_schedule: cosine
+      early_stopping_patience: 15
+      eval_epoches: 5
+      angle_range_deg: 5
+      eval_angle_range_deg: 5
+      trans_range: 0.0
+
+      gin_init_gate: 0.3
+      gin_gate_reg_target: 0.3
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.02
+      data_balance: 1
+      seq_weight_overrides: "03:1.20,07:1.20,00:1.10,06:1.10"
+
+      iterative_refine: 2
+      iterative_refine_weights: "0.2,0.8"
+      iterative_refine_start_epoch: 1
+      iterative_refine_use_synthetic_init: 1
+      iterative_refine_synthetic_residual_deg: "0.5,0.3"
+
+      overcorrection_penalty: 0.45
+      inject_recovery_loss_weight: 0.10
+      inject_recovery_dedicated_ratio: 0.10
+      zero_perturbation_prob: 0.12
+      zero_drift_loss_weight: 0.15
+      zero_drift_loss_start_epoch: 2
+      augment_color_jitter: 0.30
+
+      dual_gate_inject_recovery_min: 35.0
+      dual_gate_zd_max: 0.26
+      dual_gate_jacobian_min: 0.80
+      dual_gate_medw_max: 0.08
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S3/all_training_data_c1_scratch/checkpoint/ckpt_best_zd.pth"
+      pretrain_ckpt_fallback: "logs/all_training_data_c1/model_small_5deg_c1_v70.1_corr_domain_S3/all_training_data_c1_scratch/checkpoint/ckpt_best_medw.pth"

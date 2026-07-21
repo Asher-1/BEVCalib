@@ -154,10 +154,14 @@
 set -e
 
 # Quote CLI values that start with '-' (e.g. augment_lidar_vertical_fov=-25,15)
+# Comma lists are safe in --flag=value form; only quote < > and other shell metacharacters.
 _quote_cli_val() {
     case "$1" in
-        -*|*[[:space:],]*)
+        *\'*)
             printf '%q' "$1"
+            ;;
+        -*|*'<'*|*'>'*|*'&'*|*'|'*|*';'*|*[[:space:]]*)
+            printf "'%s'" "$1"
             ;;
         *)
             printf '%s' "$1"
@@ -473,6 +477,8 @@ while [[ $# -gt 0 ]]; do
             SEED="$2"; shift 2 ;;
         --pretrain_ckpt)
             PRETRAIN_CKPT="$2"; shift 2 ;;
+        --pretrain_ckpt_fallback)
+            PRETRAIN_CKPT_FALLBACK="$2"; shift 2 ;;
         --resume_ckpt)
             RESUME_CKPT="$2"; shift 2 ;;
         --no_amp)
@@ -549,6 +555,24 @@ while [[ $# -gt 0 ]]; do
             DUAL_GATE_JACOBIAN_MIN="$2"; shift 2 ;;
         --dual_gate_medw_max)
             DUAL_GATE_MEDW_MAX="$2"; shift 2 ;;
+        --dual_gate_recovery_min)
+            DUAL_GATE_RECOVERY_MIN="$2"; shift 2 ;;
+        --dual_gate_zd_max)
+            DUAL_GATE_ZD_MAX="$2"; shift 2 ;;
+        --enable_recovery_gate_ckpt)
+            ENABLE_RECOVERY_GATE_CKPT="$2"; shift 2 ;;
+        --enable_zd_gate_ckpt)
+            ENABLE_ZD_GATE_CKPT="$2"; shift 2 ;;
+        --dual_gate_inject_recovery_min)
+            DUAL_GATE_INJECT_RECOVERY_MIN="$2"; shift 2 ;;
+        --dual_gate_pred_indep_max)
+            DUAL_GATE_PRED_INDEP_MAX="$2"; shift 2 ;;
+        --enable_inject_recovery_eval)
+            ENABLE_INJECT_RECOVERY_EVAL="$2"; shift 2 ;;
+        --inject_recovery_eval_deg)
+            INJECT_RECOVERY_EVAL_DEG="$2"; shift 2 ;;
+        --inject_recovery_eval_batches)
+            INJECT_RECOVERY_EVAL_BATCHES="$2"; shift 2 ;;
         --vis_samples)
             VIS_SAMPLES="$2"; shift 2 ;;
         --vis_points)
@@ -715,6 +739,14 @@ while [[ $# -gt 0 ]]; do
             TINIT_SENSITIVITY_WEIGHT="$2"; shift 2 ;;
         --iterative_refine)
             ITERATIVE_REFINE="$2"; shift 2 ;;
+        --iterative_refine_weight)
+            ITERATIVE_REFINE_WEIGHT="$2"; shift 2 ;;
+        --iterative_refine_start_epoch)
+            ITERATIVE_REFINE_START_EPOCH="$2"; shift 2 ;;
+        --iterative_refine_use_synthetic_init)
+            ITERATIVE_REFINE_USE_SYNTHETIC_INIT="$2"; shift 2 ;;
+        --iterative_refine_synthetic_residual_deg)
+            ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG="$2"; shift 2 ;;
         --native_cross)
             NATIVE_CROSS="$2"; shift 2 ;;
         --native_cross_pc_groups)
@@ -877,10 +909,15 @@ while [[ $# -gt 0 ]]; do
         *)
             if [[ "$1" == --* ]]; then
                 if [[ $# -ge 2 && "$2" != --* ]]; then
-                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1 $2"
+                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1 $(_quote_cli_val "$2")"
                     shift 2
                 elif [[ "$1" == *=* ]]; then
-                    PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    _pt_val="${1#*=}"
+                    if [[ "$_pt_val" == *'<'* || "$_pt_val" == *'>'* ]]; then
+                        PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS ${1%%=*}=$(_quote_cli_val "$_pt_val")"
+                    else
+                        PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
+                    fi
                     shift
                 else
                     PASSTHROUGH_ARGS="$PASSTHROUGH_ARGS $1"
@@ -1387,6 +1424,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
+    [ -n "$PRETRAIN_CKPT_FALLBACK" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt_fallback $PRETRAIN_CKPT_FALLBACK"
     [ -n "$RESUME_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --resume_ckpt $RESUME_CKPT"
     [ -n "$NO_AMP" ] && OPTIM_ARGS="$OPTIM_ARGS --no_amp $NO_AMP"
     [ -n "$AMP_BF16" ] && OPTIM_ARGS="$OPTIM_ARGS --amp_bf16 $AMP_BF16"
@@ -1437,6 +1475,15 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$ENABLE_DUAL_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_dual_gate_ckpt $ENABLE_DUAL_GATE_CKPT"
     [ -n "$DUAL_GATE_JACOBIAN_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_jacobian_min $DUAL_GATE_JACOBIAN_MIN"
     [ -n "$DUAL_GATE_MEDW_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_medw_max $DUAL_GATE_MEDW_MAX"
+    [ -n "$DUAL_GATE_RECOVERY_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_recovery_min $DUAL_GATE_RECOVERY_MIN"
+    [ -n "$DUAL_GATE_ZD_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_zd_max $DUAL_GATE_ZD_MAX"
+    [ -n "$ENABLE_RECOVERY_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_recovery_gate_ckpt $ENABLE_RECOVERY_GATE_CKPT"
+    [ -n "$ENABLE_ZD_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_zd_gate_ckpt $ENABLE_ZD_GATE_CKPT"
+    [ -n "$DUAL_GATE_INJECT_RECOVERY_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_inject_recovery_min $DUAL_GATE_INJECT_RECOVERY_MIN"
+    [ -n "$DUAL_GATE_PRED_INDEP_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_pred_indep_max $DUAL_GATE_PRED_INDEP_MAX"
+    [ -n "$ENABLE_INJECT_RECOVERY_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_inject_recovery_eval $ENABLE_INJECT_RECOVERY_EVAL"
+    [ -n "$INJECT_RECOVERY_EVAL_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_deg $INJECT_RECOVERY_EVAL_DEG"
+    [ -n "$INJECT_RECOVERY_EVAL_BATCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_batches $INJECT_RECOVERY_EVAL_BATCHES"
     [ -n "$DDP_AUTO_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_auto_scale $DDP_AUTO_SCALE"
     [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
     [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
@@ -1533,6 +1580,10 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$TINIT_QUERY_FILM" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_query_film $TINIT_QUERY_FILM"
     [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
     [ -n "$ITERATIVE_REFINE" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine $ITERATIVE_REFINE"
+    [ -n "$ITERATIVE_REFINE_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_weight $ITERATIVE_REFINE_WEIGHT"
+    [ -n "$ITERATIVE_REFINE_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_start_epoch $ITERATIVE_REFINE_START_EPOCH"
+    [ -n "$ITERATIVE_REFINE_USE_SYNTHETIC_INIT" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_use_synthetic_init $ITERATIVE_REFINE_USE_SYNTHETIC_INIT"
+    [ -n "$ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_synthetic_residual_deg $ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG"
     [ -n "$NATIVE_CROSS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross $NATIVE_CROSS"
     [ -n "$NATIVE_CROSS_PC_GROUPS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pc_groups $NATIVE_CROSS_PC_GROUPS"
     [ -n "$NATIVE_CROSS_N_HARMONIC" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_n_harmonic $NATIVE_CROSS_N_HARMONIC"
@@ -1691,6 +1742,7 @@ else
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
     [ -n "$PRETRAIN_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt $PRETRAIN_CKPT"
+    [ -n "$PRETRAIN_CKPT_FALLBACK" ] && OPTIM_ARGS="$OPTIM_ARGS --pretrain_ckpt_fallback $PRETRAIN_CKPT_FALLBACK"
     [ -n "$RESUME_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --resume_ckpt $RESUME_CKPT"
     [ -n "$NO_AMP" ] && OPTIM_ARGS="$OPTIM_ARGS --no_amp $NO_AMP"
     [ -n "$AMP_BF16" ] && OPTIM_ARGS="$OPTIM_ARGS --amp_bf16 $AMP_BF16"
@@ -1741,6 +1793,15 @@ else
     [ -n "$ENABLE_DUAL_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_dual_gate_ckpt $ENABLE_DUAL_GATE_CKPT"
     [ -n "$DUAL_GATE_JACOBIAN_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_jacobian_min $DUAL_GATE_JACOBIAN_MIN"
     [ -n "$DUAL_GATE_MEDW_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_medw_max $DUAL_GATE_MEDW_MAX"
+    [ -n "$DUAL_GATE_RECOVERY_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_recovery_min $DUAL_GATE_RECOVERY_MIN"
+    [ -n "$DUAL_GATE_ZD_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_zd_max $DUAL_GATE_ZD_MAX"
+    [ -n "$ENABLE_RECOVERY_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_recovery_gate_ckpt $ENABLE_RECOVERY_GATE_CKPT"
+    [ -n "$ENABLE_ZD_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_zd_gate_ckpt $ENABLE_ZD_GATE_CKPT"
+    [ -n "$DUAL_GATE_INJECT_RECOVERY_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_inject_recovery_min $DUAL_GATE_INJECT_RECOVERY_MIN"
+    [ -n "$DUAL_GATE_PRED_INDEP_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_pred_indep_max $DUAL_GATE_PRED_INDEP_MAX"
+    [ -n "$ENABLE_INJECT_RECOVERY_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_inject_recovery_eval $ENABLE_INJECT_RECOVERY_EVAL"
+    [ -n "$INJECT_RECOVERY_EVAL_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_deg $INJECT_RECOVERY_EVAL_DEG"
+    [ -n "$INJECT_RECOVERY_EVAL_BATCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_batches $INJECT_RECOVERY_EVAL_BATCHES"
     [ -n "$DDP_AUTO_SCALE" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_auto_scale $DDP_AUTO_SCALE"
     [ -n "$DDP_REFERENCE_GPUS" ] && OPTIM_ARGS="$OPTIM_ARGS --ddp_reference_gpus $DDP_REFERENCE_GPUS"
     [ -n "$MAX_SCALED_LR" ] && OPTIM_ARGS="$OPTIM_ARGS --max_scaled_lr $MAX_SCALED_LR"
@@ -1837,6 +1898,10 @@ else
     [ -n "$TINIT_QUERY_FILM" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_query_film $TINIT_QUERY_FILM"
     [ -n "$TINIT_SENSITIVITY_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --tinit_sensitivity_weight $TINIT_SENSITIVITY_WEIGHT"
     [ -n "$ITERATIVE_REFINE" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine $ITERATIVE_REFINE"
+    [ -n "$ITERATIVE_REFINE_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_weight $ITERATIVE_REFINE_WEIGHT"
+    [ -n "$ITERATIVE_REFINE_START_EPOCH" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_start_epoch $ITERATIVE_REFINE_START_EPOCH"
+    [ -n "$ITERATIVE_REFINE_USE_SYNTHETIC_INIT" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_use_synthetic_init $ITERATIVE_REFINE_USE_SYNTHETIC_INIT"
+    [ -n "$ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --iterative_refine_synthetic_residual_deg $ITERATIVE_REFINE_SYNTHETIC_RESIDUAL_DEG"
     [ -n "$NATIVE_CROSS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross $NATIVE_CROSS"
     [ -n "$NATIVE_CROSS_PC_GROUPS" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pc_groups $NATIVE_CROSS_PC_GROUPS"
     [ -n "$NATIVE_CROSS_N_HARMONIC" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_n_harmonic $NATIVE_CROSS_N_HARMONIC"

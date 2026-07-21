@@ -1,0 +1,157 @@
+# V62 Pure Recovery 泛化评估配置
+# 目标: 评估 V62 (无ZD约束, 纯Recovery) 的泛化性能
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_v62"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 8
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+
+models:
+
+  # ========================================================================
+  # V62 S1: ±5° Pure Recovery (960×540, sim=2.5, no ZD)
+  # ========================================================================
+
+  - label: "c1-v62-S1-best-val"
+    dir_name: "model_small_5deg_c1_v62_pure_recovery_S1"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S1: HiRes960+SimLoss2.5+No-ZD (best-val)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-S1-best-medw"
+    dir_name: "model_small_5deg_c1_v62_pure_recovery_S1"
+    ckpt: "ckpt_best_medw.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S1: Pure Recovery (best-medw)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-S1-best-dual"
+    dir_name: "model_small_5deg_c1_v62_pure_recovery_S1"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S1: Pure Recovery (best-dual)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  # ========================================================================
+  # V62 S2: ±3° Finetune (960×540)
+  # ========================================================================
+
+  - label: "c1-v62-S2-best-val"
+    dir_name: "model_small_3deg_c1_v62_pure_recovery_S2"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S2: ±3° finetune (best-val)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-S2-best-medw"
+    dir_name: "model_small_3deg_c1_v62_pure_recovery_S2"
+    ckpt: "ckpt_best_medw.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S2: ±3° finetune (best-medw)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-S2-best-dual"
+    dir_name: "model_small_3deg_c1_v62_pure_recovery_S2"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S2: ±3° finetune (best-dual)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  # ========================================================================
+  # V62 S3: ±1.5° Precision (960×540)
+  # ========================================================================
+
+  - label: "c1-v62-S3-best-val"
+    dir_name: "model_small_1.5deg_c1_v62_pure_recovery_S3"
+    ckpt: "ckpt_best_val.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S3: ±1.5° precision (best-val)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-S3-best-dual"
+    dir_name: "model_small_1.5deg_c1_v62_pure_recovery_S3"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S3: ±1.5° precision (best-dual, Jac=0.935+MEDW=0.074°)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  # ========================================================================
+  # V62 S4: ±0.5° Micro-Precision (960×540)
+  # ========================================================================
+
+  - label: "c1-v62-S4-best-val"
+    dir_name: "model_small_0.5deg_c1_v62_pure_recovery_S4"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S4: ±0.5° micro-precision (best-val)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-S4-best-dual"
+    dir_name: "model_small_0.5deg_c1_v62_pure_recovery_S4"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "C1 V62 S4: ±0.5° micro-precision (best-dual)"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540

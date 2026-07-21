@@ -35,6 +35,14 @@ from modules.pose_query_init import PoseQueryInit
 from modules.corr_transformer_decoder import CorrTransformerHead
 from losses.corr_alignment_loss import compute_projection_v42
 
+from modules.sim_cross_attention import SimCrossAttention
+from modules.position_encoding_3d import PositionEncoding3D
+from modules.fov_classifier import FoVClassifier
+from modules.coarse_rotation_head import CoarseRotationHead
+from losses.similarity_loss import (
+    build_gt_correspondence, similarity_loss, fov_classification_loss
+)
+
 
 class GatedInstanceNorm(nn.Module):
     """Gated Instance Normalization (V45) with optional Partial GIN (V48).
@@ -186,8 +194,32 @@ class CFBevRCalib(nn.Module):
         use_adir: bool = False,
         adir_steps: int = 2,
         adir_max_step_deg: float = 1.0,
+        # V60: Implicit Alignment parameters
+        use_sim_loss: bool = False,
+        sim_loss_weight: float = 1.0,
+        sim_loss_warmup: int = 10,
+        sim_loss_soft_radius: float = 1.0,
+        sim_n_layers: int = 2,
+        use_registry_token: bool = False,
+        use_fov_cls_loss: bool = False,
+        fov_cls_weight: float = 0.3,
+        use_3d_pos_encoding: bool = False,
+        pos_enc_depth_bins: int = 16,
+        use_coarse_refine: bool = False,
+        coarse_refine_detach_epoch: int = 30,
+        # Backbone selection
+        backbone_type: str = 'swin',
+        backbone_variant: str = 'dinov2-small',
+        freeze_backbone: bool = True,
+        backbone_freeze_layers: str = None,
+        backbone_weights: str = None,
     ):
         super().__init__()
+        self._backbone_type = backbone_type
+        self._backbone_variant = backbone_variant
+        self._freeze_backbone = freeze_backbone
+        self._backbone_freeze_layers = backbone_freeze_layers
+        self._backbone_weights = backbone_weights
         self.img_shape = img_shape
         self.feat_dim = feat_dim
         self.rotation_only = rotation_only
@@ -200,22 +232,49 @@ class CFBevRCalib(nn.Module):
         self.use_instance_norm = use_instance_norm
         self.use_gated_instance_norm = use_gated_instance_norm
 
-        img_H, img_W = img_shape
-        self.feat_h = img_H // 4
-        self.feat_w = img_W // 4
-        self.patch_size = 4.0
+        # V60 flags
+        self.use_sim_loss = use_sim_loss
+        self.sim_loss_weight = sim_loss_weight
+        self.sim_loss_warmup = sim_loss_warmup
+        self.sim_loss_soft_radius = sim_loss_soft_radius
+        self.use_registry_token = use_registry_token
+        self.use_fov_cls_loss = use_fov_cls_loss
+        self.fov_cls_weight = fov_cls_weight
+        self.use_3d_pos_encoding = use_3d_pos_encoding
+        self.use_coarse_refine = use_coarse_refine
+        self.coarse_refine_detach_epoch = coarse_refine_detach_epoch
 
-        fpn_in_channels = [192, 384, 768]
+        img_H, img_W = img_shape
+
         fpn_out_channels = 256
         feat_shape = (fpn_out_channels, img_H // 8, img_W // 8)
 
-        self.img_encoder = SwinT_tiny_Encoder(
-            output_indices=[1, 2, 3],
-            featureShape=feat_shape,
-            out_channels=fpn_out_channels,
-            FPN_in_channels=fpn_in_channels,
-            FPN_out_channels=fpn_out_channels,
-        )
+        backbone_type = getattr(self, '_backbone_type', 'swin')
+        if backbone_type == 'dinov2':
+            from img_branch.dinov2_encoder import DINOv2Encoder
+            self.img_encoder = DINOv2Encoder(
+                featureShape=feat_shape,
+                out_channels=fpn_out_channels,
+                variant=getattr(self, '_backbone_variant', 'dinov2-small'),
+                freeze_backbone=getattr(self, '_freeze_backbone', True),
+                freeze_layers=getattr(self, '_backbone_freeze_layers', None),
+                weights_path=getattr(self, '_backbone_weights', None),
+            )
+            self.feat_h = feat_shape[1]
+            self.feat_w = feat_shape[2]
+            self.patch_size = 8.0
+        else:
+            fpn_in_channels = [192, 384, 768]
+            self.img_encoder = SwinT_tiny_Encoder(
+                output_indices=[1, 2, 3],
+                featureShape=feat_shape,
+                out_channels=fpn_out_channels,
+                FPN_in_channels=fpn_in_channels,
+                FPN_out_channels=fpn_out_channels,
+            )
+            self.feat_h = img_H // 4
+            self.feat_w = img_W // 4
+            self.patch_size = 4.0
 
         self.img_proj = (
             nn.Conv2d(fpn_out_channels, feat_dim, 1)
@@ -223,11 +282,17 @@ class CFBevRCalib(nn.Module):
         )
 
         if use_dla:
-            self.dla = DLAAggregation(
-                in_channels_list=fpn_in_channels,
-                out_channels=feat_dim,
-            )
-            self.img_encoder._return_multiscale = True
+            if backbone_type == 'dinov2':
+                self.dla = DLAAggregation(
+                    in_channels_list=[fpn_out_channels] * 3,
+                    out_channels=feat_dim,
+                )
+            else:
+                self.dla = DLAAggregation(
+                    in_channels_list=fpn_in_channels,
+                    out_channels=feat_dim,
+                )
+                self.img_encoder._return_multiscale = True
         else:
             self.dla = DLAAggregation(
                 in_channels_list=[fpn_out_channels] * 3,
@@ -275,9 +340,49 @@ class CFBevRCalib(nn.Module):
                 img_feat_dim=in_dim, pc_feat_dim=feat_dim,
                 n_harmonic=6, heads=_heads, dim_head=_dim_head,
                 dropout=head_dropout, ffn_mult=4,
+                use_registry_token=use_registry_token,
             ))
         self.cross_attn_blocks = nn.ModuleList(cross_blocks)
         self._cross_out_dim = _attn_out
+
+        # V60: Similarity Cross-Attention (reverse 3D→2D for L_sim)
+        self.sim_cross_attn = None
+        if use_sim_loss:
+            self.sim_cross_attn = SimCrossAttention(
+                feat_dim=feat_dim,
+                n_layers=sim_n_layers,
+                n_heads=1,
+                use_registry_token=use_registry_token,
+                dropout=head_dropout,
+            )
+            print(f"[CFBevRCalib] V60 SimCrossAttention enabled "
+                  f"(layers={sim_n_layers}, registry={use_registry_token})")
+
+        # V60: 3D Position Encoding
+        self.pos_enc_3d = None
+        if use_3d_pos_encoding:
+            self.pos_enc_3d = PositionEncoding3D(
+                feat_dim=feat_dim,
+                depth_bins=pos_enc_depth_bins,
+                depth_min=1.0,
+                depth_max=100.0,
+                patch_size=4.0,
+            )
+            print(f"[CFBevRCalib] V60 3D Position Encoding enabled (bins={pos_enc_depth_bins})")
+
+        # V60: FOV Classifier
+        self.fov_classifier = None
+        if use_fov_cls_loss:
+            self.fov_classifier = FoVClassifier(feat_dim=feat_dim, hidden_dim=feat_dim // 2)
+            print("[CFBevRCalib] V60 FOV Classifier enabled")
+
+        # V60: Coarse Rotation Head (predict R_coarse from SimCrossAttn output)
+        self.coarse_rot_head = None
+        if use_coarse_refine and use_sim_loss:
+            self.coarse_rot_head = CoarseRotationHead(
+                feat_dim=feat_dim, hidden_dim=feat_dim, use_attention_pool=True
+            )
+            print("[CFBevRCalib] V60 Coarse Rotation Head enabled (coarse-to-fine)")
 
         cross_out_dim = 8 * 32  # heads * dim_head from CrossAttentionBlock
         self.cross_proj = nn.Linear(cross_out_dim, feat_dim) \
@@ -446,6 +551,25 @@ class CFBevRCalib(nn.Module):
             use_adir=getattr(args, 'use_adir', 0) > 0,
             adir_steps=getattr(args, 'adir_steps', 2),
             adir_max_step_deg=getattr(args, 'adir_max_step_deg', 1.0),
+            # V60
+            use_sim_loss=getattr(args, 'use_sim_loss', 0) > 0,
+            sim_loss_weight=getattr(args, 'sim_loss_weight', 1.0),
+            sim_loss_warmup=getattr(args, 'sim_loss_warmup', 10),
+            sim_loss_soft_radius=getattr(args, 'sim_loss_soft_radius', 1.0),
+            sim_n_layers=getattr(args, 'sim_n_layers', 2),
+            use_registry_token=getattr(args, 'use_registry_token', 0) > 0,
+            use_fov_cls_loss=getattr(args, 'use_fov_cls_loss', 0) > 0,
+            fov_cls_weight=getattr(args, 'fov_cls_weight', 0.3),
+            use_3d_pos_encoding=getattr(args, 'use_3d_pos_encoding', 0) > 0,
+            pos_enc_depth_bins=getattr(args, 'pos_enc_depth_bins', 16),
+            use_coarse_refine=getattr(args, 'use_coarse_refine', 0) > 0,
+            coarse_refine_detach_epoch=getattr(args, 'coarse_refine_detach_epoch', 30),
+            # Backbone selection
+            backbone_type=getattr(args, 'backbone_type', 'swin'),
+            backbone_variant=getattr(args, 'backbone_variant', 'dinov2-small'),
+            freeze_backbone=getattr(args, 'freeze_backbone', 1) > 0,
+            backbone_freeze_layers=getattr(args, 'backbone_freeze_layers', None),
+            backbone_weights=getattr(args, 'backbone_weights', None),
         )
 
     def get_param_groups(self, base_lr: float):
@@ -593,6 +717,60 @@ class CFBevRCalib(nn.Module):
                 loss_dict['total_loss'] + self.dp_recovery_quat_loss_weight * rec_loss
             )
 
+        # V60: Similarity Loss + FOV Classification Loss
+        _v60_needs_gt = (
+            (self.use_sim_loss and 'v60_sim_matrices' in result)
+            or (self.use_fov_cls_loss and 'v60_fov_logits' in result)
+        )
+        if _v60_needs_gt and gt_T is not None:
+            feat_h, feat_w = result['v60_feat_hw']
+            gt_corr, gt_fov = build_gt_correspondence(
+                xyz_groups=result.get('xyz_groups'),
+                T_gt=gt_T,
+                cam_intrinsic=cam_intrinsic,
+                feat_h=feat_h,
+                feat_w=feat_w,
+                patch_size=self.patch_size,
+                use_registry_token=self.use_registry_token,
+                soft_radius=self.sim_loss_soft_radius,
+            )
+
+            if self.use_sim_loss and 'v60_sim_matrices' in result:
+                sim_matrices = result['v60_sim_matrices']
+                sim_loss_val = similarity_loss(
+                    sim_matrices=sim_matrices,
+                    gt_corr=gt_corr,
+                    fov_mask=gt_fov,
+                )
+                loss_dict['v60_sim_loss'] = sim_loss_val.detach().item()
+                loss_dict['v60_fov_ratio'] = float(gt_fov.float().mean().item())
+                loss_dict['total_loss'] = (
+                    loss_dict['total_loss'] + self.sim_loss_weight * sim_loss_val
+                )
+
+            if self.use_fov_cls_loss and 'v60_fov_logits' in result:
+                fov_logits = result['v60_fov_logits']
+                fov_loss_val = fov_classification_loss(fov_logits, gt_fov)
+                loss_dict['v60_fov_cls_loss'] = fov_loss_val.detach().item()
+                loss_dict['total_loss'] = (
+                    loss_dict['total_loss'] + self.fov_cls_weight * fov_loss_val
+                )
+
+        # V60: Coarse Rotation Loss (geodesic distance between R_coarse and R_gt)
+        if self.use_coarse_refine and 'v60_R_coarse' in result and gt_T is not None:
+            R_coarse = result['v60_R_coarse']  # (B, 3, 3)
+            R_gt = gt_T[:, :3, :3]  # (B, 3, 3)
+            R_diff = torch.bmm(R_coarse.transpose(1, 2), R_gt)
+            trace_val = R_diff[:, 0, 0] + R_diff[:, 1, 1] + R_diff[:, 2, 2]
+            cos_angle = (trace_val - 1.0) / 2.0
+            cos_angle = cos_angle.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+            coarse_geo_loss = torch.acos(cos_angle).mean()
+            loss_dict['v60_coarse_rot_loss'] = coarse_geo_loss.detach().item()
+            coarse_weight = 0.3
+            loss_dict['total_loss'] = (
+                loss_dict['total_loss'] + coarse_weight * coarse_geo_loss
+            )
+
         init_loss = None
         return T_composed, init_loss, loss_dict
 
@@ -643,11 +821,20 @@ class CFBevRCalib(nn.Module):
         imgs_norm = (imgs_4d - self.img_mean.squeeze(1)) / self.img_std.squeeze(1)
 
         if self.use_dla:
-            fpn_out, raw_scales = self.img_encoder(imgs_norm.unsqueeze(1))
-            F_rgb = self.dla(raw_scales)
+            enc_out = self.img_encoder(imgs_norm.unsqueeze(1))
+            if isinstance(enc_out, tuple):
+                fpn_out, raw_scales = enc_out
+                F_rgb = self.dla(raw_scales)
+            else:
+                fpn_feat = enc_out[:, 0] if enc_out.dim() == 5 else enc_out
+                fpn_feat = self.img_proj(fpn_feat)
+                fpn_feat = F.interpolate(
+                    fpn_feat, size=(self.feat_h, self.feat_w),
+                    mode='bilinear', align_corners=False)
+                F_rgb = fpn_feat
         else:
             fpn_out = self.img_encoder(imgs_norm.unsqueeze(1))
-            fpn_feat = fpn_out[:, 0]
+            fpn_feat = fpn_out[:, 0] if fpn_out.dim() == 5 else fpn_out
             fpn_feat = self.img_proj(fpn_feat)
             F_rgb = F.interpolate(
                 fpn_feat, size=(self.feat_h, self.feat_w),
@@ -693,8 +880,59 @@ class CFBevRCalib(nn.Module):
 
         n_img = cur_feat_h * cur_feat_w
         n_pc = F_pc.shape[1]
-        attn_mask = valid_mask.unsqueeze(1).expand(-1, n_img, -1).float()
-        attn_mask = attn_mask.masked_fill(attn_mask == 0, float('-inf')).masked_fill(attn_mask == 1, 0.0)
+        attn_mask = valid_mask.unsqueeze(1).expand(-1, n_img, -1)
+
+        # V60: 3D Position Encoding for image features
+        img_pe_3d = None
+        if self.pos_enc_3d is not None:
+            img_pe_3d = self.pos_enc_3d(cur_feat_h, cur_feat_w, cam_intrinsic)
+
+        # V60: SimCrossAttention (3D→2D) for similarity loss
+        v60_sim_matrices = None
+        v60_fov_logits = None
+        v60_R_coarse = None
+        if self.sim_cross_attn is not None:
+            sim_img_feat = F_rgb_flat
+            if img_pe_3d is not None:
+                sim_img_feat = sim_img_feat + img_pe_3d
+            sim_pc_out, v60_sim_matrices = self.sim_cross_attn(
+                pc_features=F_pc,
+                img_features=sim_img_feat,
+                pc_pos_emb=None,
+                img_pos_emb=None,
+            )
+
+            # V60: Coarse Rotation Head (predict R_coarse from refined 3D features)
+            if self.coarse_rot_head is not None:
+                v60_R_coarse = self.coarse_rot_head(
+                    sim_pc_out, valid_mask, img_features=sim_img_feat
+                )
+
+                # Coarse-to-Fine: re-project points using corrected T_init
+                T_corrected = T_init.clone()
+                R_init = T_init[:, :3, :3]
+                T_corrected[:, :3, :3] = torch.bmm(v60_R_coarse, R_init)
+                uv_feat_c, _ = self._compute_uv_feat(xyz_groups, T_corrected, cam_intrinsic)
+                valid_mask_c = (
+                    (uv_feat_c[..., 0] >= 0) & (uv_feat_c[..., 0] < cur_feat_w)
+                    & (uv_feat_c[..., 1] >= 0) & (uv_feat_c[..., 1] < cur_feat_h)
+                )
+                all_invalid_c = ~valid_mask_c.any(dim=1)
+                if all_invalid_c.any():
+                    valid_mask_c = valid_mask_c.clone()
+                    valid_mask_c[all_invalid_c, 0] = True
+                # Update projection pos emb and masks for main cross-attention
+                uv_norm_c = torch.zeros_like(uv_feat_c)
+                uv_norm_c[..., 0] = 2.0 * uv_feat_c[..., 0] / max(cur_feat_w - 1, 1) - 1.0
+                uv_norm_c[..., 1] = 2.0 * uv_feat_c[..., 1] / max(cur_feat_h - 1, 1) - 1.0
+                proj_pos_emb = self.harmonic(uv_norm_c)
+                valid_mask = valid_mask_c
+                n_img = cur_feat_h * cur_feat_w
+                attn_mask = valid_mask.unsqueeze(1).expand(-1, n_img, -1)
+
+        # V60: FOV Classification
+        if self.fov_classifier is not None:
+            v60_fov_logits = self.fov_classifier(F_pc)
 
         F_cross = F_rgb_flat
         for block in self.cross_attn_blocks:
@@ -835,6 +1073,16 @@ class CFBevRCalib(nn.Module):
             output['dp_jacg_gain'] = dp_meta.get('jacg_gain')
             output['dp_delta_q_bias'] = dp_meta.get('delta_q_bias')
             output['dp_delta_q_rec'] = dp_meta.get('delta_q_rec')
+
+        # V60: pass through similarity and FOV info for loss computation
+        if v60_sim_matrices is not None:
+            output['v60_sim_matrices'] = v60_sim_matrices
+        if v60_fov_logits is not None:
+            output['v60_fov_logits'] = v60_fov_logits
+        if v60_R_coarse is not None:
+            output['v60_R_coarse'] = v60_R_coarse
+        output['v60_valid_mask'] = valid_mask
+        output['v60_feat_hw'] = (cur_feat_h, cur_feat_w)
 
         return output
 

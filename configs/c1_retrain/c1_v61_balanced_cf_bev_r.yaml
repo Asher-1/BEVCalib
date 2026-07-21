@@ -1,0 +1,279 @@
+# C1 V61: Balanced Recovery + Low Zero-Drift (综合改进方案)
+#
+# 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080, FOV~98°)
+# 目标: Recovery>70% + ZeroDrift<0.15° + BEST聚合<0.15° (RPY各轴<0.1°)
+#
+# ========================================================================
+# 问题诊断与改进思路
+# ========================================================================
+#
+# 1. V60-ZD 问题: ZeroDrift 从0.50°降到0.16° (好), 但Recovery从79%暴跌到13% (差)
+#    原因: zero_drift_loss_weight=2.0 过强, zero_perturbation_prob=0.35 过高
+#    → 模型被训练为"不管输入啥都输出接近零", 丧失了真正的矫正能力
+#
+# 2. 原V60 问题: Recovery=79% (好), 但ZeroDrift=0.50° (差)
+#    原因: 缺少零扰动约束, 模型总倾向于做一个固定方向的"矫正"
+#
+# 3. 论文核心启示 (IJCV 2026):
+#    - Similarity Loss 直接监督 cross-attention → 确保点-像素对应正确
+#    - Registry Token 吸收 FOV 外点的 attention → 防止错误匹配
+#    - 论文 Implicit Alignment 产生 T_coarse 后, BEV Alignment 做 T_fine
+#    - 两阶段 End-to-End: L = L_bev-align + L_implicit (Eq.16)
+#    - 关键: 论文模型在极大扰动(±360°)下仍有极高Recovery (RRE=0.32°)
+#    → 说明 sim_loss + 强监督 + 足够训练量 就能同时实现低偏差和高矫正
+#
+# 4. Hi-Res (960×540) 分析:
+#    - Per-frame: 0.789° vs 1.200° (640×360) → 单帧精度提升 34%
+#    - Recovery: 72% vs 50% → 提升 44%
+#    - BEST聚合: 0.497° vs 0.236° → 反而更差 (Hi-Res的ZD更大)
+#    - 结论: Hi-Res 提升单帧精度和Recovery, 但增大ZeroDrift
+#    → 在 V61 中使用 960×540 并配合适度 ZD 约束可同时获得两者
+#
+# ========================================================================
+# V61 综合改进方案
+# ========================================================================
+#
+# A. 适度 Zero-Drift 约束 (不过度抑制矫正能力):
+#    - zero_perturbation_prob: 0.20 (从0.35降回, 比原0.15略高)
+#    - zero_drift_loss_weight: 0.5 (从2.0大幅降低, 仅作"软约束")
+#    - zero_drift_loss_start_epoch: 20 (延后启动, 让模型先学会矫正)
+#    - 不使用 zero_drift_dedicated_ratio (避免过多零扰动batch)
+#
+# B. 强化 Similarity Loss (论文核心, 直接提升矫正精度):
+#    - sim_loss_weight: 2.0 (从1.0/1.5提升, 更强对应关系监督)
+#    - sim_n_layers: 3 (从2增加到3, 论文用3层decoder)
+#    - sim_loss_warmup: 5 (更快启动)
+#
+# C. 高分辨率输入 (960×540, 提升单帧精度+Recovery):
+#    - target_width: 960, target_height: 540
+#    - batch_size: 8 (受GPU显存限制)
+#    → 0.1° ≈ 0.73px, 可检测; 特征图 120×67
+#
+# D. Registry Token + FOV Cls 增强:
+#    - fov_cls_weight: 0.5 (从0.3提高)
+#    - 鱼眼FOV~98°下更多点在边缘, 需要更强的FOV分类
+#
+# E. 训练策略优化:
+#    - 增加训练epoch到250 (论文训练260k iterations)
+#    - overcorrection_penalty: 1.5 (适度降低, 避免抑制矫正)
+#    - continuous_noise_max_deg: 10.0 (降低噪声, 让模型看到更多"真实"输入)
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v61_balanced_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === 网络结构 (V48a 最优基座) ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    # DLA + Pitch Branch
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # === V61 核心: 强化 Similarity Loss (论文对齐) ===
+    use_sim_loss: 1
+    sim_loss_weight: 2.0
+    sim_loss_warmup: 5
+    sim_loss_soft_radius: 0.0
+    sim_n_layers: 3
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.5
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 0
+    coarse_refine_detach_epoch: 30
+
+    # === 高分辨率输入 (960×540) ===
+    target_width: 960
+    target_height: 540
+
+    # === 训练参数 ===
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.1
+
+    # 960×540 @ batch=8: ~21GB/卡 (安全)
+    batch_size: 8
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # Loss
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.0
+    consistency_loss_weight: 0.0
+    consistency_loss_start_epoch: 999
+
+    # Multi-Scale Perturbation
+    multi_scale_perturb: "0.5:0.10,1.0:0.10,2.0:0.10"
+    symmetric_perturb: 1
+
+    # === V61: 适度 Zero-Drift 约束 (不抑制Recovery) ===
+    zero_perturbation_prob: 0.20
+    zero_drift_loss_weight: 0.5
+    zero_drift_loss_start_epoch: 20
+    zero_drift_loss_ramp_epochs: 15
+    zero_drift_loss_weight_start: 0.1
+
+    # Anti-shortcut (适度, 不过度惩罚)
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 10.0
+    overcorrection_penalty: 1.5
+
+    # Augmentation
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    augment_color_jitter: 0.15
+
+    # Data loading
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    max_frames_per_seq: 1000
+    foreground: true
+    pitch_vertical_bands: 3
+
+    # Eval & save
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: ±5° V61 从头训练 =====
+  - name: "c1_v61_balanced_S1"
+    description: "C1 V61: HiRes960 + SimLoss2.0(3L) + mild-ZD + FOV0.5"
+    dataset: "all_training_data_c1"
+    version: "c1_v61_balanced_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 250
+      warmup_epochs: 10
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      early_stopping_patience: 60
+      eval_epoches: 10
+      rocr_detach_epochs: 999
+      pretrain_ckpt: null
+
+  # ===== S2: ±3° fine-tune =====
+  - name: "c1_v61_balanced_S2"
+    description: "C1 V61 S2: ±3° finetune, balanced recovery+ZD"
+    dataset: "all_training_data_c1"
+    version: "c1_v61_balanced_S2"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 120
+      warmup_epochs: 5
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 30
+      cosine_Tmult: 2
+      early_stopping_patience: 30
+      eval_epoches: 5
+      rocr_detach_epochs: 999
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 5.0
+      zero_perturbation_prob: 0.20
+      zero_drift_loss_weight: 0.8
+      zero_drift_loss_start_epoch: 5
+      zero_drift_loss_ramp_epochs: 10
+      zero_drift_loss_weight_start: 0.2
+      overcorrection_penalty: 2.0
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v61_balanced_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+
+  # ===== S3: ±1.5° precision push =====
+  - name: "c1_v61_balanced_S3"
+    description: "C1 V61 S3: ±1.5° ultra-precision push"
+    dataset: "all_training_data_c1"
+    version: "c1_v61_balanced_S3"
+    params:
+      angle_range_deg: 1.5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 80
+      warmup_epochs: 3
+      learning_rate: 2e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 25
+      eval_epoches: 3
+      rocr_detach_epochs: 999
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 3.0
+      zero_perturbation_prob: 0.20
+      zero_drift_loss_weight: 1.0
+      zero_drift_loss_start_epoch: 3
+      zero_drift_loss_ramp_epochs: 5
+      zero_drift_loss_weight_start: 0.3
+      overcorrection_penalty: 2.5
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_3deg_c1_v61_balanced_S2/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"

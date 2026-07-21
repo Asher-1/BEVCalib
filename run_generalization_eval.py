@@ -103,6 +103,31 @@ DEFAULT_MODELS = [
 DEFAULT_BEVCALIB_ROOT = "/mnt/drtraining/user/dahailu/code/BEVCalib"
 
 
+def _validate_eval_models(models, config_path=None):
+    """Reject YAML schemas that don't match run_generalization_eval.py expectations."""
+    _WRONG_KEYS = {"model_dir", "checkpoint", "tag", "name", "train_config"}
+    _REQUIRED = ("label", "dir_name", "ckpt")
+    _CANONICAL = "configs/c1_retrain/eval_generalization_c1_v62.yaml"
+    for i, m in enumerate(models or []):
+        if not isinstance(m, dict):
+            raise ValueError(f"models[{i}] must be a mapping")
+        wrong = sorted(_WRONG_KEYS & set(m.keys()))
+        if wrong:
+            src = f" ({config_path})" if config_path else ""
+            raise ValueError(
+                f"models[{i}] uses unsupported keys {wrong}{src}. "
+                f"run_generalization_eval.py requires {_REQUIRED}. "
+                f"Copy schema from {_CANONICAL} — do NOT use v63/v64 model_dir/checkpoint format."
+            )
+        missing = [k for k in _REQUIRED if k not in m]
+        if missing:
+            src = f" ({config_path})" if config_path else ""
+            raise ValueError(
+                f"models[{i}] missing required keys {missing}{src}. "
+                f"Use label/dir_name/ckpt per {_CANONICAL}."
+            )
+
+
 def load_config(config_path=None):
     """Load evaluation config from YAML file or use defaults."""
     if config_path and os.path.isfile(config_path):
@@ -128,12 +153,17 @@ def load_config(config_path=None):
             "EVAL_MAX_FRAMES_PER_SEQ": cfg.get("eval_params", {}).get("eval_max_frames_per_seq", None),
             "SHORTCUT_DIAG": cfg.get("eval_params", {}).get("shortcut_diag", False),
             "GENERALIZATION_DIAG": cfg.get("eval_params", {}).get("generalization_diag", False),
+            "CF_BEV_R_ITER_STEPS": cfg.get("eval_params", {}).get("cf_bev_r_iter_steps", 0),
             "EXCLUDE_SEQS": cfg.get("eval_params", {}).get("exclude_seqs", None),
             "PROJFUSION_ROOT": cfg.get("projfusion_root",
                                        "/mnt/drtraining/user/dahailu/code/ProjFusion"),
             "MODELS": cfg.get("models", DEFAULT_MODELS),
             "BAG_EVAL_DIR": cfg.get("bag_eval_dir", None),
         }
+        _validate_eval_models(config["MODELS"], config_path)
+        if cfg.get("eval_settings") or cfg.get("eval_config"):
+            print(f"[WARN] {config_path}: eval_settings/eval_config blocks are ignored by "
+                  f"run_generalization_eval.py — use top-level test_data + eval_params instead.")
         print(f"[Config] Loaded from: {config_path}")
         print(f"  Models: {len(config['MODELS'])}, Angle: {config['ANGLE_RANGE']}°, Trans: {config['TRANS_RANGE']}m")
         return config
@@ -203,6 +233,8 @@ def parse_script_args():
                         help="对每个模型运行泛化诊断 (zero-drift, inject, shortcut-resistance)")
     parser.add_argument("--gdiag_inject_deg", type=float, default=2.0,
                         help="泛化诊断注入角度 (default: 2.0°)")
+    parser.add_argument("--cf_bev_r_iter_steps", type=int, default=0,
+                        help="CF-BEV-R gdiag 迭代推理步数 (0=单步, 2=部署对齐)")
     parser.add_argument("--exclude_seqs", type=str, default=None,
                         help="逗号分隔的序列ID列表，评估时跳过这些序列 (例如: seq07,seq12)")
     parser.add_argument("--bag_eval_dir", type=str, default=None,
@@ -210,6 +242,8 @@ def parse_script_args():
                              "用于生成跨模型 BAG 泛化汇总排行报告")
     parser.add_argument("--report_only", action="store_true", default=False,
                         help="跳过评估，仅从已有结果重新生成报告和图表")
+    parser.add_argument("--gdiag_only", action="store_true", default=False,
+                        help="仅补跑泛化诊断 (需已有 extrinsics_and_errors.txt, 跳过主评估)")
     return parser.parse_args()
 
 
@@ -248,10 +282,26 @@ EVAL_MAX_FRAMES_PER_SEQ = _EVAL_MF_CLI if _EVAL_MF_CLI is not None else CFG.get(
 SHORTCUT_DIAG = getattr(_script_args, "shortcut_diag", False) or CFG.get("SHORTCUT_DIAG", False)
 GENERALIZATION_DIAG = getattr(_script_args, "generalization_diag", False) or CFG.get("GENERALIZATION_DIAG", False)
 GDIAG_INJECT_DEG = getattr(_script_args, "gdiag_inject_deg", 2.0)
+CF_BEV_R_ITER_STEPS = int(getattr(_script_args, "cf_bev_r_iter_steps", 0) or CFG.get("CF_BEV_R_ITER_STEPS", 0) or 0)
+GDIAG_ONLY = getattr(_script_args, "gdiag_only", False)
 _EXCLUDE_SEQS_CLI = getattr(_script_args, "exclude_seqs", None)
 EXCLUDE_SEQS = _EXCLUDE_SEQS_CLI if _EXCLUDE_SEQS_CLI else CFG.get("EXCLUDE_SEQS")
 PROJFUSION_ROOT = CFG.get("PROJFUSION_ROOT", "/mnt/drtraining/user/dahailu/code/ProjFusion")
 BAG_EVAL_DIR = CFG.get("BAG_EVAL_DIR")
+GDIAG_MIN_SEQS = 10
+
+
+def _is_gdiag_complete(gdiag_json):
+    """Return True if generalization_diagnostics.json looks like a full run."""
+    if not os.path.isfile(gdiag_json):
+        return False
+    try:
+        with open(gdiag_json, 'r') as f:
+            data = json.load(f)
+        n_seqs = data.get('composite', {}).get('raw', {}).get('n_seqs_evaluated', 0)
+        return int(n_seqs) >= GDIAG_MIN_SEQS
+    except Exception:
+        return False
 
 
 def _resolve_ckpt_path(mcfg, model_base):
@@ -569,6 +619,11 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
     if mcfg.get("generalization_diag", False) or GENERALIZATION_DIAG:
         cmd.append("--generalization_diag")
         cmd.extend(["--gdiag_inject_deg", str(mcfg.get("gdiag_inject_deg", GDIAG_INJECT_DEG))])
+        _iter_steps = int(mcfg.get("cf_bev_r_iter_steps", CF_BEV_R_ITER_STEPS) or 0)
+        if _iter_steps > 0:
+            cmd.extend(["--cf_bev_r_iter_steps", str(_iter_steps)])
+    if GDIAG_ONLY:
+        cmd.append("--gdiag_only")
     _ex_seqs = mcfg.get("exclude_seqs") or EXCLUDE_SEQS
     if _ex_seqs:
         cmd.extend(["--exclude_seqs", str(_ex_seqs)])
@@ -612,6 +667,27 @@ def _precheck_models():
         label = mcfg["label"]
         per_model_dir = os.path.join(OUTPUT_DIR, label)
         extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
+        _wants_gdiag = mcfg.get("generalization_diag", False) or GENERALIZATION_DIAG
+        _gdiag_json = os.path.join(per_model_dir, "generalization_diagnostics.json")
+
+        if GDIAG_ONLY:
+            if not os.path.isfile(extrinsics_path):
+                missing.append((idx, label, mcfg, per_model_dir, None,
+                                "gdiag_only: 缺少 extrinsics_and_errors.txt"))
+                continue
+            if _wants_gdiag and _is_gdiag_complete(_gdiag_json) and not getattr(_script_args, 'force', False):
+                done.append((idx, label, mcfg, per_model_dir, None, "gdiag complete"))
+                continue
+            if not (_wants_gdiag or GENERALIZATION_DIAG):
+                done.append((idx, label, mcfg, per_model_dir, None, "gdiag not requested"))
+                continue
+            model_base = _resolve_model_base(mcfg)
+            ckpt_path, _ckpt_dir = _resolve_ckpt_path(mcfg, model_base)
+            if not os.path.isfile(ckpt_path):
+                missing.append((idx, label, mcfg, per_model_dir, ckpt_path, "ckpt not found"))
+                continue
+            ready.append((idx, label, mcfg, per_model_dir, ckpt_path, "gdiag pending"))
+            continue
 
         if os.path.isfile(extrinsics_path) and not getattr(_script_args, 'force', False):
             _is_complete = False
@@ -621,11 +697,8 @@ def _precheck_models():
             if not _is_complete:
                 _ta_path = os.path.join(per_model_dir, "temporal_aggregation.txt")
                 _is_complete = os.path.isfile(_ta_path)
-            _wants_gdiag = mcfg.get("generalization_diag", False) or GENERALIZATION_DIAG
-            if _wants_gdiag:
-                _gdiag_json = os.path.join(per_model_dir, "generalization_diagnostics.json")
-                if not os.path.isfile(_gdiag_json):
-                    _is_complete = False
+            if _wants_gdiag and not _is_gdiag_complete(_gdiag_json):
+                _is_complete = False
             if _is_complete:
                 done.append((idx, label, mcfg, per_model_dir, None, "eval complete"))
                 continue
@@ -659,6 +732,8 @@ def run_evaluations():
 
     print(f"\n{'='*80}")
     print(f"Pre-check: {len(MODELS)} models in config")
+    if GDIAG_ONLY:
+        print("  模式: gdiag_only (仅补跑泛化诊断)")
     print(f"  ✓ Already evaluated: {len(done)}")
     print(f"  ⏳ Ready to evaluate: {len(ready)}")
     print(f"  ✗ Missing (no checkpoint): {len(missing)}")
@@ -690,7 +765,7 @@ def run_evaluations():
     pending_tasks = []
     for idx, label, mcfg, per_model_dir, ckpt_path, _ in ready:
         extrinsics_path = os.path.join(per_model_dir, "extrinsics_and_errors.txt")
-        if os.path.isfile(extrinsics_path):
+        if os.path.isfile(extrinsics_path) and not GDIAG_ONLY:
             import shutil
             shutil.rmtree(per_model_dir, ignore_errors=True)
 
@@ -1687,7 +1762,7 @@ def generate_report(all_stats):
     lines.append("=" * 80)
     lines.append("")
     lines.append(f"评估日期: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append(f"测试数据集: test_data_v2 ({n_samples} samples, {n_sequences} sequences, 每序列 {frames_per_seq} 帧)")
+    lines.append(f"测试数据集: test_data ({n_samples} samples, {n_sequences} sequences, 每序列 {frames_per_seq} 帧)")
     lines.append(f"扰动范围: +/-{ANGLE_RANGE} deg, +/-{TRANS_RANGE} m")
     lines.append(f"评估模型数: {len(all_stats)}")
     lines.append("")
@@ -2493,6 +2568,70 @@ def generate_report(all_stats):
         lines.append("- 三者必须联合解读: 高Genuine+高Shortcut+SHORTCUT判定 = 纯靠ZD的虚假矫正")
         lines.append("")
 
+    # === ZD-Corrected 部署精度估算 ===
+    stats_with_zd_and_temporal = [
+        s for s in all_stats
+        if (s.get('gdiag') or {}).get('zero_drift')
+        and (s.get('temporal') or {}).get('best', {}).get('rot') is not None
+    ]
+    if stats_with_zd_and_temporal:
+        lines.append("=" * 80)
+        lines.append(f"{_CN.get(_sec, str(_sec))}、ZD-Corrected 部署精度估算 (减去固有偏置后)")
+        _sec += 1
+        lines.append("=" * 80)
+        lines.append("")
+        lines.append("假设部署时通过一次性标定消除 ZeroDrift 偏置 (Rbias), 估算矫正后的精度:")
+        lines.append("  ZD-Corrected BEST ≈ sqrt((BEST_Roll - ZD_Roll)² + (BEST_Pitch - ZD_Pitch)² + (BEST_Yaw - ZD_Yaw)²)")
+        lines.append("  其中 ZD_axis 取 signed mean (保留方向), BEST_axis 取 BEST 聚合的 per-seq 均值")
+        lines.append("  注: 这是理想估计, 实际效果取决于 ZD 的时间稳定性")
+        lines.append("")
+        lines.append("| 排名 | 模型 | BEST Rot | ZD Rot | ZD-Corrected Rot | Roll | Pitch | Yaw | 改善 |")
+        lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+
+        zd_corrected_list = []
+        for s in stats_with_zd_and_temporal:
+            best_ta = s['temporal']['best']
+            zd = s['gdiag']['zero_drift']
+            zd_signed_rpy = [
+                zd.get('roll_signed_mean', zd.get('roll_mean', 0)),
+                zd.get('pitch_signed_mean', zd.get('pitch_mean', 0)),
+                zd.get('yaw_signed_mean', zd.get('yaw_mean', 0)),
+            ]
+            best_roll = best_ta.get('roll', 0)
+            best_pitch = best_ta.get('pitch', 0)
+            best_yaw = best_ta.get('yaw', 0)
+            corr_roll = max(0, abs(best_roll) - abs(zd_signed_rpy[0]))
+            corr_pitch = max(0, abs(best_pitch) - abs(zd_signed_rpy[1]))
+            corr_yaw = max(0, abs(best_yaw) - abs(zd_signed_rpy[2]))
+            corr_rot = (corr_roll + corr_pitch + corr_yaw)
+            zd_corrected_list.append({
+                'label': s['label'],
+                'best_rot': best_ta['rot'],
+                'zd_rot': zd.get('rot_mean', 0),
+                'corr_rot': corr_rot,
+                'corr_roll': corr_roll,
+                'corr_pitch': corr_pitch,
+                'corr_yaw': corr_yaw,
+            })
+
+        zd_corrected_list.sort(key=lambda x: x['corr_rot'])
+        for rank, item in enumerate(zd_corrected_list, 1):
+            improve = (1 - item['corr_rot'] / item['best_rot']) * 100 if item['best_rot'] > 0 else 0
+            lines.append(
+                f"| {rank} | {item['label']} "
+                f"| {item['best_rot']:.3f}° "
+                f"| {item['zd_rot']:.3f}° "
+                f"| {item['corr_rot']:.3f}° "
+                f"| {item['corr_roll']:.3f}° "
+                f"| {item['corr_pitch']:.3f}° "
+                f"| {item['corr_yaw']:.3f}° "
+                f"| {improve:.1f}% |"
+            )
+        lines.append("")
+        lines.append("说明: ZD-Corrected 精度 = 减去模型固有偏置后的残差。部署时通过一次性零扰动标定获取 ZD bias,")
+        lines.append("推理时 R_final = R_pred @ R_bias^(-1)。这消除系统误差, 仅保留随机噪声(可被聚合消除)。")
+        lines.append("")
+
     # === BAG 泛化评估跨模型汇总 ===
     if BAG_EVAL_DIR and os.path.isdir(BAG_EVAL_DIR):
         bag_data = _collect_bag_eval_data(BAG_EVAL_DIR)
@@ -2667,6 +2806,8 @@ def main():
     print(f"  输出: {OUTPUT_DIR}")
     if BAG_EVAL_DIR:
         print(f"  BAG评估: {BAG_EVAL_DIR}")
+    if GDIAG_ONLY:
+        print("  模式: gdiag_only")
     if _PARALLEL_GPUS > 1:
         print(f"  并行模式: {_PARALLEL_GPUS} GPUs")
     else:
@@ -2675,7 +2816,8 @@ def main():
 
     if not _script_args.report_only:
         # Step 1: Run evaluations
-        print("\n>>> Step 1: Running evaluations...")
+        step_label = "Running gdiag-only evaluations..." if GDIAG_ONLY else "Running evaluations..."
+        print(f"\n>>> Step 1: {step_label}")
         run_evaluations()
     else:
         print("\n>>> Step 1: SKIPPED (--report_only)")

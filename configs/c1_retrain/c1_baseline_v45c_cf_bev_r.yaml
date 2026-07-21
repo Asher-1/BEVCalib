@@ -106,7 +106,7 @@ defaults:
     perturb_distribution: truncated_normal
     per_axis_prob: 0.3
     pose_aware_sampling: true
-    max_frames_per_seq: 500
+    max_frames_per_seq: 1000
     foreground: true
     augment_pc_jitter: 0.0
     augment_pc_dropout: 0.0
@@ -133,7 +133,7 @@ defaults:
     resume_ckpt: auto
 
 experiments:
-  # ===== S1: ±5° 从头训练 (c1数据 baseline) =====
+  # ===== S1: ±5° 从头训练 (c1数据 baseline, 已完成 150ep) =====
   - name: "c1_baseline_v45c_S1"
     description: "C1 Baseline v45c S1: ±5° scratch, cf_n_groups=256, rotation-only"
     dataset: "all_training_data_c1"
@@ -171,7 +171,7 @@ experiments:
       cosine_Tmult: 2
       early_stopping_patience: 30
       eval_epoches: 5
-      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_baseline_v45c_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_baseline_v45c_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
       rocr_detach_epochs: 999
       seq_consistency_start_epoch: 0
       per_axis_prob: 0.5

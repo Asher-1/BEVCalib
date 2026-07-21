@@ -8,7 +8,7 @@ from torch.utils.data.distributed import DistributedSampler
 from kitti_dataset import KittiDataset
 from custom_dataset import CustomDataset
 from bev_calib import BEVCalib
-from torch.optim.lr_scheduler import StepLR, CosineAnnealingWarmRestarts, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR, CosineAnnealingWarmRestarts, LinearLR, SequentialLR
 from torch.utils.tensorboard import SummaryWriter
 import argparse
 from datetime import datetime, timedelta
@@ -28,6 +28,37 @@ from contextlib import nullcontext
 
 _MGDA_MULTITASK_BACKWARD = None
 _MGDA_LOAD_PATH = None
+
+
+def _ddp_sync_skipped_batch(model, scaler, optimizer, use_ddp, batch_index,
+                            grad_accum_steps, train_loader_len):
+    """Participate in DDP grad reduction when this rank skips forward/backward.
+
+    collate_fn can return None when every sample in a shard batch is invalid;
+    a bare ``continue`` leaves other ranks with gradients and breaks the next step.
+    """
+    if not use_ddp:
+        return
+    is_accum_step = (
+        (batch_index + 1) % grad_accum_steps != 0
+        and (batch_index + 1) < train_loader_len)
+    params = [p for p in model.parameters() if p.requires_grad]
+    if not params:
+        return
+    sync_ctx = model.no_sync() if is_accum_step else nullcontext()
+    with sync_ctx:
+        dummy = sum(p.reshape(-1)[0] * 0.0 for p in params)
+        scaler.scale(dummy).backward()
+    if not is_accum_step:
+        try:
+            scaler.unscale_(optimizer)
+        except RuntimeError:
+            pass
+        optimizer.zero_grad(set_to_none=True)
+        try:
+            scaler.update()
+        except (AssertionError, RuntimeError):
+            pass
 
 
 def _get_mgda_multitask_backward():
@@ -453,7 +484,7 @@ def _compute_medw_deploy(T_pred_arr, T_gt_arr, seq_arr, unique_seqs, window=200)
 
 
 def _euler_perturb_T(T_base_np, delta_rpy_deg):
-    """Apply Euler perturbation (degrees) to 4×4 transform rotation part."""
+    """Apply Euler perturbation (degrees) via LEFT multiply: R_out = dR @ R_base."""
     r, p, y = np.deg2rad(delta_rpy_deg)
     cr, sr = np.cos(r), np.sin(r)
     cp, sp = np.cos(p), np.sin(p)
@@ -464,6 +495,16 @@ def _euler_perturb_T(T_base_np, delta_rpy_deg):
     dR = Rz @ Ry @ Rx
     T_out = T_base_np.copy()
     T_out[:3, :3] = dR @ T_base_np[:3, :3]
+    return T_out
+
+
+def _gdiag_inject_T(T_gt_np, delta_rpy_deg):
+    """gdiag-aligned inject: init_R = gt_R @ dR (RIGHT multiply, scipy xyz)."""
+    from scipy.spatial.transform import Rotation as ScipyRot
+    rpy_rad = np.deg2rad(np.asarray(delta_rpy_deg, dtype=np.float64))
+    dR = ScipyRot.from_euler('xyz', rpy_rad).as_matrix().astype(np.float32)
+    T_out = T_gt_np.copy()
+    T_out[:3, :3] = T_gt_np[:3, :3] @ dR
     return T_out
 
 
@@ -533,7 +574,7 @@ def _apply_fixed_inject_batch(gt_T_np, inject_deg):
     delta = [mag, mag, mag]
     init_T = gt_T_np.copy()
     for bi in range(init_T.shape[0]):
-        init_T[bi] = _euler_perturb_T(gt_T_np[bi], delta)
+        init_T[bi] = _gdiag_inject_T(gt_T_np[bi], delta)
     return init_T
 
 
@@ -664,15 +705,47 @@ def _jacobian_pass(jac_result, j_min=0.85):
     return True
 
 
-def _dual_gate_pass(medw_result, jac_result, medw_max_deg, jac_min):
-    return _medw_axis_pass(medw_result, medw_max_deg) and _jacobian_pass(jac_result, jac_min)
+def _recovery_gate_pass(jac_result, recovery_min, inject_result=None,
+                        inject_recovery_min=0.0, pred_indep_max=0.55):
+    """Recovery gate: prefer mini inject eval; fallback to Jacobian overall proxy."""
+    if inject_result is not None and float(inject_recovery_min) > 0:
+        rec = float(inject_result.get('recovery_pct', 0.0))
+        indep = float(inject_result.get('pred_independence', 1.0))
+        if rec < float(inject_recovery_min):
+            return False
+        if float(pred_indep_max) > 0 and indep > float(pred_indep_max):
+            return False
+        return True
+    if jac_result is None or float(recovery_min) <= 0:
+        return False
+    ov = jac_result.get('overall')
+    return ov == ov and float(ov) >= float(recovery_min)
 
 
-def _format_dual_gate_status(medw_result, jac_result, medw_max_deg, jac_min):
+def _dual_gate_pass(medw_result, jac_result, medw_max_deg, jac_min, recovery_min=0.0,
+                    inject_result=None, inject_recovery_min=0.0, pred_indep_max=0.55):
+    if not (_medw_axis_pass(medw_result, medw_max_deg) and _jacobian_pass(jac_result, jac_min)):
+        return False
+    if inject_result is not None and float(inject_recovery_min) > 0:
+        return _recovery_gate_pass(
+            jac_result, recovery_min, inject_result, inject_recovery_min, pred_indep_max)
+    if float(recovery_min) > 0 and not _recovery_gate_pass(jac_result, recovery_min):
+        return False
+    return True
+
+
+def _zd_gate_pass(medw_result, zd_max_deg):
+    return _medw_axis_pass(medw_result, zd_max_deg)
+
+
+def _format_dual_gate_status(medw_result, jac_result, medw_max_deg, jac_min, recovery_min=0.0,
+                             inject_result=None, inject_recovery_min=0.0, pred_indep_max=0.55):
     """Human-readable dual-gate pass/fail breakdown."""
     medw_max = _medw_max_rpy(medw_result)
     medw_ok = _medw_axis_pass(medw_result, medw_max_deg)
     jac_ok = _jacobian_pass(jac_result, jac_min)
+    rec_ok = _recovery_gate_pass(
+        jac_result, recovery_min, inject_result, inject_recovery_min, pred_indep_max)
     medw_detail = "N/A"
     if medw_result is not None:
         medw_detail = (f"max(R,P,Y)={medw_max:.4f}° "
@@ -688,14 +761,29 @@ def _format_dual_gate_status(medw_result, jac_result, medw_max_deg, jac_min):
                       f"Y={jac_result.get('yaw', float('nan')):.3f}) "
                       f"min_axis={jac_min_ax:.3f} thr>{jac_min:.2f} "
                       f"{'PASS' if jac_ok else 'FAIL'}")
-    verdict = "PASS" if (medw_ok and jac_ok) else "FAIL"
-    return verdict, medw_detail, jac_detail
+    rec_detail = ""
+    if inject_result is not None and float(inject_recovery_min) > 0:
+        rec_detail = (f"; InjectRec={inject_result.get('recovery_pct', float('nan')):.1f}% "
+                      f"thr>={inject_recovery_min:.1f}% "
+                      f"PredIndep={inject_result.get('pred_independence', float('nan')):.3f} "
+                      f"thr<={pred_indep_max:.2f} "
+                      f"{'PASS' if rec_ok else 'FAIL'}")
+    elif float(recovery_min) > 0:
+        rec_detail = (f"; Recovery proxy overall>={recovery_min:.2f} "
+                      f"{'PASS' if rec_ok else 'FAIL'}")
+    verdict = "PASS" if (medw_ok and jac_ok and rec_ok) else "FAIL"
+    return verdict, medw_detail, jac_detail + rec_detail
 
 
-def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual, kpi_history):
+def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual,
+                              best_recovery, best_zd, kpi_history):
     """Write CONVERGENCE_REPORT.md + convergence_report.json after training."""
     medw_thr = float(args.dual_gate_medw_max)
     jac_thr = float(args.dual_gate_jacobian_min)
+    rec_thr = float(getattr(args, 'dual_gate_recovery_min', 0.0))
+    inj_rec_thr = float(getattr(args, 'dual_gate_inject_recovery_min', 0.0))
+    pred_indep_max = float(getattr(args, 'dual_gate_pred_indep_max', 0.55))
+    zd_thr = float(getattr(args, 'dual_gate_zd_max', 0.35))
     converged = best_dual.get('epoch', -1) > 0
 
     if converged:
@@ -706,7 +794,8 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
     elif kpi_history:
         last = kpi_history[-1]
         _, medw_d, jac_d = _format_dual_gate_status(
-            last.get('medw'), last.get('jacobian'), medw_thr, jac_thr)
+            last.get('medw'), last.get('jacobian'), medw_thr, jac_thr, rec_thr,
+            last.get('inject_recovery'), inj_rec_thr, pred_indep_max)
         verdict = "NOT_CONVERGED"
         verdict_cn = "未收敛"
         detail = f"末次 eval (ep{last['epoch']}): {medw_d}; {jac_d}"
@@ -723,11 +812,19 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
         "## 验收标准",
         f"- MEDW{args.medw_eval_max_frames}: max(Roll, Pitch, Yaw) < **{medw_thr:.2f}°**",
         f"- Jacobian@±{args.jacobian_eval_angle_deg}°: overall 及 R/P/Y 均 > **{jac_thr:.2f}**",
+    ]
+    if inj_rec_thr > 0:
+        lines.append(f"- Inject recovery: >= **{inj_rec_thr:.1f}%**, PredIndep <= **{pred_indep_max:.2f}**")
+    elif rec_thr > 0:
+        lines.append(f"- Recovery proxy: Jacobian overall >= **{rec_thr:.2f}**")
+    if getattr(args, 'enable_zd_gate_ckpt', 0) > 0:
+        lines.append(f"- ZD gate: max(R,P,Y) < **{zd_thr:.2f}°**")
+    lines.extend([
         "",
         "## 结果摘要",
         detail,
         "",
-    ]
+    ])
 
     if best_dual.get('epoch', -1) > 0:
         lines.extend([
@@ -750,6 +847,33 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
             f"- Epoch: {best_medw['epoch']}",
             f"- max(R,P,Y): {bm:.4f}° "
             f"(R={best_medw['roll']:.4f} P={best_medw['pitch']:.4f} Y={best_medw['yaw']:.4f})",
+            "",
+        ])
+
+    if best_recovery.get('epoch', -1) > 0:
+        lines.extend([
+            "## Best Recovery Gate Checkpoint",
+            f"- Epoch: {best_recovery['epoch']}",
+        ])
+        if best_recovery.get('recovery_pct', float('-inf')) > float('-inf'):
+            lines.append(f"- Inject recovery: {best_recovery.get('recovery_pct', float('nan')):.1f}%")
+            lines.append(f"- PredIndep: {best_recovery.get('pred_independence', float('nan')):.3f}")
+        else:
+            lines.append(f"- Jacobian overall: {best_recovery.get('overall', float('nan')):.3f}")
+        lines.extend([
+            f"- ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_recovery.pth')}",
+            "",
+        ])
+
+    if best_zd.get('epoch', -1) > 0:
+        lines.extend([
+            "## Best ZD Gate Checkpoint",
+            f"- Epoch: {best_zd['epoch']}",
+            f"- max(R,P,Y): {best_zd.get('max_rpy', float('nan')):.4f}° "
+            f"(R={best_zd.get('roll', float('nan')):.4f} "
+            f"P={best_zd.get('pitch', float('nan')):.4f} "
+            f"Y={best_zd.get('yaw', float('nan')):.4f})",
+            f"- ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_zd.pth')}",
             "",
         ])
 
@@ -788,11 +912,17 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
         'criteria': {
             'medw_max_rpy_deg': medw_thr,
             'jacobian_min': jac_thr,
+            'recovery_min': rec_thr,
+            'inject_recovery_min_pct': inj_rec_thr,
+            'pred_indep_max': pred_indep_max,
+            'zd_max_rpy_deg': zd_thr,
             'medw_window': args.medw_eval_max_frames,
             'jacobian_angle_deg': args.jacobian_eval_angle_deg,
         },
         'best_dual': best_dual,
         'best_medw': best_medw,
+        'best_recovery': best_recovery,
+        'best_zd': best_zd,
         'kpi_history': kpi_history,
         'report_md': report_md,
     }
@@ -816,6 +946,39 @@ def _get_gmp_model(model):
     if hasattr(raw, 'forward_pose_from_cache') and hasattr(raw, '_stash_proj_cache_for_jacobian'):
         return raw
     return None
+
+
+def _parse_progressive_schedule(schedule_str: str, epoch: int) -> float:
+    """Parse epoch-based probe schedule, e.g. 'epoch<50:3.0,epoch<100:2.0,epoch>=100:1.0'"""
+    schedule_str = str(schedule_str).strip().strip("'\"")
+    schedule_str = schedule_str.replace('\\', '')
+    for rule in schedule_str.split(','):
+        rule = rule.strip()
+        if ':' not in rule:
+            continue
+        condition, value = rule.rsplit(':', 1)
+        condition = condition.strip()
+        try:
+            val = float(value.strip())
+        except ValueError:
+            continue
+        if condition.startswith('epoch<'):
+            threshold = int(condition[6:])
+            if epoch < threshold:
+                return val
+        elif condition.startswith('epoch<='):
+            threshold = int(condition[7:])
+            if epoch <= threshold:
+                return val
+        elif condition.startswith('epoch>='):
+            threshold = int(condition[7:])
+            if epoch >= threshold:
+                return val
+        elif condition.startswith('epoch>'):
+            threshold = int(condition[6:])
+            if epoch > threshold:
+                return val
+    return 2.0
 
 
 def _compute_jacobian_supervision_loss(
@@ -967,6 +1130,75 @@ def _compute_jacobian_one_batch(raw_model, imgs, pcs, masks, gt_T_np, intrinsics
         else:
             axis_jacobians[ax_name] = float('nan')
     return axis_jacobians
+
+
+def _forward_val_batch_once(raw_model, imgs, pcs_np, masks, gt_T_np, init_T_np, intrinsics,
+                            device, use_amp, amp_dtype, identity_4x4):
+    """Single val forward; returns per-batch signed RPY means and mean rot error (deg)."""
+    B = gt_T_np.shape[0]
+    imgs_np = _batch_data_to_numpy(imgs)
+    resize_imgs = torch.from_numpy(imgs_np).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
+    pcs_t = torch.from_numpy(pcs_np).float().to(device, non_blocking=True)
+    gt_T_t = torch.from_numpy(gt_T_np.astype(np.float32)).to(device, non_blocking=True)
+    init_T_t = torch.from_numpy(init_T_np.astype(np.float32)).to(device, non_blocking=True)
+    post_cam2ego_T = identity_4x4.unsqueeze(0).expand(B, -1, -1)
+    intrinsic_matrix = torch.from_numpy(np.array(intrinsics, dtype=np.float32)).to(device, non_blocking=True)
+    masks_t = torch.from_numpy(np.array(masks)).float().to(device, non_blocking=True) if masks is not None else None
+    with autocast(enabled=use_amp, dtype=amp_dtype):
+        T_pred, _, _ = raw_model(
+            resize_imgs, pcs_t, gt_T_t, init_T_t, post_cam2ego_T,
+            intrinsic_matrix, masks=masks_t, out_init_loss=False,
+        )
+    T_pred_np = T_pred.detach().cpu().numpy()
+    rot_errs, roll_s, pitch_s, yaw_s = [], [], [], []
+    for b in range(B):
+        e = compute_pose_errors(T_pred_np[b], gt_T_np[b])
+        rot_errs.append(e['rot_error'])
+        roll_s.append(e['roll_signed'])
+        pitch_s.append(e['pitch_signed'])
+        yaw_s.append(e['yaw_signed'])
+    return {
+        'rot_mean': float(np.mean(rot_errs)),
+        'roll_signed_mean': float(np.mean(roll_s)),
+        'pitch_signed_mean': float(np.mean(pitch_s)),
+        'yaw_signed_mean': float(np.mean(yaw_s)),
+    }
+
+
+def _compute_inject_recovery_one_batch(raw_model, imgs, pcs, masks, gt_T_np, intrinsics, device,
+                                     inject_deg, use_amp, amp_dtype, identity_4x4, xyz_only_choise):
+    """Mini gdiag: fixed inject recovery % + lightweight PredIndep proxy (ZD vs inject)."""
+    pcs_np = _batch_data_to_numpy(pcs, xyz_only=xyz_only_choise)
+    inject_deg = float(inject_deg)
+    zd_init = gt_T_np.copy()
+    inj_init = _apply_fixed_inject_batch(gt_T_np, inject_deg)
+    init_rots = [
+        compute_pose_errors(inj_init[b], gt_T_np[b])['rot_error']
+        for b in range(gt_T_np.shape[0])
+    ]
+    mean_init = float(np.mean(init_rots))
+    zd_out = _forward_val_batch_once(
+        raw_model, imgs, pcs_np, masks, gt_T_np, zd_init, intrinsics,
+        device, use_amp, amp_dtype, identity_4x4)
+    inj_out = _forward_val_batch_once(
+        raw_model, imgs, pcs_np, masks, gt_T_np, inj_init, intrinsics,
+        device, use_amp, amp_dtype, identity_4x4)
+    mean_out = inj_out['rot_mean']
+    recovery_pct = ((mean_init - mean_out) / mean_init * 100.0) if mean_init > 1e-6 else 0.0
+    indep_axes = []
+    for ax in ('roll', 'pitch', 'yaw'):
+        zd_s = zd_out[f'{ax}_signed_mean']
+        inj_s = inj_out[f'{ax}_signed_mean']
+        pred_range = abs(inj_s - zd_s)
+        indep_axes.append(min(1.0, pred_range / inject_deg) if inject_deg > 0 else 0.0)
+    pred_independence = float(np.mean(indep_axes))
+    return {
+        'recovery_pct': float(recovery_pct),
+        'mean_init_rot': mean_init,
+        'mean_residual_rot': mean_out,
+        'pred_independence': pred_independence,
+        'inject_deg': inject_deg,
+    }
 
 
 def _run_jacobian_eval_inprocess(raw_model, val_loader, device, args, use_amp, amp_dtype,
@@ -1307,8 +1539,9 @@ def _apply_fov_crop(imgs_tensor, intrinsics, crop_ratio_min=0.75, crop_ratio_max
 
 def _parse_csv_cli_list(s, cast=float):
     """Parse comma-separated CLI values (tolerate bash printf %q artifacts like '16\\')."""
-    cleaned = str(s).replace('\\', '')
-    return [cast(x.strip()) for x in cleaned.split(',') if x.strip()]
+    cleaned = str(s).strip().strip("'\"")
+    cleaned = cleaned.replace('\\', '')
+    return [cast(x.strip().strip("'\"")) for x in cleaned.split(',') if x.strip()]
 
 
 def _apply_lidar_sparsification(pcs_np, masks, target_lines=32, 
@@ -1431,6 +1664,8 @@ def parse_args():
     parser.add_argument("--step_size", type=int, default=100)
     parser.add_argument("--scheduler", type=int, default=-1)
     parser.add_argument("--pretrain_ckpt", type=str, default=None)
+    parser.add_argument("--pretrain_ckpt_fallback", type=str, default=None,
+                        help="Comma-separated fallback ckpt paths when pretrain_ckpt is missing")
     parser.add_argument("--resume_ckpt", type=str, default=None, help="Resume training from a full checkpoint (restores epoch, optimizer, scheduler, scaler)")
     parser.add_argument("--use_custom_dataset", type=int, default=0, help="使用 CustomDataset (1) 还是 KittiDataset (0)")
     # 图像尺寸参数
@@ -1445,6 +1680,10 @@ def parse_args():
     parser.add_argument("--sample_step", type=int, default=None, help="采样步长 (每隔N帧取1帧), 与max_frames_per_seq互斥")
     parser.add_argument("--pose_aware_sampling", action="store_true", help="启用基于Pose的智能去冗余采样")
     parser.add_argument("--poses_dir", type=str, default="", help="Pose文件目录 (KITTI格式)")
+    parser.add_argument("--acc_filter_lin_thresh", type=float, default=0.0,
+                        help="Filter frames with linear acceleration above this (m/s², 0=disabled)")
+    parser.add_argument("--acc_filter_ang_thresh", type=float, default=0.0,
+                        help="Filter frames with angular acceleration above this (°/s², 0=disabled)")
     # 可视化参数
     parser.add_argument("--vis_freq", type=int, default=40, help="训练可视化频率 (每多少个batch可视化一次)")
     parser.add_argument("--vis_samples", type=int, default=3, help="每次可视化的样本数")
@@ -1462,6 +1701,24 @@ def parse_args():
                         help="Dual gate: min Jacobian on overall AND each axis (roll/pitch/yaw)")
     parser.add_argument("--dual_gate_medw_max", type=float, default=0.30,
                         help="Dual gate: max(R,P,Y) MEDW error (deg) on val split must be below this")
+    parser.add_argument("--dual_gate_recovery_min", type=float, default=0.0,
+                        help="Triple gate (fallback): min val Jacobian overall when inject eval off (0=off)")
+    parser.add_argument("--dual_gate_inject_recovery_min", type=float, default=0.0,
+                        help="Recovery gate: min val fixed-inject recovery %% (gdiag-aligned, e.g. 55)")
+    parser.add_argument("--dual_gate_pred_indep_max", type=float, default=0.55,
+                        help="Recovery gate: reject ckpt when PredIndep proxy exceeds this (V67≈0.79)")
+    parser.add_argument("--enable_inject_recovery_eval", type=int, default=0,
+                        help="Mini gdiag inject recovery on val batches each eval epoch (1=on)")
+    parser.add_argument("--inject_recovery_eval_deg", type=float, default=2.0,
+                        help="Fixed inject magnitude (deg) for mini inject recovery eval")
+    parser.add_argument("--inject_recovery_eval_batches", type=int, default=1,
+                        help="Val batches for mini inject recovery eval (+2 forwards/batch)")
+    parser.add_argument("--dual_gate_zd_max", type=float, default=0.35,
+                        help="ZD gate: max(R,P,Y) MEDW must be below this for ckpt_best_zd")
+    parser.add_argument("--enable_recovery_gate_ckpt", type=int, default=0,
+                        help="Save ckpt_best_recovery.pth when val Jacobian overall passes recovery gate (1=on)")
+    parser.add_argument("--enable_zd_gate_ckpt", type=int, default=0,
+                        help="Save ckpt_best_zd.pth when val MEDW passes ZD gate (1=on)")
     parser.add_argument("--enable_jacobian_gate_ckpt", type=int, default=0,
                         help="Save ckpt_best_jacobian.pth when val Jacobian overall improves (1=on)")
     parser.add_argument("--jacobian_early_stop_min", type=float, default=0.0,
@@ -1486,6 +1743,18 @@ def parse_args():
                         help="Run Jacobian supervision every N train batches (1=every batch)")
     parser.add_argument("--jacobian_loss_axis_weights", type=str, default="",
                         help="Optional R,P,Y sampling weights for train-time Jacobian loss, e.g. '1,1,2'")
+    parser.add_argument("--jacobian_loss_progressive", type=str, default="false",
+                        help="V68: Enable progressive Jacobian probe schedule (true/false)")
+    parser.add_argument("--jacobian_loss_probe_schedule", type=str, default="",
+                        help="V68: Schedule, e.g. 'epoch<50:3.0,epoch<100:2.0,epoch>=100:1.0'")
+    parser.add_argument("--hard_negative_mining", type=str, default="false",
+                        help="V68: Hard negative mining (true/false)")
+    parser.add_argument("--hard_negative_topk", type=float, default=0.3,
+                        help="V68: Fraction of hard samples to upweight (0.3 = top 30%)")
+    parser.add_argument("--hard_negative_weight", type=float, default=2.0,
+                        help="V68: Weight multiplier for hard samples")
+    parser.add_argument("--hard_negative_start_epoch", type=int, default=20,
+                        help="V68: Epoch to start hard negative mining")
     parser.add_argument("--compile", type=int, default=0, help="使用 torch.compile 加速模型 (1=启用, 0=禁用)")
     parser.add_argument("--no_amp", type=int, default=0, help="禁用 AMP 混合精度训练 (1=禁用FP16, 用FP32; 0=默认FP16)")
     parser.add_argument("--amp_bf16", type=int, default=0, help="AMP 使用 bfloat16 替代 float16 (减少溢出风险, 需GPU支持)")
@@ -1569,7 +1838,18 @@ def parse_args():
     parser.add_argument("--correction_quat_loss_weight", type=float, default=0.0,
                         help="Direct raw correction quaternion supervision weight (0=disabled).")
     parser.add_argument("--iterative_refine", type=int, default=0,
-                        help="V35 Phase3: Number of iterative refinement steps (0=disabled, 3=recommended).")
+                        help="V67: Number of iterative refinement steps during training (0=disabled, 2=recommended).")
+    parser.add_argument("--iterative_refine_weight", type=float, default=0.5,
+                        help="V67: Weight decay per iteration step (0.5 = iter1 gets 0.5x, iter2 gets 0.25x).")
+    parser.add_argument("--iterative_refine_weights", type=str, default="",
+                        help="V68: Explicit per-iteration weights, e.g. '0.2,0.3,0.5'. Overrides iterative_refine_weight.")
+    parser.add_argument("--iterative_refine_start_epoch", type=int, default=5,
+                        help="V67: Epoch to start iterative supervision (let model warm up first).")
+    parser.add_argument("--iterative_refine_use_synthetic_init", type=int, default=0,
+                        help="V69: Round 2+ use GT+synthetic residual inject instead of model pred "
+                             "(teaches deploy-matched fine correction).")
+    parser.add_argument("--iterative_refine_synthetic_residual_deg", type=str, default="1.0,0.5",
+                        help="V69: Per-round synthetic residual magnitudes (deg) for iterative round 2+.")
     parser.add_argument("--native_cross", type=int, default=0,
                         help="V36: Native-domain cross-attention mode (0=disabled, 1=enabled).")
     parser.add_argument("--native_cross_pc_groups", type=int, default=128,
@@ -1683,7 +1963,7 @@ def parse_args():
     parser.add_argument("--intrinsic_input", action="store_true", default=False,
                         help="Feed normalized intrinsics (fx,fy,cx,cy) to prediction head")
     parser.add_argument("--lr_schedule", type=str, default="step",
-                        choices=["step", "cosine_warm_restarts"],
+                        choices=["step", "cosine", "cosine_warm_restarts"],
                         help="LR scheduler type")
     parser.add_argument("--warmup_epochs", type=int, default=5,
                         help="Linear warmup epochs")
@@ -1714,7 +1994,33 @@ def parse_args():
     parser.add_argument("--augment_lidar_vertical_fov", type=str, default="-25,15",
                         help="P2b: Vertical FOV range in degrees (e.g. '-25,15' for -25° to +15°). "
                              "Used for vertical angle binning. Adjust per dataset.")
-    
+
+    # === V60: Implicit Alignment (IJCV 2026 paper) ===
+    parser.add_argument("--use_sim_loss", type=int, default=0,
+                        help="V60: enable similarity loss on 3D→2D cross-attention matrix")
+    parser.add_argument("--sim_loss_weight", type=float, default=0.5,
+                        help="V60: weight for similarity loss")
+    parser.add_argument("--sim_loss_warmup", type=int, default=5,
+                        help="V60: warmup epochs for similarity loss (linearly ramp weight)")
+    parser.add_argument("--sim_loss_soft_radius", type=float, default=0.0,
+                        help="V60: soft radius for GT correspondence (0=hard one-hot)")
+    parser.add_argument("--sim_n_layers", type=int, default=2,
+                        help="V60: number of decoder layers in SimCrossAttention")
+    parser.add_argument("--use_registry_token", type=int, default=0,
+                        help="V60: add learnable registry KV token for out-of-FOV points")
+    parser.add_argument("--use_fov_cls_loss", type=int, default=0,
+                        help="V60: enable FOV classification auxiliary loss")
+    parser.add_argument("--fov_cls_weight", type=float, default=0.1,
+                        help="V60: weight for FOV classification loss")
+    parser.add_argument("--use_3d_pos_encoding", type=int, default=0,
+                        help="V60: enable 3D position encoding for image features")
+    parser.add_argument("--pos_enc_depth_bins", type=int, default=16,
+                        help="V60: number of LID depth bins for 3D position encoding")
+    parser.add_argument("--use_coarse_refine", type=int, default=0,
+                        help="V60: enable coarse-to-fine strategy (predict R_coarse then refine)")
+    parser.add_argument("--coarse_refine_detach_epoch", type=int, default=0,
+                        help="V60: epoch to detach coarse branch gradients (0=never detach)")
+
     parser.add_argument("--augment_mount_jitter_prob", type=float, default=0.0,
                         help="Probability of applying mount jitter to GT extrinsics (0=disabled). "
                              "Simulates diverse camera installations for domain generalization.")
@@ -1788,6 +2094,8 @@ def parse_args():
                         help="V52 S2: epochs to ramp zero_drift weight from start to final (0=no ramp)")
     parser.add_argument("--zero_drift_loss_start_epoch", type=int, default=5,
                         help="V51: epoch to start zero_drift_loss")
+    parser.add_argument("--zero_drift_loss_margin_deg", type=float, default=0.0,
+                        help="V63: margin in degrees; only penalize ZD above this threshold (0=penalize all)")
     parser.add_argument("--zero_drift_dedicated_ratio", type=float, default=0.0,
                         help="V51: force init=gt on this fraction of batches (in addition to zero_perturbation_prob)")
     parser.add_argument("--inject_recovery_loss_weight", type=float, default=0.0,
@@ -2182,7 +2490,9 @@ def main():
                                     poses_dir=args.poses_dir or None,
                                     return_seq_id=(
                                         args.domain_adversarial > 0
-                                        or getattr(args, 'rig_consistency_weight', 0.0) > 0))
+                                        or getattr(args, 'rig_consistency_weight', 0.0) > 0),
+                                    acc_filter_lin_thresh=getattr(args, 'acc_filter_lin_thresh', 0.0),
+                                    acc_filter_ang_thresh=getattr(args, 'acc_filter_ang_thresh', 0.0))
         else:
             if is_main:
                 print("使用 KittiDataset")
@@ -2487,7 +2797,16 @@ def main():
             args, device, img_shape, rotation_only, is_main=is_main, tprint=tprint)
 
     if args.pretrain_ckpt is not None:
-        state_dict = torch.load(args.pretrain_ckpt, map_location=device)
+        _pretrain_path = args.pretrain_ckpt
+        if not os.path.isfile(_pretrain_path) and getattr(args, 'pretrain_ckpt_fallback', None):
+            for _fb in str(args.pretrain_ckpt_fallback).split(','):
+                _fb = _fb.strip()
+                if _fb and os.path.isfile(_fb):
+                    if is_main:
+                        tprint(f"  pretrain_ckpt 不存在 ({_pretrain_path})，使用 fallback: {_fb}")
+                    _pretrain_path = _fb
+                    break
+        state_dict = torch.load(_pretrain_path, map_location=device)
         ckpt_sd = state_dict['model_state_dict']
         model_sd = model.state_dict()
         # V40 HybridPoseHead: V39 ckpt uses fusion_head.head.*, P1c uses refine_head.head.*
@@ -2736,7 +3055,21 @@ def main():
     scheduler = None
     scheduler_choice = args.scheduler > 0
     if scheduler_choice:
-        if args.lr_schedule == "cosine_warm_restarts":
+        if args.lr_schedule == "cosine":
+            _cosine_T_max = max(1, args.num_epochs - args.warmup_epochs)
+            cosine_sched = CosineAnnealingLR(optimizer, T_max=_cosine_T_max, eta_min=1e-6)
+            if args.warmup_epochs > 0:
+                warmup_sched = LinearLR(optimizer, start_factor=0.01, total_iters=args.warmup_epochs)
+                scheduler = SequentialLR(optimizer, [warmup_sched, cosine_sched],
+                                         milestones=[args.warmup_epochs])
+                if is_main:
+                    tprint(f"LR Schedule: LinearWarmup({args.warmup_epochs}ep) -> "
+                           f"CosineAnnealingLR(T_max={_cosine_T_max}, eta_min=1e-6)")
+            else:
+                scheduler = cosine_sched
+                if is_main:
+                    tprint(f"LR Schedule: CosineAnnealingLR(T_max={_cosine_T_max}, eta_min=1e-6)")
+        elif args.lr_schedule == "cosine_warm_restarts":
             cosine_sched = CosineAnnealingWarmRestarts(optimizer, T_0=args.cosine_T0, T_mult=args.cosine_Tmult)
             if args.warmup_epochs > 0:
                 warmup_sched = LinearLR(optimizer, start_factor=0.01, total_iters=args.warmup_epochs)
@@ -2987,11 +3320,11 @@ def main():
 
     per_axis_weights_parsed = None
     if args.per_axis_weights:
-        per_axis_weights_parsed = tuple(float(x) for x in args.per_axis_weights.split(','))
+        per_axis_weights_parsed = tuple(_parse_csv_cli_list(args.per_axis_weights))
     jacobian_loss_axis_weights_parsed = None
     if getattr(args, 'jacobian_loss_axis_weights', ''):
         jacobian_loss_axis_weights_parsed = tuple(
-            float(x) for x in args.jacobian_loss_axis_weights.split(','))
+            _parse_csv_cli_list(args.jacobian_loss_axis_weights))
         if len(jacobian_loss_axis_weights_parsed) != 3:
             raise ValueError("--jacobian_loss_axis_weights expects three comma-separated values")
 
@@ -3013,6 +3346,11 @@ def main():
                  'jacobian_pitch': float('-inf'), 'jacobian_yaw': float('-inf')}
     best_jacobian = {'epoch': -1, 'overall': float('-inf'),
                      'roll': float('-inf'), 'pitch': float('-inf'), 'yaw': float('-inf')}
+    best_recovery = {'epoch': -1, 'recovery_pct': float('-inf'), 'pred_independence': float('inf'),
+                     'overall': float('-inf'), 'mean_init_rot': float('inf'),
+                     'mean_residual_rot': float('inf')}
+    best_zd = {'epoch': -1, 'rot': float('inf'), 'roll': float('inf'), 'pitch': float('inf'),
+               'yaw': float('inf'), 'max_rpy': float('inf')}
     kpi_history = []
     last_epoch_train_errors = None
     last_epoch_val_errors = None
@@ -3106,8 +3444,33 @@ def main():
             tprint(f"  • V53b ADIR: steps={args.adir_steps}, max_step={args.adir_max_step_deg}°, "
                    f"adapter_only={getattr(args, 'adir_train_only', 0)}")
         if args.enable_dual_gate_ckpt > 0:
-            tprint(f"  • Dual gate ckpt: max(MEDW{args.medw_eval_max_frames} R,P,Y) < {args.dual_gate_medw_max}° "
-                   f"AND Jacobian R/P/Y/overall > {args.dual_gate_jacobian_min} → ckpt_best_dual.pth")
+            _rec_thr = float(getattr(args, 'dual_gate_recovery_min', 0.0))
+            _inj_thr = float(getattr(args, 'dual_gate_inject_recovery_min', 0.0))
+            _dg_msg = (f"  • Dual gate ckpt: max(MEDW{args.medw_eval_max_frames} R,P,Y) < {args.dual_gate_medw_max}° "
+                       f"AND Jacobian R/P/Y/overall > {args.dual_gate_jacobian_min}")
+            if getattr(args, 'enable_inject_recovery_eval', 0) > 0 and _inj_thr > 0:
+                _dg_msg += (f" AND inject recovery >= {_inj_thr:.1f}% "
+                            f"AND PredIndep <= {args.dual_gate_pred_indep_max:.2f}")
+            elif _rec_thr > 0:
+                _dg_msg += f" AND Jacobian overall >= {_rec_thr:.2f} (recovery proxy)"
+            tprint(_dg_msg + " → ckpt_best_dual.pth")
+        if getattr(args, 'enable_inject_recovery_eval', 0) > 0:
+            tprint(f"  • Mini inject recovery eval: ±{args.inject_recovery_eval_deg}° fixed inject, "
+                   f"val batch[0:{args.inject_recovery_eval_batches}] "
+                   f"(+{2 * args.inject_recovery_eval_batches} forwards/eval)")
+        if getattr(args, 'enable_recovery_gate_ckpt', 0) > 0:
+            _inj_thr = float(getattr(args, 'dual_gate_inject_recovery_min', 0.0))
+            _jac_thr = float(getattr(args, 'dual_gate_recovery_min', 0.0))
+            if getattr(args, 'enable_inject_recovery_eval', 0) > 0 and _inj_thr > 0:
+                tprint(f"  • Recovery gate ckpt: val inject recovery >= {_inj_thr:.1f}% "
+                       f"AND PredIndep <= {args.dual_gate_pred_indep_max:.2f} "
+                       f"→ ckpt_best_recovery.pth")
+            else:
+                tprint(f"  • Recovery gate ckpt: val Jacobian overall >= {_jac_thr:.2f} "
+                       f"(inject eval off) → ckpt_best_recovery.pth")
+        if getattr(args, 'enable_zd_gate_ckpt', 0) > 0:
+            tprint(f"  • ZD gate ckpt: max(MEDW{args.medw_eval_max_frames} R,P,Y) < "
+                   f"{args.dual_gate_zd_max:.2f}° → ckpt_best_zd.pth")
         if getattr(args, 'fusion_backend', 'bev') == 'geo_match_proj':
             tprint("  • match[...]: L_corr(px), valid_init/valid_gt, fb, epnp_fail, epnp_pts, epnp_grad")
             tprint("  • geo[...]: appearance/depth consistency loss + geo valid ratio")
@@ -3175,6 +3538,10 @@ def main():
                 best_dual = ckpt['best_dual']
             if 'best_jacobian' in ckpt and ckpt['best_jacobian'] is not None:
                 best_jacobian = ckpt['best_jacobian']
+            if 'best_recovery' in ckpt and ckpt['best_recovery'] is not None:
+                best_recovery = ckpt['best_recovery']
+            if 'best_zd' in ckpt and ckpt['best_zd'] is not None:
+                best_zd = ckpt['best_zd']
             if 'kpi_history' in ckpt and ckpt['kpi_history']:
                 kpi_history = ckpt['kpi_history']
             if 'early_stop_counter' in ckpt:
@@ -3344,6 +3711,10 @@ def main():
             t_data_total += t_data_end - t_iter_start
 
             if batch_data is None:
+                _ddp_sync_skipped_batch(
+                    model, scaler, optimizer, use_ddp, batch_index,
+                    grad_accum_steps, len(train_loader))
+                global_step += 1
                 t_iter_start = time.time()
                 continue
             if len(batch_data) == 6:
@@ -3541,6 +3912,11 @@ def main():
             _jac_do_this_batch = (
                 _jac_loss_w > 0 and epoch >= _jac_loss_start
                 and batch_index % _jac_interval == 0)
+            # V68: Progressive Jacobian probe schedule
+            if _jac_do_this_batch and str(getattr(args, 'jacobian_loss_progressive', 'false')).lower() == 'true':
+                _jac_sched = getattr(args, 'jacobian_loss_probe_schedule', '')
+                if _jac_sched:
+                    args.jacobian_loss_probe_deg = _parse_progressive_schedule(_jac_sched, epoch)
             B_cur = resize_imgs.shape[0]
             _use_mgda = (
                 getattr(args, 'use_mgda', 0) > 0
@@ -3576,6 +3952,26 @@ def main():
                             domain_ids=_fwd_dom, **_v42_kwargs)
                         T_pred = T_pred_all[:B_cur]
                         total_loss = loss["total_loss"]
+
+                        # V68: Hard Negative Mining (per-sample error based)
+                        _hnm_on = (str(getattr(args, 'hard_negative_mining', 'false')).lower() == 'true'
+                                   and epoch >= getattr(args, 'hard_negative_start_epoch', 20))
+                        if _hnm_on and T_pred.shape[0] > 2:
+                            with torch.no_grad():
+                                _ps_err = (T_pred[:, :3, :3] - _fwd_gt[:B_cur, :3, :3]).pow(2).sum(dim=(1, 2))
+                            _topk = max(1, int(T_pred.shape[0] * getattr(args, 'hard_negative_topk', 0.3)))
+                            _hard_idx = _ps_err.topk(_topk).indices
+                            if 'per_sample_loss' in loss:
+                                _hn_extra = loss['per_sample_loss'][_hard_idx].mean() * (getattr(args, 'hard_negative_weight', 2.0) - 1.0)
+                            else:
+                                _hn_extra = total_loss * (getattr(args, 'hard_negative_weight', 2.0) - 1.0) * (_topk / T_pred.shape[0])
+                            total_loss = total_loss + _hn_extra
+                            loss['hard_neg_extra'] = _hn_extra.item()
+
+                        # V67: Iterative supervision config (actual forward done after main backward)
+                        _iter_steps = getattr(args, 'iterative_refine', 0)
+                        _iter_enabled = (_iter_steps > 0 and epoch >= getattr(args, 'iterative_refine_start_epoch', 5))
+                        _iter_T_start = T_pred_all.detach() if _iter_enabled else None
 
                         # V42: corr_alignment_loss (slice to B_cur for consistency-doubled batches)
                         if _v42_corr_loss is not None and 'v42_delta_uv' in loss:
@@ -3682,8 +4078,14 @@ def main():
                             _R_gt_zd = _fwd_gt[:B_cur, :3, :3]
                             _R_pred_zd = T_pred[:B_cur, :3, :3]
                             _zd_rpy = _zero_drift_axis_error_deg(_R_gt_zd, _R_pred_zd)
-                            _zd_loss = torch.nn.functional.smooth_l1_loss(
-                                _zd_rpy, torch.zeros_like(_zd_rpy), beta=0.1, reduction='mean')
+                            _zd_margin = float(getattr(args, 'zero_drift_loss_margin_deg', 0.0))
+                            if _zd_margin > 0:
+                                _zd_target = torch.clamp(_zd_rpy.abs() - _zd_margin, min=0.0)
+                                _zd_loss = torch.nn.functional.smooth_l1_loss(
+                                    _zd_target, torch.zeros_like(_zd_target), beta=0.05, reduction='mean')
+                            else:
+                                _zd_loss = torch.nn.functional.smooth_l1_loss(
+                                    _zd_rpy, torch.zeros_like(_zd_rpy), beta=0.1, reduction='mean')
                             _task_zd = _zd_loss_w * _zd_loss
                             loss['zero_drift_loss'] = _zd_loss.item()
                             loss['zero_drift_loss_weight_eff'] = _zd_loss_w
@@ -3823,6 +4225,9 @@ def main():
                                 except Exception:
                                     tprint(f"    Failed to save emergency checkpoint")
                             raise
+                        _ddp_sync_skipped_batch(
+                            model, scaler, optimizer, use_ddp, batch_index,
+                            grad_accum_steps, len(train_loader))
                         continue
                     raise
                 if torch.isnan(total_loss) or torch.isinf(total_loss):
@@ -3876,6 +4281,49 @@ def main():
                                     f"({time.time() - _mgda_t0:.2f}s)")
                     else:
                         scaler.scale(total_loss).backward()
+
+                    # V67: Iterative supervision (gradient accumulation after main backward)
+                    if _iter_enabled and _iter_T_start is not None:
+                        _iter_weight = getattr(args, 'iterative_refine_weight', 0.5)
+                        _iter_explicit_weights = getattr(args, 'iterative_refine_weights', '')
+                        _iter_w_list = None
+                        if _iter_explicit_weights:
+                            _iter_w_list = _parse_csv_cli_list(_iter_explicit_weights)
+                        _iter_use_synthetic = getattr(args, 'iterative_refine_use_synthetic_init', 0) > 0
+                        _iter_synth_degs = []
+                        if _iter_use_synthetic:
+                            _iter_synth_degs = _parse_csv_cli_list(
+                                getattr(args, 'iterative_refine_synthetic_residual_deg', '1.0,0.5'))
+                        _iter_T_current = _iter_T_start
+                        for _iter_i in range(_iter_steps):
+                            if _iter_i > 0 and _iter_use_synthetic and _iter_i - 1 < len(_iter_synth_degs):
+                                _synth_deg = float(_iter_synth_degs[_iter_i - 1])
+                                _synth_init_np, _, _ = generate_single_perturbation_from_T(
+                                    _fwd_gt[:B_cur].detach().cpu().numpy(),
+                                    angle_range_deg=_synth_deg,
+                                    trans_range=0.0,
+                                    rotation_only=True,
+                                    distribution='uniform',
+                                    per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                                )
+                                _iter_T_current = torch.from_numpy(
+                                    _synth_init_np.astype(np.float32)).to(device, non_blocking=True)
+                            with autocast(enabled=use_amp, dtype=amp_dtype):
+                                _iter_T_pred, _, _iter_loss = model(
+                                    _fwd_imgs, _fwd_pcs, _fwd_gt, _iter_T_current, _fwd_post, _fwd_K,
+                                    masks=_fwd_masks, out_init_loss=False,
+                                    domain_ids=_fwd_dom)
+                                if _iter_w_list and _iter_i < len(_iter_w_list):
+                                    _w = _iter_w_list[_iter_i]
+                                else:
+                                    _w = _iter_weight ** (_iter_i + 1)
+                                _iter_step_loss = _iter_loss["total_loss"] * _w
+                            scaler.scale(_iter_step_loss).backward()
+                            _iter_T_current = _iter_T_pred.detach()
+                            if _iter_i == 0:
+                                loss['iter_refine_loss_1'] = _iter_loss["total_loss"].item()
+                        del _iter_T_current, _iter_T_start
+
                 except RuntimeError as _bwd_err:
                     if "CUDA" in str(_bwd_err) or "illegal" in str(_bwd_err):
                         _cuda_error_count = getattr(main, '_cuda_error_count', 0) + 1
@@ -3924,6 +4372,9 @@ def main():
                                 except Exception:
                                     tprint(f"    Failed to save emergency checkpoint")
                             raise
+                        _ddp_sync_skipped_batch(
+                            model, scaler, optimizer, use_ddp, batch_index,
+                            grad_accum_steps, len(train_loader))
                         global_step += 1
                         t_iter_start = time.time()
                         continue
@@ -4307,6 +4758,8 @@ def main():
                 'best_medw': best_medw,
                 'best_dual': best_dual,
                 'best_jacobian': best_jacobian,
+                'best_recovery': best_recovery,
+                'best_zd': best_zd,
                 'kpi_history': kpi_history,
                 'early_stop_counter': early_stop_counter,
                 'jacobian_early_stop_counter': jacobian_early_stop_counter,
@@ -4531,6 +4984,7 @@ def main():
                 {'roll': [], 'pitch': [], 'yaw': []}
                 if args.enable_jacobian_eval > 0 else None
             )
+            inject_recovery_accum = [] if getattr(args, 'enable_inject_recovery_eval', 0) > 0 else None
 
             with torch.no_grad():
                 for batch_index, batch_data in enumerate(val_loader):
@@ -4574,6 +5028,14 @@ def main():
                         for k, v in j_batch.items():
                             if v == v:
                                 jacobian_axis_accum[k].append(v)
+
+                    if (inject_recovery_accum is not None
+                            and batch_index < args.inject_recovery_eval_batches):
+                        _ir = _compute_inject_recovery_one_batch(
+                            raw_model, imgs, pcs_np, masks, gt_T_to_camera_np, intrinsics,
+                            device, args.inject_recovery_eval_deg, use_amp, amp_dtype,
+                            _identity_4x4, xyz_only_choise)
+                        inject_recovery_accum.append(_ir)
 
                     if args.enable_medw_eval > 0 and val_idx_to_seq is not None:
                         T_pred_np_medw = T_pred.detach().cpu().numpy()
@@ -4658,6 +5120,21 @@ def main():
                         jac_result = _finalize_jacobian_axis_accum(_merged_acc)
                 else:
                     jac_result = _finalize_jacobian_axis_accum(jacobian_axis_accum)
+
+            inject_result = None
+            if inject_recovery_accum:
+                if use_ddp:
+                    _ir_gather = _ddp_gather_object(inject_recovery_accum)
+                    if is_main:
+                        inject_recovery_accum = [x for sub in _ir_gather for x in sub]
+                if is_main and inject_recovery_accum:
+                    inject_result = {
+                        'recovery_pct': float(np.mean([x['recovery_pct'] for x in inject_recovery_accum])),
+                        'pred_independence': float(np.mean([x['pred_independence'] for x in inject_recovery_accum])),
+                        'mean_init_rot': float(np.mean([x['mean_init_rot'] for x in inject_recovery_accum])),
+                        'mean_residual_rot': float(np.mean([x['mean_residual_rot'] for x in inject_recovery_accum])),
+                        'inject_deg': float(inject_recovery_accum[0].get('inject_deg', args.inject_recovery_eval_deg)),
+                    }
 
             raw_model.train()
 
@@ -4803,6 +5280,16 @@ def main():
                            f"(no val improvement for {early_stop_counter} eval cycles)")
                     early_stop_triggered = True
 
+                if inject_result is not None:
+                    writer.add_scalar('Epoch/inject_recovery/recovery_pct', inject_result['recovery_pct'], epoch)
+                    writer.add_scalar('Epoch/inject_recovery/pred_independence', inject_result['pred_independence'], epoch)
+                    tprint(f"Epoch [{epoch+1}/{num_epochs}], Mini inject recovery "
+                           f"(fixed {inject_result['inject_deg']:.1f}° RPY): "
+                           f"recovery={inject_result['recovery_pct']:.1f}% "
+                           f"(init={inject_result['mean_init_rot']:.3f}° "
+                           f"residual={inject_result['mean_residual_rot']:.3f}°) "
+                           f"PredIndep={inject_result['pred_independence']:.3f}")
+
                 if args.enable_jacobian_eval > 0 and jac_result is not None:
                     writer.add_scalar('Epoch/jacobian/overall', jac_result['overall'], epoch)
                     writer.add_scalar('Epoch/jacobian/roll', jac_result['roll'], epoch)
@@ -4916,14 +5403,134 @@ def main():
                                f"(max_rpy={medw_max_rpy:.4f}° R={medw_result['roll']:.4f} "
                                f"P={medw_result['pitch']:.4f} Y={medw_result['yaw']:.4f})")
 
+                if (getattr(args, 'enable_zd_gate_ckpt', 0) > 0
+                        and medw_result is not None
+                        and _zd_gate_pass(medw_result, args.dual_gate_zd_max)):
+                    medw_max_rpy = _medw_max_rpy(medw_result)
+                    if medw_max_rpy < best_zd.get('max_rpy', float('inf')):
+                        best_zd.update({
+                            'epoch': epoch + 1,
+                            'rot': medw_result['rot'],
+                            'roll': medw_result['roll'],
+                            'pitch': medw_result['pitch'],
+                            'yaw': medw_result['yaw'],
+                            'max_rpy': medw_max_rpy,
+                        })
+                        model_to_save = model.module if use_ddp else model
+                        zd_path = os.path.join(ckpt_save_dir, 'ckpt_best_zd.pth')
+                        _zd_data = {
+                            'epoch': epoch + 1,
+                            'model_state_dict': model_to_save.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'scaler_state_dict': scaler.state_dict(),
+                            'train_noise': train_noise,
+                            'eval_noise': eval_noise,
+                            'rotation_only': rotation_only,
+                            'epoch_train_errors': last_epoch_train_errors,
+                            'epoch_val_errors': last_epoch_val_errors,
+                            'best_train': best_train,
+                            'best_val': best_val,
+                            'best_medw': best_medw,
+                            'best_dual': best_dual,
+                            'best_recovery': best_recovery,
+                            'best_zd': best_zd,
+                            'medw_eval': medw_result,
+                            'args': vars(args),
+                        }
+                        _zd_data.update(_build_ckpt_metadata(model, args))
+                        if _v321_ema_enabled and _v321_ema_model is not None:
+                            _zd_data['ema_state_dict'] = _v321_ema_model.state_dict()
+                        torch.save(_zd_data, zd_path)
+                        tprint(f"  ★ ZD gate PASS → {zd_path} "
+                               f"(max_rpy={medw_max_rpy:.4f}° < {args.dual_gate_zd_max:.2f}°)")
+
+                _use_inject_rec_gate = (
+                    getattr(args, 'enable_inject_recovery_eval', 0) > 0
+                    and float(getattr(args, 'dual_gate_inject_recovery_min', 0.0)) > 0
+                )
+                if (getattr(args, 'enable_recovery_gate_ckpt', 0) > 0
+                        and (_use_inject_rec_gate or jac_result is not None)
+                        and _recovery_gate_pass(
+                            jac_result, args.dual_gate_recovery_min, inject_result,
+                            getattr(args, 'dual_gate_inject_recovery_min', 0.0),
+                            getattr(args, 'dual_gate_pred_indep_max', 0.55))):
+                    _rec_score = (float(inject_result['recovery_pct'])
+                                  if inject_result is not None
+                                  else float(jac_result['overall']))
+                    if _rec_score > best_recovery.get(
+                            'recovery_pct' if inject_result is not None else 'overall',
+                            float('-inf')):
+                        _upd = {'epoch': epoch + 1}
+                        if inject_result is not None:
+                            _upd.update({
+                                'recovery_pct': float(inject_result['recovery_pct']),
+                                'pred_independence': float(inject_result['pred_independence']),
+                                'mean_init_rot': float(inject_result['mean_init_rot']),
+                                'mean_residual_rot': float(inject_result['mean_residual_rot']),
+                            })
+                        else:
+                            _jac_ov = float(jac_result['overall'])
+                            _upd.update({
+                                'overall': _jac_ov,
+                                'roll': float(jac_result['roll']),
+                                'pitch': float(jac_result['pitch']),
+                                'yaw': float(jac_result['yaw']),
+                            })
+                        best_recovery.update(_upd)
+                        model_to_save = model.module if use_ddp else model
+                        rec_path = os.path.join(ckpt_save_dir, 'ckpt_best_recovery.pth')
+                        _rec_data = {
+                            'epoch': epoch + 1,
+                            'model_state_dict': model_to_save.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'scaler_state_dict': scaler.state_dict(),
+                            'train_noise': train_noise,
+                            'eval_noise': eval_noise,
+                            'rotation_only': rotation_only,
+                            'epoch_train_errors': last_epoch_train_errors,
+                            'epoch_val_errors': last_epoch_val_errors,
+                            'best_train': best_train,
+                            'best_val': best_val,
+                            'best_medw': best_medw,
+                            'best_dual': best_dual,
+                            'best_recovery': best_recovery,
+                            'best_zd': best_zd,
+                            'jacobian_eval': jac_result,
+                            'inject_recovery_eval': inject_result,
+                            'args': vars(args),
+                        }
+                        _rec_data.update(_build_ckpt_metadata(model, args))
+                        if _v321_ema_enabled and _v321_ema_model is not None:
+                            _rec_data['ema_state_dict'] = _v321_ema_model.state_dict()
+                        torch.save(_rec_data, rec_path)
+                        if inject_result is not None:
+                            tprint(f"  ★ Recovery gate PASS → {rec_path} "
+                                   f"(inject recovery={inject_result['recovery_pct']:.1f}% "
+                                   f">= {args.dual_gate_inject_recovery_min:.1f}%, "
+                                   f"PredIndep={inject_result['pred_independence']:.3f})")
+                        else:
+                            tprint(f"  ★ Recovery gate PASS → {rec_path} "
+                                   f"(Jacobian overall={_jac_ov:.3f} >= "
+                                   f"{args.dual_gate_recovery_min:.2f})")
+
                 _dual_pass = False
                 if args.enable_dual_gate_ckpt > 0 and medw_result is not None and jac_result is not None:
                     _dual_pass = _dual_gate_pass(
                         medw_result, jac_result,
-                        args.dual_gate_medw_max, args.dual_gate_jacobian_min)
+                        args.dual_gate_medw_max, args.dual_gate_jacobian_min,
+                        getattr(args, 'dual_gate_recovery_min', 0.0),
+                        inject_result,
+                        getattr(args, 'dual_gate_inject_recovery_min', 0.0),
+                        getattr(args, 'dual_gate_pred_indep_max', 0.55))
                     _dg_verdict, _dg_medw, _dg_jac = _format_dual_gate_status(
                         medw_result, jac_result,
-                        args.dual_gate_medw_max, args.dual_gate_jacobian_min)
+                        args.dual_gate_medw_max, args.dual_gate_jacobian_min,
+                        getattr(args, 'dual_gate_recovery_min', 0.0),
+                        inject_result,
+                        getattr(args, 'dual_gate_inject_recovery_min', 0.0),
+                        getattr(args, 'dual_gate_pred_indep_max', 0.55))
                     if _dual_pass:
                         medw_max_rpy = _medw_max_rpy(medw_result)
                         jac_ov = float(jac_result['overall'])
@@ -4958,8 +5565,11 @@ def main():
                                 'best_val': best_val,
                                 'best_medw': best_medw,
                                 'best_dual': best_dual,
+                                'best_recovery': best_recovery,
+                                'best_zd': best_zd,
                                 'medw_eval': medw_result,
                                 'jacobian_eval': jac_result,
+                                'inject_recovery_eval': inject_result,
                                 'args': vars(args),
                             }
                             _dual_data.update(_build_ckpt_metadata(model, args))
@@ -4971,11 +5581,13 @@ def main():
                     else:
                         tprint(f"  ○ Dual gate FAIL (ep {epoch+1}): {_dg_medw}; {_dg_jac}")
 
-                if (args.enable_medw_eval > 0 or args.enable_jacobian_eval > 0) and is_main:
+                if (args.enable_medw_eval > 0 or args.enable_jacobian_eval > 0
+                        or getattr(args, 'enable_inject_recovery_eval', 0) > 0) and is_main:
                     kpi_history.append({
                         'epoch': epoch + 1,
                         'medw': medw_result,
                         'jacobian': jac_result,
+                        'inject_recovery': inject_result,
                         'dual_pass': _dual_pass,
                     })
 
@@ -5070,6 +5682,25 @@ def main():
             md_lines.append(f"  ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_jacobian.pth')}")
             md_lines.append("")
 
+        if best_recovery.get('epoch', -1) > 0:
+            md_lines.append(f"Best Recovery Gate (Epoch {best_recovery['epoch']}):")
+            if best_recovery.get('recovery_pct', float('-inf')) > float('-inf'):
+                md_lines.append(f"  inject recovery: {best_recovery.get('recovery_pct', float('nan')):.1f}% "
+                                f"PredIndep={best_recovery.get('pred_independence', float('nan')):.3f}")
+            else:
+                md_lines.append(f"  Jacobian overall: {best_recovery.get('overall', float('nan')):.3f}")
+            md_lines.append(f"  ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_recovery.pth')}")
+            md_lines.append("")
+
+        if best_zd.get('epoch', -1) > 0:
+            md_lines.append(f"Best ZD Gate (Epoch {best_zd['epoch']}):")
+            md_lines.append(f"  max(R,P,Y): {best_zd.get('max_rpy', float('nan')):.4f}° "
+                            f"(R:{best_zd.get('roll', float('nan')):.4f} "
+                            f"P:{best_zd.get('pitch', float('nan')):.4f} "
+                            f"Y:{best_zd.get('yaw', float('nan')):.4f})")
+            md_lines.append(f"  ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_zd.pth')}")
+            md_lines.append("")
+
         if checkpoint_records:
             md_lines.append(f"Checkpoint Performance Table ({len(checkpoint_records)} checkpoints)")
             md_lines.append("")
@@ -5138,7 +5769,8 @@ def main():
 
         if args.enable_medw_eval > 0 or args.enable_jacobian_eval > 0:
             conv_md, conv_json, conv_verdict = _write_convergence_report(
-                log_dir, ckpt_save_dir, args, best_medw, best_dual, kpi_history)
+                log_dir, ckpt_save_dir, args, best_medw, best_dual,
+                best_recovery, best_zd, kpi_history)
             tprint(f"收敛报告: {conv_verdict} → {conv_md}")
             tprint(f"  JSON: {conv_json}")
 

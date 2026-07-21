@@ -175,6 +175,9 @@ MAX_RETRIES=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys
 RETRY_DELAY=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('global',{}).get('retry_delay', 30))" 2>/dev/null)
 GLOBAL_SKIP_PATTERN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); v=c.get('global',{}).get('skip_pattern'); print(v if v else '')" 2>/dev/null)
 MAX_RETRIES=${MAX_RETRIES:-0}
+case "$MAX_RETRIES" in
+    ''|*[!0-9]*) MAX_RETRIES=0 ;;
+esac
 RETRY_DELAY=${RETRY_DELAY:-30}
 # CLI --skip-pattern 优先；未指定时使用 YAML global.skip_pattern
 if [ -z "$SKIP_PATTERN" ] && [ -n "$GLOBAL_SKIP_PATTERN" ]; then
@@ -419,6 +422,7 @@ build_train_command() {
     python3 - "$config_json" "$exp_idx" <<'PYTHON_EOF'
 import sys
 import json
+import os
 import shlex
 
 config = json.loads(sys.argv[1])
@@ -448,6 +452,15 @@ for key, value in env_vars.items():
 params = {}
 params.update(default_params)  # 先应用defaults
 params.update(exp.get('params') or {})  # 实验配置覆盖
+
+# pretrain_ckpt 链式 fallback（dual gate 未 PASS 时 ckpt_best_dual 不存在）
+_pretrain = params.get('pretrain_ckpt')
+if _pretrain and not os.path.isfile(_pretrain):
+    _fallback_raw = params.get('pretrain_ckpt_fallback') or ''
+    for _fb in [x.strip() for x in str(_fallback_raw).split(',') if x.strip()]:
+        if os.path.isfile(_fb):
+            params['pretrain_ckpt'] = _fb
+            break
 
 # 构建start_training.sh参数
 args = []
@@ -523,6 +536,7 @@ OPTIM_PARAMS = [
     ('early_stopping_patience', '--early_stopping_patience'),
     ('seed', '--seed'),
     ('pretrain_ckpt', '--pretrain_ckpt'),
+    ('pretrain_ckpt_fallback', '--pretrain_ckpt_fallback'),
     ('resume_ckpt', '--resume_ckpt'),
     ('no_amp', '--no_amp'),
     ('amp_bf16', '--amp_bf16'),
@@ -571,6 +585,15 @@ OPTIM_PARAMS = [
     ('enable_dual_gate_ckpt', '--enable_dual_gate_ckpt'),
     ('dual_gate_jacobian_min', '--dual_gate_jacobian_min'),
     ('dual_gate_medw_max', '--dual_gate_medw_max'),
+    ('dual_gate_recovery_min', '--dual_gate_recovery_min'),
+    ('dual_gate_inject_recovery_min', '--dual_gate_inject_recovery_min'),
+    ('dual_gate_pred_indep_max', '--dual_gate_pred_indep_max'),
+    ('dual_gate_zd_max', '--dual_gate_zd_max'),
+    ('enable_recovery_gate_ckpt', '--enable_recovery_gate_ckpt'),
+    ('enable_zd_gate_ckpt', '--enable_zd_gate_ckpt'),
+    ('enable_inject_recovery_eval', '--enable_inject_recovery_eval'),
+    ('inject_recovery_eval_deg', '--inject_recovery_eval_deg'),
+    ('inject_recovery_eval_batches', '--inject_recovery_eval_batches'),
     ('ddp_auto_scale', '--ddp_auto_scale'),
     ('ddp_reference_gpus', '--ddp_reference_gpus'),
     ('max_scaled_lr', '--max_scaled_lr'),
@@ -622,6 +645,17 @@ OPTIM_PARAMS = [
     ('tinit_sensitivity_weight', '--tinit_sensitivity_weight'),
     ('correction_quat_loss_weight', '--correction_quat_loss_weight'),
     ('iterative_refine', '--iterative_refine'),
+    ('iterative_refine_weight', '--iterative_refine_weight'),
+    ('iterative_refine_weights', '--iterative_refine_weights'),
+    ('iterative_refine_start_epoch', '--iterative_refine_start_epoch'),
+    ('iterative_refine_use_synthetic_init', '--iterative_refine_use_synthetic_init'),
+    ('iterative_refine_synthetic_residual_deg', '--iterative_refine_synthetic_residual_deg'),
+    ('jacobian_loss_progressive', '--jacobian_loss_progressive'),
+    ('jacobian_loss_probe_schedule', '--jacobian_loss_probe_schedule'),
+    ('hard_negative_mining', '--hard_negative_mining'),
+    ('hard_negative_topk', '--hard_negative_topk'),
+    ('hard_negative_weight', '--hard_negative_weight'),
+    ('hard_negative_start_epoch', '--hard_negative_start_epoch'),
     ('native_cross', '--native_cross'),
     ('native_cross_pc_groups', '--native_cross_pc_groups'),
     ('native_cross_n_harmonic', '--native_cross_n_harmonic'),
@@ -687,6 +721,7 @@ OPTIM_PARAMS = [
     ('zero_drift_loss_weight_start', '--zero_drift_loss_weight_start'),
     ('zero_drift_loss_ramp_epochs', '--zero_drift_loss_ramp_epochs'),
     ('zero_drift_loss_start_epoch', '--zero_drift_loss_start_epoch'),
+    ('zero_drift_loss_margin_deg', '--zero_drift_loss_margin_deg'),
     ('zero_drift_dedicated_ratio', '--zero_drift_dedicated_ratio'),
     ('enable_jacobian_gate_ckpt', '--enable_jacobian_gate_ckpt'),
     ('jacobian_early_stop_min', '--jacobian_early_stop_min'),
@@ -758,6 +793,19 @@ OPTIM_PARAMS = [
     ('augment_lidar_sparse_prob', '--augment_lidar_sparse_prob'),
     ('augment_lidar_sparse_lines', '--augment_lidar_sparse_lines'),
     ('augment_lidar_vertical_fov', '--augment_lidar_vertical_fov'),
+    # V60: Implicit Alignment (IJCV 2026 paper)
+    ('use_sim_loss', '--use_sim_loss'),
+    ('sim_loss_weight', '--sim_loss_weight'),
+    ('sim_loss_warmup', '--sim_loss_warmup'),
+    ('sim_loss_soft_radius', '--sim_loss_soft_radius'),
+    ('sim_n_layers', '--sim_n_layers'),
+    ('use_registry_token', '--use_registry_token'),
+    ('use_fov_cls_loss', '--use_fov_cls_loss'),
+    ('fov_cls_weight', '--fov_cls_weight'),
+    ('use_3d_pos_encoding', '--use_3d_pos_encoding'),
+    ('pos_enc_depth_bins', '--pos_enc_depth_bins'),
+    ('use_coarse_refine', '--use_coarse_refine'),
+    ('coarse_refine_detach_epoch', '--coarse_refine_detach_epoch'),
 ]
 # 仅这些 flag 必须用 --flag=value（argparse 负值 / shell 逗号转义问题）
 _EQUALS_FORM_FLAGS = {
@@ -767,8 +815,11 @@ _EQUALS_FORM_FLAGS = {
 
 def _cli_arg(cli_flag, val):
     s = str(val)
-    if s.startswith('-') or cli_flag in _EQUALS_FORM_FLAGS:
-        return f"{cli_flag}={s}"
+    if s.startswith('-') or cli_flag in _EQUALS_FORM_FLAGS or ',' in s:
+        return f"{cli_flag}={shlex.quote(s)}"
+    # Quote values with shell metacharacters (< > cause redirection in eval)
+    if any(c in s for c in '<>|&;'):
+        return f"{cli_flag} {shlex.quote(s)}"
     if ' ' in s:
         return f"{cli_flag} {shlex.quote(s)}"
     return f"{cli_flag} {s}"
@@ -788,6 +839,12 @@ if params.get('projfusion_image_hw') is not None:
 # pose_aware_sampling (boolean flag)
 if params.get('pose_aware_sampling') in (True, 1, '1', 'true', 'True'):
     args.append("--pose_aware_sampling")
+
+# acceleration filter thresholds
+if params.get('acc_filter_lin_thresh', 0) > 0:
+    args.append(f"--acc_filter_lin_thresh {params['acc_filter_lin_thresh']}")
+if params.get('acc_filter_ang_thresh', 0) > 0:
+    args.append(f"--acc_filter_ang_thresh {params['acc_filter_ang_thresh']}")
 
 # 批量模式必须前台执行，否则 start_training.sh 会 nohup 后台启动并立即返回，
 # 导致多个实验同时抢占 GPU。忽略 YAML 中的 foreground 设置。
@@ -893,6 +950,7 @@ print(json.dumps({
     'zstep': zstep,
     'angle': angle,
     'pretrain_ckpt': params.get('pretrain_ckpt') or '',
+    'pretrain_ckpt_fallback': params.get('pretrain_ckpt_fallback') or '',
     'pointgpt_ckpt': params.get('native_cross_pointgpt_ckpt') or '',
     'resume_ckpt': params.get('resume_ckpt') if params.get('resume_ckpt') is not None else '',
 }))
@@ -909,6 +967,7 @@ PYTHON_INFO
     ZSTEP=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['zstep'])")
     ANGLE=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['angle'])")
     PRETRAIN_CKPT=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pretrain_ckpt',''))")
+    PRETRAIN_FALLBACK=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pretrain_ckpt_fallback',''))")
     POINTGPT_CKPT=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pointgpt_ckpt',''))")
     RESUME_CKPT=$(echo "$EXPERIMENT_INFO" | python3 -c "import sys,json; v=json.load(sys.stdin).get('resume_ckpt',''); print('' if v is None else v)")
     
@@ -959,10 +1018,26 @@ PYTHON_INFO
     fi
 
     if [ -n "$PRETRAIN_CKPT" ] && [ ! -f "$PRETRAIN_CKPT" ]; then
-        SKIPPED=$((SKIPPED + 1))
-        log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
-        log "  原因: pretrain_ckpt 不存在: $PRETRAIN_CKPT"
-        continue
+        _PRETRAIN_RESOLVED=""
+        if [ -n "$PRETRAIN_FALLBACK" ]; then
+            IFS=',' read -ra _PRETRAIN_FBS <<< "$PRETRAIN_FALLBACK"
+            for _fb in "${_PRETRAIN_FBS[@]}"; do
+                _fb="${_fb// /}"
+                if [ -n "$_fb" ] && [ -f "$_fb" ]; then
+                    _PRETRAIN_RESOLVED="$_fb"
+                    break
+                fi
+            done
+        fi
+        if [ -n "$_PRETRAIN_RESOLVED" ]; then
+            log "  ⚠️  pretrain_ckpt 不存在，使用 fallback: $_PRETRAIN_RESOLVED"
+            PRETRAIN_CKPT="$_PRETRAIN_RESOLVED"
+        else
+            SKIPPED=$((SKIPPED + 1))
+            log "⏭️  跳过实验 [$EXP_NUM/$TOTAL]: $EXP_NAME"
+            log "  原因: pretrain_ckpt 不存在: $PRETRAIN_CKPT (fallback 亦不可用)"
+            continue
+        fi
     fi
     
     # 检查实验是否已完成（基于 checkpoint 文件判断，兼容多机 DDP）
@@ -1048,8 +1123,9 @@ PYTHON_INFO
             break
         else
             log "实验 [$EXP_NUM/$TOTAL] 异常退出 (耗时: ${HOURS}h${MINS}m, exit=$EXIT_CODE)${ATTEMPT_LABEL}"
-            if [ $ATTEMPT -lt "$MAX_RETRIES" ]; then
-                log "将自动重试 (--resume_ckpt auto)，剩余重试次数: $((MAX_RETRIES - ATTEMPT))"
+            if [ "$ATTEMPT" -lt "$MAX_RETRIES" ]; then
+                _REMAIN_RETRIES=$(( MAX_RETRIES - ATTEMPT ))
+                log "将自动重试 --resume_ckpt auto，剩余重试次数: ${_REMAIN_RETRIES}"
             fi
         fi
         

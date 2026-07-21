@@ -1,0 +1,214 @@
+# V68: Ultimate Recovery 方案 — SwinT + 全部优化手段集成
+#
+# 目标: inject 3° + ≤5次迭代 → Recovery > 95% on test_data_c1
+#
+# ========================================================================
+# 设计思路 (基于 V62/V66/V67 全部经验)
+# ========================================================================
+#
+# V62 教训: SwinT 有好的迭代校正能力, 但 domain gap 导致 OOD 下 Jacobian 衰退
+# V66 教训: DINOv2 域无关好但 patch_size=14 空间分辨率不够, 迭代失效
+# V67 思路: 迭代监督 + Jacobian loss + 域增强, 还在验证中
+#
+# V68 核心策略:
+#   1. SwinT backbone (保留 4×4 patch = 高空间分辨率)
+#   2. 多尺度迭代监督: 3轮迭代, 各轮用不同尺度扰动
+#   3. 更强 Jacobian 直接监督: weight=0.3, probe_deg=[0.5, 1.0, 2.0, 3.0]
+#   4. 极端域增强: mount_jitter=5.0° + 高强度 color/style
+#   5. 硬负样本挖掘: 对 loss 高的样本加权
+#   6. Mixup 增强: 随机混合不同 trip 的 BEV 特征
+#   7. 渐进式难度: epoch 0-50 简单, 50-100 中等, 100-200 困难
+#
+# 预期: 
+#   - Base Jacobian > 0.93 on OOD
+#   - 配合部署 TTA 去除 ~95% ZD  
+#   - 5 次迭代 → 0.93^5 * (1-0.95) * ZD + small_residual → Recovery > 95%
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v68_ultimate_recovery_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === 网络结构 (CF-BEV-R, same as V62) ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # ===================================================================
+    # V68 核心1: 多尺度迭代监督 (3轮, 比 V67 的2轮更强)
+    # ===================================================================
+    # 第1轮: 正常输入 → pred1 (大幅度校正)
+    # 第2轮: pred1 + init → pred2 (精细校正)  
+    # 第3轮: pred2 + init → pred3 (超精细校正)
+    iterative_refine: 3
+    iterative_refine_weight: 0.4
+    iterative_refine_start_epoch: 3
+    # 各轮loss权重递增: 后轮更重要
+    iterative_refine_weights: "0.2,0.3,0.5"
+
+    # ===================================================================
+    # V68 核心2: 更强 Jacobian 直接监督
+    # ===================================================================
+    # 多尺度 probe: 模型必须在各种残差尺度下都能校正
+    jacobian_loss_weight: 0.3
+    jacobian_loss_start_epoch: 5
+    jacobian_loss_probe_deg: 2.0
+    jacobian_loss_interval: 3
+    jacobian_loss_axis_weights: "1.0,1.5,1.5"
+    # 渐进难度: 前期 probe 大角度, 后期 probe 小角度
+    jacobian_loss_progressive: true
+    jacobian_loss_probe_schedule: "epoch<50:3.0,epoch<100:2.0,epoch>=100:1.0"
+
+    # ===================================================================
+    # V68 核心3: 极端域增强
+    # ===================================================================
+    augment_color_jitter: 0.5
+    augment_color_jitter_prob: 0.8
+    # mount_jitter: 覆盖测试集 ±5° 的 mounting 差异
+    augment_mount_jitter_prob: 0.6
+    augment_mount_jitter_rot_sigma: 5.0
+    augment_mount_jitter_trans_sigma: 0.03
+    # Style augmentation
+    augment_random_grayscale_prob: 0.1
+    augment_gaussian_blur_prob: 0.2
+    augment_random_erasing_prob: 0.1
+
+    # ===================================================================
+    # V68 核心4: 硬负样本挖掘
+    # ===================================================================
+    hard_negative_mining: true
+    hard_negative_topk: 0.3
+    hard_negative_weight: 2.0
+    hard_negative_start_epoch: 20
+
+    # === Similarity Loss ===
+    use_sim_loss: 1
+    sim_loss_weight: 2.5
+    sim_loss_warmup: 5
+    sim_loss_soft_radius: 0.0
+    sim_n_layers: 3
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.5
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 0
+
+    # === 分辨率 (SwinT native) ===
+    target_width: 960
+    target_height: 540
+
+    # === Backbone (SwinT, patch_size=4 → 240×135 feature map) ===
+    backbone_type: swin
+    backbone_lr_scale: 0.05
+    head_dropout: 0.15
+
+    # === DDP 8卡 ===
+    batch_size: 8
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # === 损失函数 (轴权重强化 Pitch/Yaw) ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,2.5"
+    use_geodesic_loss: 1
+    corr_alignment_weight: 0.3
+    corr_alignment_warmup: 10
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    overcorrection_penalty: 0.0
+
+    # === 扰动 (更激进的多尺度, 强化小角度) ===
+    multi_scale_perturb: "0.3:0.15,0.5:0.15,1.0:0.20,2.0:0.20,3.0:0.15,5.0:0.15"
+    symmetric_perturb: 1
+    per_axis_prob: 0.5
+    per_axis_weights: "1.0,1.5,1.5"
+    perturb_distribution: uniform
+    zero_perturbation_prob: 0.1
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 3.0
+
+    # === 数据 ===
+    xyz_only: 1
+    max_pcd_points: 16384
+    max_frames_per_seq: 500
+    foreground: true
+    pitch_vertical_bands: 3
+
+    # === 评估 ===
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 3
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.93
+    dual_gate_medw_max: 0.06
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    resume_ckpt: auto
+
+experiments:
+  - name: "c1_v68_ultimate_S1"
+    description: "V68: 3轮迭代监督 + 强Jacobian loss + 极端域增强 + 硬负样本, V62 warm-start, 300ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v68_ultimate_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 300
+      warmup_epochs: 5
+      learning_rate: 3e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 75
+      cosine_Tmult: 2
+      early_stopping_patience: 80
+      eval_epoches: 10
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v62_pure_recovery_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"

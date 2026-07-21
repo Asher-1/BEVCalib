@@ -1,0 +1,43 @@
+# V67 迭代推理泛化评估 (cf_bev_r_iter_steps=2)
+# 对比 generalization_c1_v67 单步结果, 量化 eval 低估程度
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_v67_iter2"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 8
+  vis_interval: 200
+  timeout: 7200
+  shortcut_diag: false
+  generalization_diag: true
+  cf_bev_r_iter_steps: 2
+
+models:
+  - label: "c1-v67-iter-domain-S1-best-dual-iter2"
+    dir_name: "model_small_5deg_c1_v67_iterative_domain_S1"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V67 best-dual, iterative_inference n=2"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v62-baseline-iter2"
+    dir_name: "model_small_5deg_c1_v62_pure_recovery_S1"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V62 baseline, iterative_inference n=2"
+    pitch_vertical_bands: 3
+    target_width: 960
+    target_height: 540

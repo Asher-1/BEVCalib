@@ -44,7 +44,7 @@ class CustomDataset(Dataset):
     KITTI_SEQUENCES = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', 
                        '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21']
     
-    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None, max_frames_per_seq=None, sample_step=None, pose_aware_sampling=False, poses_dir=None, return_seq_id=False):
+    def __init__(self, data_folder='./data/kitti-odemetry', suf='.png', sequences=None, auto_detect=True, target_size=None, max_frames_per_seq=None, sample_step=None, pose_aware_sampling=False, poses_dir=None, return_seq_id=False, acc_filter_lin_thresh=0.0, acc_filter_ang_thresh=0.0):
         # 使用 bev_settings 的体素化范围配置
         self.x_min, self.x_max = xbound[0], xbound[1]
         self.y_min, self.y_max = ybound[0], ybound[1]
@@ -85,6 +85,8 @@ class CustomDataset(Dataset):
         self.pose_aware_sampling = pose_aware_sampling
         self.poses_dir = poses_dir or os.path.join(data_folder, 'poses')
         self.return_seq_id = return_seq_id
+        self.acc_filter_lin_thresh = acc_filter_lin_thresh
+        self.acc_filter_ang_thresh = acc_filter_ang_thresh
         if max_frames_per_seq and sample_step:
             raise ValueError(
                 "max_frames_per_seq 和 sample_step 互斥，不可同时设置。"
@@ -212,9 +214,9 @@ class CustomDataset(Dataset):
                         [0, K_orig[1, 1] * sy, K_orig[1, 2] * sy],
                         [0, 0, 1]
                     ])
-                print(f"[CustomDataset] ✅ 使用预处理图像: {self._resized_dir_name}/ (跳过运行时4K PNG解码+resize)")
+                print(f"[CustomDataset] ✅ 使用预处理图像: {self._resized_dir_name}/ (跳过运行时原图解码+resize)")
             else:
-                print(f"[CustomDataset] ⚠️ 预处理目录 {self._resized_dir_name}/ 未找到,使用原始4K PNG")
+                print(f"[CustomDataset] ⚠️ 预处理目录 {self._resized_dir_name}/ 未找到,使用原始分辨率")
     
     def _detect_sequences(self):
         """自动检测数据集中存在的序列"""
@@ -332,7 +334,68 @@ class CustomDataset(Dataset):
                 last_sampled_dist = cumulative_dist[i]
         
         keep.add(n_frames - 1)
+        
+        # Acceleration-based filtering (if thresholds are set)
+        if self.acc_filter_lin_thresh > 0 or self.acc_filter_ang_thresh > 0:
+            keep = self._apply_acc_filter(seq_id, n_frames, keep, poses)
+        
         return sorted(k for k in keep if k < n_frames)
+    
+    def _apply_acc_filter(self, seq_id, n_frames, keep, poses):
+        """Filter out frames with high acceleration (poor motion compensation)."""
+        time_file = os.path.join(self.dataset_root, 'sequences', seq_id, 'times.txt')
+        if not os.path.exists(time_file):
+            return keep
+        
+        try:
+            times = np.loadtxt(time_file)
+        except Exception:
+            return keep
+        
+        if len(times) < n_frames:
+            return keep
+        
+        n = min(n_frames, len(poses), len(times))
+        
+        # Compute per-frame linear velocity
+        lin_vels = np.zeros(n)
+        for i in range(1, n):
+            dt = times[i] - times[i-1]
+            if dt > 0.001:
+                lin_vels[i] = np.linalg.norm(poses[i][:3, 3] - poses[i-1][:3, 3]) / dt
+        
+        # Compute per-frame angular velocity (degrees/s)
+        ang_vels = np.zeros(n)
+        for i in range(1, n):
+            dt = times[i] - times[i-1]
+            if dt > 0.001:
+                R_rel = poses[i][:3, :3] @ poses[i-1][:3, :3].T
+                cos_a = np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0)
+                ang_vels[i] = np.degrees(np.arccos(cos_a)) / dt
+        
+        # Compute accelerations (frame i uses velocity change at i)
+        high_acc_frames = set()
+        for i in range(2, n):
+            dt = times[i] - times[i-1]
+            if dt < 0.001:
+                continue
+            lin_acc = abs(lin_vels[i] - lin_vels[i-1]) / dt
+            ang_acc = abs(ang_vels[i] - ang_vels[i-1]) / dt
+            
+            if (self.acc_filter_lin_thresh > 0 and lin_acc > self.acc_filter_lin_thresh):
+                high_acc_frames.add(i)
+            if (self.acc_filter_ang_thresh > 0 and ang_acc > self.acc_filter_ang_thresh):
+                high_acc_frames.add(i)
+        
+        if high_acc_frames:
+            before = len(keep)
+            keep = keep - high_acc_frames
+            removed = before - len(keep)
+            if removed > 0:
+                print(f"    [AccFilter] Seq {seq_id}: removed {removed}/{before} frames "
+                      f"(lin>{self.acc_filter_lin_thresh}m/s² or ang>{self.acc_filter_ang_thresh}°/s²)")
+        
+        return keep
     
     @staticmethod
     def _finalize_stopped_run(indices, keep):

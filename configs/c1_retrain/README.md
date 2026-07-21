@@ -41,6 +41,7 @@
 
 | 配置 | 原型 | 特点 | 优先级 |
 |------|------|------|--------|
+| `c1_v8_pure_baseline_cf_bev_r.yaml` | v8 | 纯净基座: step+无aug+无tricks | P1 |
 | `c1_v45a_no_in_cf_bev_r.yaml` | v45a | 128 groups, 泛化综合最优 | P1 |
 | `c1_v50a_optuna_no_cons_cf_bev_r.yaml` | v50a | Optuna超参+无consistency | P1 |
 | `c1_v44_high_recovery_cf_bev_r.yaml` | v44 | Recovery最强(82.1%) | P1 |
@@ -55,22 +56,49 @@ bash batch_train.sh configs/c1_retrain/c1_baseline_v45c_cf_bev_r.yaml
 bash batch_train.sh configs/c1_retrain/c1_v48a_multiscale_cf_bev_r.yaml
 
 # P1: 备选对照实验
+bash batch_train.sh configs/c1_retrain/c1_v8_pure_baseline_cf_bev_r.yaml
 bash batch_train.sh configs/c1_retrain/c1_v45a_no_in_cf_bev_r.yaml
 bash batch_train.sh configs/c1_retrain/c1_v50a_optuna_no_cons_cf_bev_r.yaml
 bash batch_train.sh configs/c1_retrain/c1_v44_high_recovery_cf_bev_r.yaml
 ```
 
+### 论文优化 (V60 Implicit Alignment)
+
+| 配置 | 原型 | 特点 | 优先级 |
+|------|------|------|--------|
+| `c1_v60_implicit_align_cf_bev_r.yaml` | IJCV 2026 论文 | L_sim + Registry Token + 3D PE + FOV Cls | P0 |
+
+## 训练 V60 (论文优化)
+
+```bash
+# V60: 论文核心优化 (预期泛化 < 0.05°)
+bash batch_train.sh configs/c1_retrain/c1_v60_implicit_align_cf_bev_r.yaml
+```
+
+## 评估命令
+
+训练完成后，使用统一评估配置对所有模型进行泛化测试：
+
+```bash
+# 标准评估 (含generalization_diag)
+python run_generalization_eval.py --config configs/c1_retrain/eval_generalization_c1.yaml --parallel -1 --eval_max_frames_per_seq 400
+
+# 仅跑shortcut诊断
+python run_generalization_eval.py --config configs/c1_retrain/eval_generalization_c1.yaml --generalization_diag --parallel -1 --eval_max_frames_per_seq 400
+```
+
 ## 版本配置关键差异
 
-| 维度 | v44 | v45a | v45c(baseline) | v48a | v50a |
-|------|-----|------|----------------|------|------|
-| cf_n_groups | 128 | 128 | 256 | 256 | 128 |
-| GIN | 无 | 无 | 无 | 无 | 无 |
-| consistency_loss | 0.5 | 0.5 | 0.5 | **0.0** | **0.0** |
-| multi_scale_perturb | 无 | 无 | 无 | **有** | **有** |
-| lr_schedule | step | step | cosine | cosine | cosine |
-| overcorrection | 无 | 无 | 无 | 2.0 | 1.5 |
-| pitch_vertical_bands | - | - | - | 3 | 5 |
+| 维度 | v8 pure | v44 | v45a | v45c(baseline) | v48a | v50a |
+|------|---------|-----|------|----------------|------|------|
+| cf_n_groups | 128 | 128 | 128 | 256 | 256 | 128 |
+| GIN | 无 | 无 | 无 | 无 | 无 | 无 |
+| consistency_loss | 0.5 | 0.5 | 0.5 | 0.5 | **0.0** | **0.0** |
+| multi_scale_perturb | **无** | 无 | 无 | 无 | **有** | **有** |
+| lr_schedule | **step** | step | step | cosine | cosine | cosine |
+| overcorrection | **无** | 无 | 无 | 无 | 2.0 | 1.5 |
+| pitch_vertical_bands | 3 | 3 | 3 | 3 | 3 | 5 |
+| augmentation | **最少** | 标准 | 标准 | 标准 | 标准 | 标准 |
 
 ## 预期效果
 

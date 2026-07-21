@@ -1,16 +1,23 @@
-# C1 V45a风格: 无IN, 128 groups (泛化综合最优 GS_medw=0.4946)
+# C1 V8精神: 纯净基座 (最小化改动, 验证网络结构本身能力)
 #
 # 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080, FOV~98°)
 # 目标: Recovery>95% (3-pass) + RPY泛化<0.1° + 固定平移只优化旋转
 #
-# 基于 v45a-S1-quick (泛化排名第1: GS_medw=0.4946, GenRec=66.3%):
-#   - 无IN/GIN (保留扰动敏感性)
-#   - cf_n_groups=128 (原始配置)
-#   - Step schedule (proven for S1)
-#   - 较强domain增强 (mount_jitter 0.4, color 0.3)
+# V8设计哲学: "最简单的往往最好"
+#   原始V8: Linear head + quaternion + StepLR + 无aug = ALL冠军 (泛化0.494°)
+#   当时V8的关键发现: 减少tricks,依赖纯粹的网络学习能力
+#
+# 本配置: CF-BEV-R架构 + V8精神的训练策略
+#   - 无GIN, 无InstanceNorm (保持最大扰动敏感性)
+#   - 无multi-scale, 无magnitude_head (最纯净)
+#   - 无overcorrection, 无symmetric_perturb
+#   - Step schedule (V8验证过最稳定)
+#   - 适中consistency (V44风格, 保证Recovery真实)
+#   - 最少augmentation (仅mount_jitter)
+#   - cf_n_groups=128 (原始设置, 不追求更多groups)
 #
 # Usage:
-#   bash batch_train.sh configs/c1_retrain/c1_v45a_no_in_cf_bev_r.yaml
+#   bash batch_train.sh configs/c1_retrain/c1_v8_pure_baseline_cf_bev_r.yaml
 
 global:
   dry_run: false
@@ -34,6 +41,7 @@ defaults:
     fusion_backend: cf_bev_r
     rotation_only: true
 
+    # 网络结构: 最基础的CF-BEV-R
     cf_feat_dim: 256
     cf_n_groups: 128
     cf_knn: 8
@@ -48,7 +56,7 @@ defaults:
     use_pitch_branch: 1
     corr_window_mode: adaptive
 
-    # v45a: DLA + PitchFusion, 无IN
+    # 无任何归一化trick
     use_dla: 1
     use_pitch_fusion: 1
     use_instance_norm: 0
@@ -56,7 +64,7 @@ defaults:
 
     backbone_type: swin
     backbone_lr_scale: 0.1
-    head_dropout: 0.15
+    head_dropout: 0.1
 
     batch_size: 16
     learning_rate: 1e-4
@@ -66,30 +74,34 @@ defaults:
     ddp_auto_scale: 0
     use_compile: false
 
+    # Loss: 简洁配置
     enable_axis_loss: true
     weight_axis_rotation: 0.5
     axis_weights: "1.5,4.0,1.5"
     use_geodesic_loss: 0
     corr_alignment_weight: 0.2
     corr_alignment_warmup: 20
-    pitch_aux_weight: 0.4
+    pitch_aux_weight: 0.3
     quat_norm_weight: 0.5
     seq_consistency_weight: 0.1
 
+    # Anti-shortcut: 标准配置
     tinit_dropout_prob: 0.3
     continuous_tinit_noise: 1
     continuous_noise_max_deg: 15.0
     consistency_loss_weight: 0.5
-    consistency_loss_start_epoch: 10
+    consistency_loss_start_epoch: 5
     zero_perturbation_prob: 0.15
 
-    augment_mount_jitter_prob: 0.4
-    augment_mount_jitter_rot_sigma: 1.5
-    augment_mount_jitter_trans_sigma: 0.015
-    augment_intrinsic: 0.03
-    augment_intrinsic_cxcy: 0.015
-    augment_color_jitter: 0.3
+    # 最少augmentation (V8精神: 少即是多)
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.0
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    augment_color_jitter: 0.0
 
+    # 数据加载
     xyz_only: 1
     max_pcd_points: 16384
     perturb_distribution: truncated_normal
@@ -101,6 +113,7 @@ defaults:
     augment_pc_dropout: 0.0
     augment_pitch_flip_prob: 0.0
 
+    # 评估与保存
     no_tensorboard: true
     no_amp: 1
     enable_vis: 0
@@ -121,44 +134,42 @@ defaults:
     resume_ckpt: auto
 
 experiments:
-  # ===== S1: ±5° step schedule =====
-  - name: "c1_v45a_no_in_S1"
-    description: "C1 v45a S1: ±5° no-IN, step schedule, rotation-only, scratch"
+  # ===== S1: ±5° Step Schedule (V8验证过最稳定) =====
+  - name: "c1_v8_pure_baseline_S1"
+    description: "C1 V8 pure baseline: step schedule, minimal aug, rotation-only"
     dataset: "all_training_data_c1"
-    version: "c1_v45a_no_in_S1"
+    version: "c1_v8_pure_baseline_S1"
     params:
       angle_range_deg: 5
       trans_range: 0.0
       eval_angle_range_deg: 5
       num_epochs: 150
-      warmup_epochs: 8
+      warmup_epochs: 5
       lr_schedule: step
       step_size: 40
       early_stopping_patience: 50
       eval_epoches: 10
       rocr_detach_epochs: 999
-      seq_consistency_start_epoch: 999
-      zero_perturbation_prob: 0.10
+      seq_consistency_start_epoch: 5
       pretrain_ckpt: null
 
-  # ===== S2: ±3° finetune =====
-  - name: "c1_v45a_no_in_S2"
-    description: "C1 v45a S2: ±3° finetune, rotation-only"
+  # ===== S2: ±3° fine-tune =====
+  - name: "c1_v8_pure_baseline_S2"
+    description: "C1 V8 pure baseline S2: ±3° finetune"
     dataset: "all_training_data_c1"
-    version: "c1_v45a_no_in_S2"
+    version: "c1_v8_pure_baseline_S2"
     params:
       angle_range_deg: 3
       trans_range: 0.0
       eval_angle_range_deg: 5
-      num_epochs: 120
-      warmup_epochs: 5
+      num_epochs: 100
+      warmup_epochs: 3
       learning_rate: 5e-5
-      lr_schedule: cosine_warm_restarts
-      cosine_T0: 30
-      cosine_Tmult: 2
+      lr_schedule: step
+      step_size: 30
       early_stopping_patience: 30
       eval_epoches: 5
-      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v45a_no_in_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v8_pure_baseline_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
       rocr_detach_epochs: 999
       seq_consistency_start_epoch: 0
       per_axis_prob: 0.5

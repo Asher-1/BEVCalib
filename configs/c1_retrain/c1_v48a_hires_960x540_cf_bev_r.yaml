@@ -1,16 +1,25 @@
-# C1 V45a风格: 无IN, 128 groups (泛化综合最优 GS_medw=0.4946)
+# C1 V48a Hi-Res: 960×540 输入分辨率 (解决亚像素精度瓶颈)
 #
 # 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080, FOV~98°)
 # 目标: Recovery>95% (3-pass) + RPY泛化<0.1° + 固定平移只优化旋转
 #
-# 基于 v45a-S1-quick (泛化排名第1: GS_medw=0.4946, GenRec=66.3%):
-#   - 无IN/GIN (保留扰动敏感性)
-#   - cf_n_groups=128 (原始配置)
-#   - Step schedule (proven for S1)
-#   - 较强domain增强 (mount_jitter 0.4, color 0.3)
+# 核心改进: 分辨率从 640×360 提升到 960×540
+#   - 640×360: 0.1° 旋转 = 0.49px 偏移 (亚像素, 网络无法检测)
+#   - 960×540: 0.1° 旋转 = 0.73px 偏移 (可检测, 49% 提升)
+#   - 特征图: 80×45 → 120×67 (2.25x area, 更丰富的空间信息)
+#   - 内参同步缩放: fx=838*(960/1920)=419, 0.1°≈0.73px
+#   - 注: 1280×720 在 L20 46GB 下 batch=12 仍 OOM (forward 占 41GB)
+#
+# 基于 V48a (泛化第一, BEST=0.245°) 的完整配置:
+#   - Multi-Scale perturbation (0.5/1.0/2.0deg各10%)
+#   - Pitch Branch Q1-Q3修复 (pitch_vertical_bands=3)
+#   - 关闭consistency (提升Recovery)
+#   - overcorrection_penalty + symmetric_perturb
+#
+# 显存: 960×540 @ batch=16, 8×L20(46GB) ≈ 34GB/卡 (安全)
 #
 # Usage:
-#   bash batch_train.sh configs/c1_retrain/c1_v45a_no_in_cf_bev_r.yaml
+#   bash batch_train.sh configs/c1_retrain/c1_v48a_hires_1280x720_cf_bev_r.yaml
 
 global:
   dry_run: false
@@ -35,7 +44,7 @@ defaults:
     rotation_only: true
 
     cf_feat_dim: 256
-    cf_n_groups: 128
+    cf_n_groups: 256
     cf_knn: 8
     cf_corr_heads: 4
     cf_corr_radius: 4
@@ -46,11 +55,11 @@ defaults:
     rocr_dropout: 0.3
     rocr_center_bias: 0.5
     use_pitch_branch: 1
+    use_pitch_fusion: 1
+    pitch_vertical_bands: 3
     corr_window_mode: adaptive
 
-    # v45a: DLA + PitchFusion, 无IN
     use_dla: 1
-    use_pitch_fusion: 1
     use_instance_norm: 0
     use_gated_instance_norm: 0
 
@@ -58,7 +67,15 @@ defaults:
     backbone_lr_scale: 0.1
     head_dropout: 0.15
 
-    batch_size: 16
+    # 高分辨率核心配置
+    target_width: 960
+    target_height: 540
+
+    # 960×540 @ batch=8:
+    #   batch=16 OOM (38.87+3.98=42.85 > 44.4GB), backbone+cross-attn peak=~43GB
+    #   batch=8: ~38.87*8/16 = ~19.4GB + peak=2.0GB = ~21.4GB << 44.4GB (非常安全)
+    #   有效batch = 8*8GPU = 64
+    batch_size: 8
     learning_rate: 1e-4
     use_ddp: true
     ddp_gpus: 8
@@ -66,6 +83,7 @@ defaults:
     ddp_auto_scale: 0
     use_compile: false
 
+    # Loss (固定平移只优化旋转)
     enable_axis_loss: true
     weight_axis_rotation: 0.5
     axis_weights: "1.5,4.0,1.5"
@@ -76,13 +94,22 @@ defaults:
     quat_norm_weight: 0.5
     seq_consistency_weight: 0.1
 
+    # Anti-shortcut (关闭consistency以提升Recovery)
     tinit_dropout_prob: 0.3
     continuous_tinit_noise: 1
     continuous_noise_max_deg: 15.0
-    consistency_loss_weight: 0.5
-    consistency_loss_start_epoch: 10
-    zero_perturbation_prob: 0.15
+    consistency_loss_weight: 0.0
+    consistency_loss_start_epoch: 999
+    zero_perturbation_prob: 0.20
+    symmetric_perturb: 1
+    overcorrection_penalty: 2.0
+    use_magnitude_head: 1
+    magnitude_loss_weight: 0.3
 
+    # Multi-Scale Perturbation (v48核心改进)
+    multi_scale_perturb: "0.5:0.10,1.0:0.10,2.0:0.10"
+
+    # 数据增强
     augment_mount_jitter_prob: 0.4
     augment_mount_jitter_rot_sigma: 1.5
     augment_mount_jitter_trans_sigma: 0.015
@@ -90,17 +117,19 @@ defaults:
     augment_intrinsic_cxcy: 0.015
     augment_color_jitter: 0.3
 
+    # 数据加载
     xyz_only: 1
     max_pcd_points: 16384
-    perturb_distribution: truncated_normal
+    perturb_distribution: magnitude_balanced
     per_axis_prob: 0.3
     pose_aware_sampling: true
-    max_frames_per_seq: 1000
+    max_frames_per_seq: 500
     foreground: true
     augment_pc_jitter: 0.0
     augment_pc_dropout: 0.0
     augment_pitch_flip_prob: 0.0
 
+    # 评估与保存
     no_tensorboard: true
     no_amp: 1
     enable_vis: 0
@@ -121,36 +150,36 @@ defaults:
     resume_ckpt: auto
 
 experiments:
-  # ===== S1: ±5° step schedule =====
-  - name: "c1_v45a_no_in_S1"
-    description: "C1 v45a S1: ±5° no-IN, step schedule, rotation-only, scratch"
+  # ===== S1: ±5° Hi-Res 从头训练 =====
+  - name: "c1_v48a_hires_960x540_S1"
+    description: "C1 v48a Hi-Res 960x540: Multi-Scale + rotation-only (0.1deg≈0.73px)"
     dataset: "all_training_data_c1"
-    version: "c1_v45a_no_in_S1"
+    version: "c1_v48a_hires_960x540_S1"
     params:
       angle_range_deg: 5
       trans_range: 0.0
       eval_angle_range_deg: 5
-      num_epochs: 150
+      num_epochs: 200
       warmup_epochs: 8
-      lr_schedule: step
-      step_size: 40
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
       early_stopping_patience: 50
       eval_epoches: 10
       rocr_detach_epochs: 999
       seq_consistency_start_epoch: 999
-      zero_perturbation_prob: 0.10
       pretrain_ckpt: null
 
-  # ===== S2: ±3° finetune =====
-  - name: "c1_v45a_no_in_S2"
-    description: "C1 v45a S2: ±3° finetune, rotation-only"
+  # ===== S2: ±3° Hi-Res fine-tune =====
+  - name: "c1_v48a_hires_960x540_S2"
+    description: "C1 v48a Hi-Res 960x540 S2: ±3° finetune"
     dataset: "all_training_data_c1"
-    version: "c1_v45a_no_in_S2"
+    version: "c1_v48a_hires_960x540_S2"
     params:
       angle_range_deg: 3
       trans_range: 0.0
       eval_angle_range_deg: 5
-      num_epochs: 120
+      num_epochs: 150
       warmup_epochs: 5
       learning_rate: 5e-5
       lr_schedule: cosine_warm_restarts
@@ -158,7 +187,7 @@ experiments:
       cosine_Tmult: 2
       early_stopping_patience: 30
       eval_epoches: 5
-      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v45a_no_in_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v48a_hires_960x540_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
       rocr_detach_epochs: 999
       seq_consistency_start_epoch: 0
       per_axis_prob: 0.5

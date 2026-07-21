@@ -104,7 +104,7 @@ defaults:
     perturb_distribution: magnitude_balanced
     per_axis_prob: 0.4
     pose_aware_sampling: true
-    max_frames_per_seq: 500
+    max_frames_per_seq: 1000
     foreground: true
     augment_pc_jitter: 0.0
     augment_pc_dropout: 0.0

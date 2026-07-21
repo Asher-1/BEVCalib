@@ -1,0 +1,334 @@
+# V70: Correspondence-Grounded Domain Invariance
+#
+# ⚠️ 已 supersede → 请使用 V70.1:
+#   configs/c1_retrain/c1_v70.1_correspondence_domain_invariant_cf_bev_r.yaml
+#
+# 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080)
+# 目标: Per-frame <1.0°, MEDW400 <0.25°, Genuine Rec(iter2) >60%, ZD <0.30°, GS_medw <0.55
+#
+# ========================================================================
+# 设计思路 (论文 IJCV2026 + V62/V67/V68 教训)
+# ========================================================================
+#
+# 域泛化失败 = 模型用 trip 外观统计量拟合偏置
+# 训练精度失败 = 对应关系→矫正 的因果链被 ZD/域增强目标覆盖
+#
+# 论文核心: Implicit Alignment (点-像素对应 + coarse T) → BEV Alignment 精修
+# V67/V68 均 use_coarse_refine=0 → 放弃大扰动 OOD 路径
+#
+# V70 四阶段课程:
+#   S1 Correspondence Core  — 只教几何→矫正 (sim_loss + coarse_refine)
+#   S2 OOD Jacobian+Balance — trip 均衡 + Jacobian 课程
+#   S3 Domain Invariant     — GIN + domain_adv 替代 mount_jitter
+#   S4 Deploy Polish        — ZD 精修 + 三 ckpt 门控
+#
+# 三 ckpt 门控 (train_kitti.py):
+#   ckpt_best_recovery — Jacobian overall >= dual_gate_recovery_min (训练期 proxy)
+#   ckpt_best_zd       — MEDW max(R,P,Y) < dual_gate_zd_max
+#   ckpt_best_dual     — MEDW + Jacobian + recovery 三重门控
+#
+# 决策门控:
+#   V69 Phase A Recovery >70% → S1 warm-start 改用 V69-A ckpt
+#   否则 S1 从 V62 warm-start
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v70_correspondence_domain_invariant_cf_bev_r.yaml
+#   bash batch_train.sh --skip-pattern "S2|S3|S4" configs/c1_retrain/c1_v70_correspondence_domain_invariant_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === 网络结构 (CF-BEV-R) ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # === 论文对齐: 点-像素对应 + coarse→fine ===
+    use_sim_loss: 1
+    sim_loss_weight: 3.5
+    sim_loss_warmup: 5
+    sim_loss_soft_radius: 0.0
+    sim_n_layers: 3
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.5
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 1
+    coarse_refine_detach_epoch: 35
+
+    # === 分辨率 ===
+    target_width: 960
+    target_height: 540
+
+    # === Backbone ===
+    backbone_type: swin
+    backbone_lr_scale: 0.05
+    head_dropout: 0.1
+
+    # === DDP 8卡 ===
+    batch_size: 8
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # === 损失函数 ===
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,2.5"
+    use_geodesic_loss: 1
+    corr_alignment_weight: 0.6
+    corr_alignment_warmup: 10
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+
+    # === 扰动 ===
+    multi_scale_perturb: "1.0:0.20,2.0:0.30,3.0:0.30,5.0:0.20"
+    symmetric_perturb: 1
+    per_axis_prob: 0.5
+    per_axis_weights: "1.0,1.5,1.5"
+    perturb_distribution: uniform
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 5.0
+
+    # === 数据 ===
+    xyz_only: 1
+    max_pcd_points: 16384
+    max_frames_per_seq: 500
+    foreground: true
+    pitch_vertical_bands: 3
+    pose_aware_sampling: true
+
+    # === 禁用 V68 式偏置学习手段 ===
+    hard_negative_mining: false
+    augment_mount_jitter_prob: 0.0
+
+    # === 评估 & 三 ckpt 门控 ===
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 3
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    enable_recovery_gate_ckpt: 1
+    enable_zd_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.88
+    dual_gate_medw_max: 0.08
+    dual_gate_recovery_min: 0.55
+    dual_gate_zd_max: 0.30
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: Correspondence Core (论文 coarse→fine + 纯 Recovery) =====
+  - name: "c1_v70_corr_domain_S1"
+    description: "V70-S1: sim_loss3.5 + coarse_refine + OC=0.45, 无mount_jitter/无iter, V62 warm-start, 60ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70_corr_domain_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 60
+      warmup_epochs: 3
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 30
+      cosine_Tmult: 2
+      early_stopping_patience: 35
+      eval_epoches: 5
+
+      iterative_refine: 0
+      overcorrection_penalty: 0.45
+      zero_perturbation_prob: 0.02
+      zero_drift_loss_weight: 0.0
+      augment_color_jitter: 0.15
+      data_balance: 0
+      domain_adversarial: 0
+
+      dual_gate_recovery_min: 0.50
+      dual_gate_jacobian_min: 0.85
+      dual_gate_medw_max: 0.10
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v62_pure_recovery_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+
+  # ===== S2: OOD Jacobian + Trip Balance =====
+  - name: "c1_v70_corr_domain_S2"
+    description: "V70-S2: data_balance + Jacobian课程 + pose_aware, S1 warm-start, 50ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70_corr_domain_S2"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 50
+      warmup_epochs: 2
+      learning_rate: 4e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 25
+      cosine_Tmult: 2
+      early_stopping_patience: 30
+      eval_epoches: 5
+
+      iterative_refine: 0
+      overcorrection_penalty: 0.40
+      zero_perturbation_prob: 0.03
+      augment_color_jitter: 0.20
+      data_balance: 1
+      domain_adversarial: 0
+
+      jacobian_loss_weight: 0.2
+      jacobian_loss_start_epoch: 3
+      jacobian_loss_probe_deg: 2.0
+      jacobian_loss_interval: 4
+      jacobian_loss_progressive: true
+      jacobian_loss_probe_schedule: "epoch<30:3.0,epoch>=30:1.0"
+
+      dual_gate_recovery_min: 0.55
+      dual_gate_jacobian_min: 0.88
+      dual_gate_medw_max: 0.09
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70_corr_domain_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+
+  # ===== S3: Domain Invariant Fusion (GIN + domain_adv) =====
+  - name: "c1_v70_corr_domain_S3"
+    description: "V70-S3: GIN + domain_adv + synthetic iter, 无mount_jitter, S2 warm-start, 40ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70_corr_domain_S3"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 40
+      warmup_epochs: 2
+      learning_rate: 3e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 20
+      cosine_Tmult: 2
+      early_stopping_patience: 25
+      eval_epoches: 5
+
+      use_gated_instance_norm: 1
+      gin_init_gate: 0.3
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.05
+      num_domains: 21
+      data_balance: 1
+
+      iterative_refine: 2
+      iterative_refine_weights: "0.3,0.7"
+      iterative_refine_start_epoch: 3
+      iterative_refine_use_synthetic_init: 1
+      iterative_refine_synthetic_residual_deg: "1.0,0.5"
+
+      overcorrection_penalty: 0.35
+      zero_perturbation_prob: 0.08
+      zero_drift_loss_weight: 0.05
+      zero_drift_loss_start_epoch: 5
+      augment_color_jitter: 0.35
+      augment_mount_jitter_prob: 0.0
+
+      jacobian_loss_weight: 0.15
+      jacobian_loss_start_epoch: 5
+      jacobian_loss_probe_deg: 1.5
+      jacobian_loss_interval: 5
+      multi_scale_perturb: "0.5:0.15,1.0:0.20,2.0:0.25,3.0:0.25,5.0:0.15"
+
+      dual_gate_recovery_min: 0.50
+      dual_gate_zd_max: 0.32
+      dual_gate_jacobian_min: 0.86
+      dual_gate_medw_max: 0.08
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70_corr_domain_S2/all_training_data_c1_scratch/checkpoint/ckpt_best_recovery.pth"
+
+  # ===== S4: Deploy Polish (ZD + 三 ckpt 精修) =====
+  - name: "c1_v70_corr_domain_S4"
+    description: "V70-S4: ZD精修 + iter2部署路径, S3 warm-start, 30ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v70_corr_domain_S4"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 30
+      warmup_epochs: 1
+      learning_rate: 1e-5
+      lr_schedule: cosine
+      early_stopping_patience: 20
+      eval_epoches: 5
+
+      use_gated_instance_norm: 1
+      gin_init_gate: 0.5
+      domain_adversarial: 1
+      domain_adversarial_weight: 0.03
+      num_domains: 21
+      data_balance: 1
+
+      iterative_refine: 2
+      iterative_refine_weights: "0.3,0.7"
+      iterative_refine_start_epoch: 1
+      iterative_refine_use_synthetic_init: 1
+      iterative_refine_synthetic_residual_deg: "1.0,0.5"
+
+      overcorrection_penalty: 0.30
+      zero_perturbation_prob: 0.15
+      zero_drift_loss_weight: 0.15
+      zero_drift_loss_start_epoch: 3
+      augment_color_jitter: 0.30
+      augment_mount_jitter_prob: 0.0
+
+      jacobian_loss_weight: 0.08
+      jacobian_loss_start_epoch: 3
+      jacobian_loss_probe_deg: 1.0
+      jacobian_loss_interval: 5
+
+      dual_gate_recovery_min: 0.55
+      dual_gate_zd_max: 0.28
+      dual_gate_jacobian_min: 0.90
+      dual_gate_medw_max: 0.07
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70_corr_domain_S3/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"

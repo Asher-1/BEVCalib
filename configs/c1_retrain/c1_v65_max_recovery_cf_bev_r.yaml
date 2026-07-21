@@ -1,0 +1,151 @@
+# V65: Maximum Recovery 策略
+# 目标: per-frame Recovery > 95% (inject 2° → residual < 0.1°)
+# 核心改进: 更强 sim_loss + 更多小角度训练 + 更长训练 + 增强 per-axis
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # V65 核心: 增强 sim_loss 到 3.5 (从 V62 的 2.5)
+    use_sim_loss: 1
+    sim_loss_weight: 3.5
+    sim_loss_warmup: 5
+    sim_loss_soft_radius: 0.0
+    sim_n_layers: 3
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.5
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 0
+
+    target_width: 960
+    target_height: 540
+
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.1
+
+    batch_size: 8
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    # V65: 增大 Yaw 权重 (Yaw 是当前瓶颈)
+    axis_weights: "1.5,4.0,2.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.4
+    corr_alignment_warmup: 10
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.0
+    consistency_loss_weight: 0.0
+
+    # V65: 增加小角度训练比例
+    multi_scale_perturb: "0.5:0.15,1.0:0.15,2.0:0.20,3.0:0.20,5.0:0.30"
+    symmetric_perturb: 1
+
+    zero_perturbation_prob: 0.05
+    zero_drift_loss_weight: 0.0
+
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_intrinsic: 0.0
+    augment_color_jitter: 0.15
+
+    xyz_only: 1
+    max_pcd_points: 16384
+    max_frames_per_seq: 500
+    perturb_distribution: truncated_normal
+    # V65: 更高 per_axis_prob (更多单轴训练)
+    per_axis_prob: 0.5
+    pose_aware_sampling: true
+    foreground: true
+    pitch_vertical_bands: 3
+
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.90
+    dual_gate_medw_max: 0.08
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: ±5° 长训练 (350 epochs, from V62-S1 warm start) =====
+  - name: "c1_v65_max_recovery_S1"
+    description: "V65: Max Recovery, sim=3.5, yaw_w=2.5, 350ep warm-start"
+    dataset: "all_training_data_c1"
+    version: "c1_v65_max_recovery_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 350
+      warmup_epochs: 5
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 70
+      cosine_Tmult: 2
+      early_stopping_patience: 80
+      eval_epoches: 10
+      rocr_detach_epochs: 999
+      overcorrection_penalty: 0.0
+      # 从 V62-S1 最佳检查点 warm-start (继续优化而非从零开始)
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v62_pure_recovery_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"

@@ -1,0 +1,111 @@
+# V63 Mild ZD 泛化评估配置
+# 评估 V63 系列所有 stage 的 best/last checkpoints
+
+eval_config:
+  test_data_root: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+  perturb_angle_deg: 5.0
+  perturb_trans_m: 0.0
+  output_dir: "logs/evaluations/generalization_c1_v63"
+  
+  enable_generalization_diagnostics: true
+  gdiag_inject_angle_deg: 2.0
+  gdiag_multi_magnitude: [0.5, 1.0, 2.0]
+  gdiag_per_axis: true
+
+models:
+  # ===== S1: ±5° with margin-ZD =====
+  - tag: "c1-v63-S1-best-val"
+    description: "C1 V63 S1: HiRes960+SimLoss2.5+margin-ZD(0.15@ep50) (best-val)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_5deg_c1_v63_mild_zd_S1"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+    
+  - tag: "c1-v63-S1-best-medw"
+    description: "C1 V63 S1: margin-ZD (best-medw)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_5deg_c1_v63_mild_zd_S1"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_medw.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v63-S1-best-dual"
+    description: "C1 V63 S1: margin-ZD (best-dual)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_5deg_c1_v63_mild_zd_S1"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v63-S1-last-ep250"
+    description: "C1 V63 S1: margin-ZD (last epoch 250)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_5deg_c1_v63_mild_zd_S1"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_250.pth"
+    ckpt_fallback:
+      - "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  # ===== S2: ±3° finetune =====
+  - tag: "c1-v63-S2-best-val"
+    description: "C1 V63 S2: ±3° finetune (best-val)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_3deg_c1_v63_mild_zd_S2"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v63-S2-best-medw"
+    description: "C1 V63 S2: ±3° finetune (best-medw)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_3deg_c1_v63_mild_zd_S2"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_medw.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v63-S2-best-dual"
+    description: "C1 V63 S2: ±3° finetune (best-dual)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_3deg_c1_v63_mild_zd_S2"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v63-S2-last-ep120"
+    description: "C1 V63 S2: ±3° finetune (last epoch 120)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_3deg_c1_v63_mild_zd_S2"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_120.pth"
+    ckpt_fallback:
+      - "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  # ===== S3: ±1.5° precision =====
+  - tag: "c1-v63-S3-best-val"
+    description: "C1 V63 S3: ±1.5° precision (best-val)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_1.5deg_c1_v63_mild_zd_S3"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v63-S3-best-dual"
+    description: "C1 V63 S3: ±1.5° precision (best-dual)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_1.5deg_c1_v63_mild_zd_S3"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_best_dual.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540
+
+  - tag: "c1-v63-S3-last-ep80"
+    description: "C1 V63 S3: ±1.5° precision (last epoch 80)"
+    model_dir: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_1.5deg_c1_v63_mild_zd_S3"
+    checkpoint: "all_training_data_c1_scratch/checkpoint/ckpt_80.pth"
+    ckpt_fallback:
+      - "all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    train_config: "configs/c1_retrain/c1_v63_mild_zd_cf_bev_r.yaml"
+    target_width: 960
+    target_height: 540

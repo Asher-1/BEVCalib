@@ -1,0 +1,233 @@
+# C1 V60: Implicit Alignment 集成 (论文核心: L_sim + Registry Token + 3D PE + FOV Cls)
+#
+# 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080, FOV~98°)
+# 目标: Recovery>95% (3-pass) + RPY泛化<0.05° + 固定平移只优化旋转
+#
+# V60设计核心 (基于 IJCV 2026 论文):
+#   1. Similarity Loss: 直接监督 cross-attention similarity matrix
+#   2. Registry Token: 吸收 FOV 外点的 attention 分数
+#   3. 3D Position Encoding: 为图像特征注入 3D 空间信息
+#   4. FOV Classification: 辅助任务稳定训练
+#
+# 基座: V48a (Multi-Scale + 无consistency) — 已验证为c1数据最优配置
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v60_implicit_align_cf_bev_r.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === 网络结构 (继承 V48a 最优基座) ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    # DLA + Pitch Branch
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # === V60 新增开关 (论文对齐核心) ===
+    use_sim_loss: 1
+    sim_loss_weight: 1.0
+    sim_loss_warmup: 10
+    sim_loss_soft_radius: 0.0
+    sim_n_layers: 2
+    use_registry_token: 1
+    use_fov_cls_loss: 1
+    fov_cls_weight: 0.3
+    use_3d_pos_encoding: 1
+    pos_enc_depth_bins: 16
+    use_coarse_refine: 0
+    coarse_refine_detach_epoch: 30
+
+    # === 训练参数 ===
+    backbone_type: swin
+    backbone_lr_scale: 0.1
+    head_dropout: 0.1
+
+    batch_size: 16
+    learning_rate: 1e-4
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # Loss
+    enable_axis_loss: true
+    weight_axis_rotation: 0.5
+    axis_weights: "1.5,4.0,1.5"
+    use_geodesic_loss: 0
+    corr_alignment_weight: 0.2
+    corr_alignment_warmup: 20
+    pitch_aux_weight: 0.3
+    quat_norm_weight: 0.5
+    seq_consistency_weight: 0.0
+    consistency_loss_weight: 0.0
+    consistency_loss_start_epoch: 999
+
+    # Multi-Scale Perturbation (V48a heritage)
+    multi_scale_perturb: "0.5:0.10,1.0:0.10,2.0:0.10"
+    symmetric_perturb: 1
+
+    # Anti-shortcut
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    continuous_noise_max_deg: 15.0
+    zero_perturbation_prob: 0.15
+
+    # Overcorrection (V48a proven effective)
+    overcorrection_penalty: 2.0
+
+    # Augmentation
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    augment_color_jitter: 0.15
+
+    # Data loading
+    xyz_only: 1
+    max_pcd_points: 16384
+    perturb_distribution: truncated_normal
+    per_axis_prob: 0.3
+    pose_aware_sampling: true
+    max_frames_per_seq: 1000
+    foreground: true
+    pitch_vertical_bands: 3
+
+    # Eval & save
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    pretrain_ckpt: null
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: ±5° V60 Full (L_sim + RT + 3D PE + FOV Cls) =====
+  - name: "c1_v60_implicit_align_S1"
+    description: "C1 V60: SimLoss + Registry + 3DPE + FoVCls on v48a base"
+    dataset: "all_training_data_c1"
+    version: "c1_v60_implicit_align_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 200
+      warmup_epochs: 10
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 50
+      cosine_Tmult: 2
+      early_stopping_patience: 50
+      eval_epoches: 10
+      rocr_detach_epochs: 999
+      pretrain_ckpt: null
+
+  # ===== S2: ±3° fine-tune =====
+  - name: "c1_v60_implicit_align_S2"
+    description: "C1 V60 S2: ±3° finetune for precision"
+    dataset: "all_training_data_c1"
+    version: "c1_v60_implicit_align_S2"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 100
+      warmup_epochs: 5
+      learning_rate: 5e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 30
+      eval_epoches: 5
+      rocr_detach_epochs: 999
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 5.0
+      zero_perturbation_prob: 0.12
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v60_implicit_align_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+
+  # ===== S3: ±1.5° precision push =====
+  - name: "c1_v60_implicit_align_S3"
+    description: "C1 V60 S3: ±1.5° ultra-precision push"
+    dataset: "all_training_data_c1"
+    version: "c1_v60_implicit_align_S3"
+    params:
+      angle_range_deg: 1.5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 60
+      warmup_epochs: 3
+      learning_rate: 2e-5
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 20
+      eval_epoches: 3
+      rocr_detach_epochs: 999
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 3.0
+      zero_perturbation_prob: 0.10
+      overcorrection_penalty: 3.0
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_3deg_c1_v60_implicit_align_S2/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+
+  # ===== S4 (Optional): Coarse-to-Fine on top of S1 =====
+  # Enable after S1 converges for further alignment improvement
+  - name: "c1_v60_coarse_refine_S1"
+    description: "C1 V60 S4: Full pipeline with Coarse-to-Fine"
+    dataset: "all_training_data_c1"
+    version: "c1_v60_coarse_refine_S1"
+    skip: true
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 150
+      warmup_epochs: 10
+      lr_schedule: cosine_warm_restarts
+      early_stopping_patience: 40
+      eval_epoches: 10
+      rocr_detach_epochs: 999
+      use_coarse_refine: 1
+      coarse_refine_detach_epoch: 60
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v60_implicit_align_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"

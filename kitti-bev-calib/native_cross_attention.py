@@ -208,15 +208,19 @@ class PointEncoder(nn.Module):
 
 
 class ExtrinsicAwareCrossAttention(nn.Module):
-    """Cross-attention: image queries, point cloud keys/values with extrinsic-aware pos emb."""
+    """Cross-attention: image queries, point cloud keys/values with extrinsic-aware pos emb.
+
+    V60: Added optional registry_token to absorb attention from OOV points.
+    """
 
     def __init__(self, img_feat_dim: int, pc_feat_dim: int,
                  n_harmonic: int = 6, heads: int = 8, dim_head: int = 64,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1, use_registry_token: bool = False):
         super().__init__()
         self.heads = heads
         self.dim_head = dim_head
         self.attn_dropout = dropout
+        self.use_registry_token = use_registry_token
         inner_dim = heads * dim_head
 
         harmonic_dim = HarmonicEmbedding(n_harmonic).get_output_dim(input_dims=2)
@@ -236,6 +240,10 @@ class ExtrinsicAwareCrossAttention(nn.Module):
         )
         self.out_dim = inner_dim
 
+        if use_registry_token:
+            self.registry_k = nn.Parameter(torch.randn(1, 1, heads, dim_head) * 0.02)
+            self.registry_v = nn.Parameter(torch.randn(1, 1, heads, dim_head) * 0.02)
+
     def forward(self, feat_2d: torch.Tensor, feat_3d: torch.Tensor,
                 img_pos_emb: torch.Tensor, proj_pos_emb: torch.Tensor,
                 attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -251,11 +259,24 @@ class ExtrinsicAwareCrossAttention(nn.Module):
         v = rearrange(v, 'b n (h d) -> b h n d', h=self.heads)
         q = self.q_norm(q)
         k = self.k_norm(k)
-        if attn_mask is not None:
-            attn_mask = attn_mask.unsqueeze(1)
+
+        if attn_mask is not None and attn_mask.dtype == torch.bool:
+            kv_mask = attn_mask[:, 0, :] if attn_mask.dim() == 3 else attn_mask
+            kv_mask_4d = kv_mask.view(kv_mask.shape[0], 1, kv_mask.shape[1], 1).float()
+            k = k * kv_mask_4d
+            v = v * kv_mask_4d
+
+        if self.use_registry_token:
+            B = q.shape[0]
+            reg_k = self.registry_k.expand(B, -1, -1, -1).permute(0, 2, 1, 3)
+            reg_v = self.registry_v.expand(B, -1, -1, -1).permute(0, 2, 1, 3)
+            k = torch.cat([k, reg_k], dim=2)
+            v = torch.cat([v, reg_v], dim=2)
+
         out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask,
+            q, k, v, attn_mask=None,
             dropout_p=0.0 if not self.training else self.attn_dropout)
+
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
@@ -265,12 +286,13 @@ class CrossAttentionBlock(nn.Module):
 
     def __init__(self, img_feat_dim: int, pc_feat_dim: int,
                  n_harmonic: int, heads: int, dim_head: int,
-                 dropout: float, ffn_mult: int = 4):
+                 dropout: float, ffn_mult: int = 4,
+                 use_registry_token: bool = False):
         super().__init__()
         self.cross_attn = ExtrinsicAwareCrossAttention(
             img_feat_dim=img_feat_dim, pc_feat_dim=pc_feat_dim,
             n_harmonic=n_harmonic, heads=heads, dim_head=dim_head,
-            dropout=dropout)
+            dropout=dropout, use_registry_token=use_registry_token)
         attn_out_dim = heads * dim_head
         self.proj_residual = nn.Linear(img_feat_dim, attn_out_dim) \
             if img_feat_dim != attn_out_dim else nn.Identity()
@@ -460,8 +482,7 @@ class NativeCrossCalibHead(nn.Module):
 
         n_img = feat_h * feat_w
         n_pc = feat_3d.shape[1]
-        attn_mask = valid_mask.unsqueeze(1).expand(-1, n_img, -1).float()
-        attn_mask = attn_mask.masked_fill(attn_mask == 0, float('-inf')).masked_fill(attn_mask == 1, 0.0)
+        attn_mask = valid_mask.unsqueeze(1).expand(-1, n_img, -1)
 
         rot_feat = self._run_cross_stack(
             self.rot_layers, self._use_blocks,
