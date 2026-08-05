@@ -1,0 +1,167 @@
+# C1 Official BEVCalib — ±5° OOD 精调（基于 replica 泛化评估结论）
+#
+# 泛化评估 (±20° test_data_c1, ckpt_best_val ep401):
+#   Mean rot 0.786° | Pitch 0.509° (最弱轴)
+#   最差序列: Seq10 2.29° (Pitch 2.26°), Seq00 1.31°, Seq03 1.34° (Pitch 1.17°)
+#   vs 监督 val 0.243° → 明显 OOD gap
+#
+# 优化推导:
+#   1. ±20° 预训练已完成表征学习 → 精调 ±5° + multi_scale 对齐部署扰动
+#   2. random frame val 与 OOD 序列不对齐 → group holdout (03,07,11)
+#   3. 仅 best_val gate → 增加 MEDW OOD gate 选 ckpt
+#   4. head grad 91× backbone → 降 lr + 提高 backbone_lr_scale 平衡更新
+#   5. Pitch 序列失败 → per_axis_prob + mount jitter 增强
+#
+# Warm-start: c1_official_bevcalib_rotation_20deg / ckpt_best_val (val_rot=0.243°)
+#
+# Launch:
+#   bash batch_train.sh --force configs/c1_retrain/c1_official_bevcalib_5deg_ood_finetune.yaml
+#
+# Eval:
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_official_bevcalib_v2.yaml \
+#     --parallel -1
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 3
+  retry_delay: 120
+
+defaults:
+  env:
+    BEV_DATASET_TYPE: custom
+    BEV_XBOUND_MIN: 0
+    BEV_XBOUND_MAX: 200
+    BEV_YBOUND_MIN: -100
+    BEV_YBOUND_MAX: 100
+    BEV_XY_STEP: 2.0
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+
+  params:
+    # ===== 架构: 保持 Official BEVCalib (bev) =====
+    fusion_backend: bev
+    use_deformable: 0
+    cam2bev_mode: lss
+    backbone_type: swin
+    fuser_type: concat
+    use_mlp_head: 0
+    voxel_mode: hard
+    to_bev_mode: concat
+    scatter_reduce: sum
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+    bev_pool_factor: 0
+    use_pitch_branch: 0
+    native_cross: 0
+    correlation_fusion: 0
+    cross_correlation_fusion: 0
+    explicit_tinit: 0
+    tinit_bev_film: 0
+    tinit_query_film: 0
+    intrinsic_input: 0
+    use_foundation_depth: 0
+    cam_drop_prob: 0.0
+    iterative_refine: 0
+    domain_adversarial: 0
+    bev_instance_norm: 0
+
+    target_width: 960
+    target_height: 540
+    max_frames_per_seq: 500
+    max_pcd_points: 0
+    validate_data: 0
+
+    # ===== OOD 对齐验证划分 =====
+    val_split_mode: group
+    val_holdout_ratio: 0.2
+    val_holdout_sequences: "03,07,11"
+
+    # ===== 精调超参: 平衡 head/backbone 更新 =====
+    batch_size: 2
+    learning_rate: 5.0e-5
+    lr_schedule: step
+    step_size: 50
+    warmup_epochs: 2
+    backbone_lr_scale: 10.0
+    wd: 1.0e-4
+    optimizer: adamw
+    num_epochs: 150
+    save_ckpt_per_epoches: 20
+    eval_epoches: 10
+    seed: 114514
+    grad_accum_steps: 1
+    no_amp: 1
+    amp_bf16: 0
+
+    # ===== ±5° 部署扰动 + 多尺度 =====
+    angle_range_deg: 5
+    eval_angle_range_deg: 5
+    trans_range: 0.0
+    eval_trans_range: 0.0
+    rotation_only: true
+    rotation_target_definition: per_axis
+    enable_axis_loss: false
+    weight_axis_rotation: 0.0
+    use_geodesic_loss: 0
+    quat_norm_weight: 0.5
+    perturb_distribution: uniform
+    symmetric_perturb: 1
+    multi_scale_perturb: "0.5:0.25,1.0:0.25,2.0:0.30,3.0:0.15,5.0:0.05"
+    per_axis_prob: 0.5
+    per_axis_weights: "1.0,1.0,1.0"
+    axis_weights: "1.0,1.2,1.0"
+    zero_perturbation_prob: 0.0
+
+    # ===== OOD 鲁棒增强 =====
+    augment_mount_jitter_prob: 0.7
+    augment_mount_jitter_rot_sigma: 3.0
+    augment_mount_jitter_trans_sigma: 0.0
+    augment_color_jitter: 0.20
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_sign_flip_prob: 0.0
+    augment_fov_crop_prob: 0.0
+    augment_lidar_sparse_prob: 0.0
+
+    # ===== OOD checkpoint gates =====
+    enable_medw_eval: 1
+    medw_eval_max_frames: 400
+    enable_jacobian_eval: 0
+    enable_dual_gate_ckpt: 0
+    enable_recovery_gate_ckpt: 0
+    enable_zd_gate_ckpt: 0
+    enable_inject_recovery_eval: 0
+    enable_gnc_loss: 0
+
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    data_balance: 0
+    early_stopping_patience: 0
+    no_tensorboard: false
+    use_compile: false
+    ddp_auto_scale: 0
+
+    resume_ckpt: null
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+
+experiments:
+  - name: "c1_official_bevcalib_5deg_ood_finetune"
+    description: "BEVCalib ±5deg OOD finetune from replica best_val; group holdout + MEDW gate"
+    dataset: "all_training_data_c1"
+    version: "c1_official_bevcalib_5deg_ood_finetune"
+    params:
+      pretrain_ckpt: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_20deg_c1_official_bevcalib_rotation_20deg/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+      pretrain_ckpt_fallback: "/mnt/drtraining/user/dahailu/code/BEVCalib/logs/all_training_data_c1/model_small_20deg_c1_official_bevcalib_rotation_20deg/all_training_data_c1_scratch/checkpoint/ckpt_480.pth"

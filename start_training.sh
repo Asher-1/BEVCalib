@@ -304,6 +304,7 @@ AUGMENT_MOUNT_JITTER_TRANS_SIGMA=""
 USE_CONTRASTIVE_EXTRINSIC=""
 CONTRASTIVE_WEIGHT=""
 EVAL_ANGLE=""
+ROTATION_TARGET_DEFINITION=""
 EARLY_STOPPING_PATIENCE=""
 SEED=""
 PRETRAIN_CKPT=""
@@ -355,6 +356,8 @@ while [[ $# -gt 0 ]]; do
             LEARNING_RATE="$2"
             shift 2
             ;;
+        --optimizer)
+            OPTIMIZER_NAME="$2"; shift 2 ;;
         --fg|--foreground)
             FOREGROUND=1
             shift
@@ -469,6 +472,8 @@ while [[ $# -gt 0 ]]; do
             ;;
         --eval_angle)
             EVAL_ANGLE="$2"; shift 2 ;;
+        --rotation_target_definition)
+            ROTATION_TARGET_DEFINITION="$2"; shift 2 ;;
         --eval_trans_range)
             EVAL_TRANS_RANGE="$2"; shift 2 ;;
         --early_stopping_patience)
@@ -511,6 +516,12 @@ while [[ $# -gt 0 ]]; do
             MAX_FRAMES_PER_SEQ="$2"; shift 2 ;;
         --sample_step)
             SAMPLE_STEP="$2"; shift 2 ;;
+        --val_split_mode)
+            VAL_SPLIT_MODE="$2"; shift 2 ;;
+        --val_holdout_ratio)
+            VAL_HOLDOUT_RATIO="$2"; shift 2 ;;
+        --val_holdout_sequences)
+            VAL_HOLDOUT_SEQUENCES="$2"; shift 2 ;;
         --pose_aware_sampling)
             POSE_AWARE_SAMPLING="--pose_aware_sampling"
             shift
@@ -565,8 +576,8 @@ while [[ $# -gt 0 ]]; do
             ENABLE_ZD_GATE_CKPT="$2"; shift 2 ;;
         --dual_gate_inject_recovery_min)
             DUAL_GATE_INJECT_RECOVERY_MIN="$2"; shift 2 ;;
-        --dual_gate_pred_indep_max)
-            DUAL_GATE_PRED_INDEP_MAX="$2"; shift 2 ;;
+        --dual_gate_signed_slope_min)
+            DUAL_GATE_SIGNED_SLOPE_MIN="$2"; shift 2 ;;
         --enable_inject_recovery_eval)
             ENABLE_INJECT_RECOVERY_EVAL="$2"; shift 2 ;;
         --inject_recovery_eval_deg)
@@ -773,6 +784,22 @@ while [[ $# -gt 0 ]]; do
             NATIVE_CROSS_EXTEND_RATIO="$2"; shift 2 ;;
         --fusion_backend)
             FUSION_BACKEND="$2"; shift 2 ;;
+        --paper_feat_dim)
+            PAPER_FEAT_DIM="$2"; shift 2 ;;
+        --paper_n_groups)
+            PAPER_N_GROUPS="$2"; shift 2 ;;
+        --paper_knn)
+            PAPER_KNN="$2"; shift 2 ;;
+        --paper_sim_layers)
+            PAPER_SIM_LAYERS="$2"; shift 2 ;;
+        --paper_depth_bins)
+            PAPER_DEPTH_BINS="$2"; shift 2 ;;
+        --paper_sim_loss_weight)
+            PAPER_SIM_LOSS_WEIGHT="$2"; shift 2 ;;
+        --paper_fov_loss_weight)
+            PAPER_FOV_LOSS_WEIGHT="$2"; shift 2 ;;
+        --paper_coarse_loss_weight)
+            PAPER_COARSE_LOSS_WEIGHT="$2"; shift 2 ;;
         --pc_encoder_mode)
             PC_ENCODER_MODE="$2"; shift 2 ;;
         --fusion_variant)
@@ -1400,6 +1427,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$AXIS_WEIGHTS" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --axis_weights $AXIS_WEIGHTS"
 
     OPTIM_ARGS=""
+    [ -n "$OPTIMIZER_NAME" ] && OPTIM_ARGS="$OPTIM_ARGS --optimizer $OPTIMIZER_NAME"
     [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
     [ -n "$WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --warmup_epochs $WARMUP_EPOCHS"
     [ -n "$STEP_SIZE" ] && OPTIM_ARGS="$OPTIM_ARGS --step_size $STEP_SIZE"
@@ -1420,6 +1448,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
     [ -n "$AUGMENT_PITCH_SIGN_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_sign_flip_prob $AUGMENT_PITCH_SIGN_FLIP_PROB"
     [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
+    [ -n "$ROTATION_TARGET_DEFINITION" ] && OPTIM_ARGS="$OPTIM_ARGS --rotation_target_definition $ROTATION_TARGET_DEFINITION"
     [ -n "$EVAL_TRANS_RANGE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_trans_range $EVAL_TRANS_RANGE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
@@ -1441,6 +1470,9 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
     [ -n "$SAMPLE_STEP" ] && OPTIM_ARGS="$OPTIM_ARGS --sample_step $SAMPLE_STEP"
+    [ -n "$VAL_SPLIT_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --val_split_mode $VAL_SPLIT_MODE"
+    [ -n "$VAL_HOLDOUT_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --val_holdout_ratio $VAL_HOLDOUT_RATIO"
+    [ -n "$VAL_HOLDOUT_SEQUENCES" ] && OPTIM_ARGS="$OPTIM_ARGS --val_holdout_sequences $VAL_HOLDOUT_SEQUENCES"
     [ -n "$POSE_AWARE_SAMPLING" ] && OPTIM_ARGS="$OPTIM_ARGS $POSE_AWARE_SAMPLING"
     [ -n "$POSES_DIR" ] && OPTIM_ARGS="$OPTIM_ARGS --poses_dir $POSES_DIR"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
@@ -1480,7 +1512,7 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$ENABLE_RECOVERY_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_recovery_gate_ckpt $ENABLE_RECOVERY_GATE_CKPT"
     [ -n "$ENABLE_ZD_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_zd_gate_ckpt $ENABLE_ZD_GATE_CKPT"
     [ -n "$DUAL_GATE_INJECT_RECOVERY_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_inject_recovery_min $DUAL_GATE_INJECT_RECOVERY_MIN"
-    [ -n "$DUAL_GATE_PRED_INDEP_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_pred_indep_max $DUAL_GATE_PRED_INDEP_MAX"
+    [ -n "$DUAL_GATE_SIGNED_SLOPE_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_signed_slope_min $DUAL_GATE_SIGNED_SLOPE_MIN"
     [ -n "$ENABLE_INJECT_RECOVERY_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_inject_recovery_eval $ENABLE_INJECT_RECOVERY_EVAL"
     [ -n "$INJECT_RECOVERY_EVAL_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_deg $INJECT_RECOVERY_EVAL_DEG"
     [ -n "$INJECT_RECOVERY_EVAL_BATCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_batches $INJECT_RECOVERY_EVAL_BATCHES"
@@ -1597,6 +1629,14 @@ if [ "$USE_DDP" -eq 1 ]; then
     [ -n "$NATIVE_CROSS_POINTGPT_MAX_DEPTH" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_max_depth $NATIVE_CROSS_POINTGPT_MAX_DEPTH"
     [ -n "$NATIVE_CROSS_EXTEND_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_extend_ratio $NATIVE_CROSS_EXTEND_RATIO"
     [ -n "$FUSION_BACKEND" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_backend $FUSION_BACKEND"
+    [ -n "$PAPER_FEAT_DIM" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_feat_dim $PAPER_FEAT_DIM"
+    [ -n "$PAPER_N_GROUPS" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_n_groups $PAPER_N_GROUPS"
+    [ -n "$PAPER_KNN" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_knn $PAPER_KNN"
+    [ -n "$PAPER_SIM_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_sim_layers $PAPER_SIM_LAYERS"
+    [ -n "$PAPER_DEPTH_BINS" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_depth_bins $PAPER_DEPTH_BINS"
+    [ -n "$PAPER_SIM_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_sim_loss_weight $PAPER_SIM_LOSS_WEIGHT"
+    [ -n "$PAPER_FOV_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_fov_loss_weight $PAPER_FOV_LOSS_WEIGHT"
+    [ -n "$PAPER_COARSE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_coarse_loss_weight $PAPER_COARSE_LOSS_WEIGHT"
     [ -n "$PC_ENCODER_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --pc_encoder_mode $PC_ENCODER_MODE"
     [ -n "$FUSION_VARIANT" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_variant $FUSION_VARIANT"
     [ -n "$DEEP_SUPERVISION_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --deep_supervision_weight $DEEP_SUPERVISION_WEIGHT"
@@ -1718,6 +1758,7 @@ else
     [ -n "$AXIS_WEIGHTS" ] && AXIS_LOSS_ARGS="$AXIS_LOSS_ARGS --axis_weights $AXIS_WEIGHTS"
 
     OPTIM_ARGS=""
+    [ -n "$OPTIMIZER_NAME" ] && OPTIM_ARGS="$OPTIM_ARGS --optimizer $OPTIMIZER_NAME"
     [ -n "$LR_SCHEDULE" ] && OPTIM_ARGS="$OPTIM_ARGS --lr_schedule $LR_SCHEDULE"
     [ -n "$WARMUP_EPOCHS" ] && OPTIM_ARGS="$OPTIM_ARGS --warmup_epochs $WARMUP_EPOCHS"
     [ -n "$STEP_SIZE" ] && OPTIM_ARGS="$OPTIM_ARGS --step_size $STEP_SIZE"
@@ -1738,6 +1779,7 @@ else
     [ -n "$AUGMENT_PITCH_FLIP_MAX_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_flip_max_deg $AUGMENT_PITCH_FLIP_MAX_DEG"
     [ -n "$AUGMENT_PITCH_SIGN_FLIP_PROB" ] && OPTIM_ARGS="$OPTIM_ARGS --augment_pitch_sign_flip_prob $AUGMENT_PITCH_SIGN_FLIP_PROB"
     [ -n "$EVAL_ANGLE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_angle_range_deg $EVAL_ANGLE"
+    [ -n "$ROTATION_TARGET_DEFINITION" ] && OPTIM_ARGS="$OPTIM_ARGS --rotation_target_definition $ROTATION_TARGET_DEFINITION"
     [ -n "$EVAL_TRANS_RANGE" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_trans_range $EVAL_TRANS_RANGE"
     [ -n "$EARLY_STOPPING_PATIENCE" ] && OPTIM_ARGS="$OPTIM_ARGS --early_stopping_patience $EARLY_STOPPING_PATIENCE"
     [ -n "$SEED" ] && OPTIM_ARGS="$OPTIM_ARGS --seed $SEED"
@@ -1759,6 +1801,9 @@ else
     [ -n "$DEPTH_SUP_ALPHA" ] && OPTIM_ARGS="$OPTIM_ARGS --depth_sup_alpha $DEPTH_SUP_ALPHA"
     [ -n "$MAX_FRAMES_PER_SEQ" ] && OPTIM_ARGS="$OPTIM_ARGS --max_frames_per_seq $MAX_FRAMES_PER_SEQ"
     [ -n "$SAMPLE_STEP" ] && OPTIM_ARGS="$OPTIM_ARGS --sample_step $SAMPLE_STEP"
+    [ -n "$VAL_SPLIT_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --val_split_mode $VAL_SPLIT_MODE"
+    [ -n "$VAL_HOLDOUT_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --val_holdout_ratio $VAL_HOLDOUT_RATIO"
+    [ -n "$VAL_HOLDOUT_SEQUENCES" ] && OPTIM_ARGS="$OPTIM_ARGS --val_holdout_sequences $VAL_HOLDOUT_SEQUENCES"
     [ -n "$POSE_AWARE_SAMPLING" ] && OPTIM_ARGS="$OPTIM_ARGS $POSE_AWARE_SAMPLING"
     [ -n "$POSES_DIR" ] && OPTIM_ARGS="$OPTIM_ARGS --poses_dir $POSES_DIR"
     [ -n "$EVAL_EPOCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --eval_epoches $EVAL_EPOCHES"
@@ -1798,7 +1843,7 @@ else
     [ -n "$ENABLE_RECOVERY_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_recovery_gate_ckpt $ENABLE_RECOVERY_GATE_CKPT"
     [ -n "$ENABLE_ZD_GATE_CKPT" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_zd_gate_ckpt $ENABLE_ZD_GATE_CKPT"
     [ -n "$DUAL_GATE_INJECT_RECOVERY_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_inject_recovery_min $DUAL_GATE_INJECT_RECOVERY_MIN"
-    [ -n "$DUAL_GATE_PRED_INDEP_MAX" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_pred_indep_max $DUAL_GATE_PRED_INDEP_MAX"
+    [ -n "$DUAL_GATE_SIGNED_SLOPE_MIN" ] && OPTIM_ARGS="$OPTIM_ARGS --dual_gate_signed_slope_min $DUAL_GATE_SIGNED_SLOPE_MIN"
     [ -n "$ENABLE_INJECT_RECOVERY_EVAL" ] && OPTIM_ARGS="$OPTIM_ARGS --enable_inject_recovery_eval $ENABLE_INJECT_RECOVERY_EVAL"
     [ -n "$INJECT_RECOVERY_EVAL_DEG" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_deg $INJECT_RECOVERY_EVAL_DEG"
     [ -n "$INJECT_RECOVERY_EVAL_BATCHES" ] && OPTIM_ARGS="$OPTIM_ARGS --inject_recovery_eval_batches $INJECT_RECOVERY_EVAL_BATCHES"
@@ -1915,6 +1960,14 @@ else
     [ -n "$NATIVE_CROSS_POINTGPT_MAX_DEPTH" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_pointgpt_max_depth $NATIVE_CROSS_POINTGPT_MAX_DEPTH"
     [ -n "$NATIVE_CROSS_EXTEND_RATIO" ] && OPTIM_ARGS="$OPTIM_ARGS --native_cross_extend_ratio $NATIVE_CROSS_EXTEND_RATIO"
     [ -n "$FUSION_BACKEND" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_backend $FUSION_BACKEND"
+    [ -n "$PAPER_FEAT_DIM" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_feat_dim $PAPER_FEAT_DIM"
+    [ -n "$PAPER_N_GROUPS" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_n_groups $PAPER_N_GROUPS"
+    [ -n "$PAPER_KNN" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_knn $PAPER_KNN"
+    [ -n "$PAPER_SIM_LAYERS" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_sim_layers $PAPER_SIM_LAYERS"
+    [ -n "$PAPER_DEPTH_BINS" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_depth_bins $PAPER_DEPTH_BINS"
+    [ -n "$PAPER_SIM_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_sim_loss_weight $PAPER_SIM_LOSS_WEIGHT"
+    [ -n "$PAPER_FOV_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_fov_loss_weight $PAPER_FOV_LOSS_WEIGHT"
+    [ -n "$PAPER_COARSE_LOSS_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --paper_coarse_loss_weight $PAPER_COARSE_LOSS_WEIGHT"
     [ -n "$PC_ENCODER_MODE" ] && OPTIM_ARGS="$OPTIM_ARGS --pc_encoder_mode $PC_ENCODER_MODE"
     [ -n "$FUSION_VARIANT" ] && OPTIM_ARGS="$OPTIM_ARGS --fusion_variant $FUSION_VARIANT"
     [ -n "$DEEP_SUPERVISION_WEIGHT" ] && OPTIM_ARGS="$OPTIM_ARGS --deep_supervision_weight $DEEP_SUPERVISION_WEIGHT"

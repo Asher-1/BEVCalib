@@ -19,6 +19,7 @@ import time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from scipy.spatial.transform import Rotation as ScipyRotation
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'kitti-bev-calib'))
 
@@ -52,10 +53,26 @@ from tools import generate_single_perturbation_from_T
 from visualization import (
     compute_batch_pose_errors,
     visualize_batch_projection,
-    compute_pose_errors,
+    compute_pose_errors as _base_compute_pose_errors,
     project_points_to_image,
     render_projected_points,
 )
+
+
+def compute_pose_errors(T_pred, T_gt):
+    """Pose errors with rotation axes expressed in the LiDAR right-error frame."""
+    errors = _base_compute_pose_errors(T_pred, T_gt)
+    right_delta = T_gt[:3, :3].T @ T_pred[:3, :3]
+    signed = ScipyRotation.from_matrix(right_delta).as_euler('xyz', degrees=True)
+    errors.update({
+        'roll_error': abs(float(signed[0])),
+        'pitch_error': abs(float(signed[1])),
+        'yaw_error': abs(float(signed[2])),
+        'roll_signed': float(signed[0]),
+        'pitch_signed': float(signed[1]),
+        'yaw_signed': float(signed[2]),
+    })
+    return errors
 
 
 def _parse_train_log_errors(ckpt_path, target_epoch, existing_train, existing_val):
@@ -210,7 +227,7 @@ def make_collate_fn(target_size):
         for item in batch:
             pc = item[1]
             if _max_pcd > 0 and pc.shape[0] > _max_pcd:
-                idx = np.random.choice(pc.shape[0], _max_pcd, replace=False)
+                idx = np.linspace(0, pc.shape[0] - 1, _max_pcd, dtype=np.int64)
                 pc = pc[idx]
             max_num_points = max(max_num_points, pc.shape[0])
             pcs.append(pc)
@@ -374,6 +391,9 @@ def _resolve_perturbation_from_ckpt(args, checkpoint):
         args.per_axis_prob = ckpt_args.get('per_axis_prob', 0.0)
     if not hasattr(args, 'per_axis_weights') or args.per_axis_weights is None:
         args.per_axis_weights = ckpt_args.get('per_axis_weights', '')
+    if getattr(args, 'rotation_target_definition', None) is None:
+        args.rotation_target_definition = ckpt_args.get(
+            'rotation_target_definition', 'per_axis')
     
     if args.perturb_distribution != 'uniform' or args.per_axis_prob > 0:
         print(f"   perturb_distribution={args.perturb_distribution}, "
@@ -410,6 +430,11 @@ def _resolve_model_params_from_ckpt(args, ckpt_args, state_dict, quiet=False):
     if 'img_branch.bev_queries.weight' in state_dict and 'cam2bev_mode' not in ckpt_args:
         ckpt_args['cam2bev_mode'] = 'query'
         _log(f"   [auto-detect] cam2bev_mode='query' (found bev_queries in state_dict)")
+
+    if 'fusion_backend' not in ckpt_args and any(
+            k.startswith('paper_sim_cross_attn.') for k in state_dict):
+        ckpt_args['fusion_backend'] = 'paper_explicit_bev'
+        _log("   [auto-detect] fusion_backend='paper_explicit_bev'")
 
     # GMP (GeoMatchProjCalib) auto-detect from state_dict keys
     if 'fusion_backend' not in ckpt_args and any(
@@ -683,7 +708,7 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
     fusion_backend = p.get('fusion_backend', 'bev')
     from hybrid_triple_calib import HybridTripleCalib, build_calib_model
 
-    if fusion_backend in ('geo_match_proj', 'cf_bev_r') or fusion_backend in HybridTripleCalib.FUSION_BACKENDS:
+    if fusion_backend in ('geo_match_proj', 'cf_bev_r', 'paper_explicit_bev') or fusion_backend in HybridTripleCalib.FUSION_BACKENDS:
         class _EvalArgs:
             pass
 
@@ -709,6 +734,10 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
             'use_dp_head', 'route_loss_weight', 'zero_drift_loss_weight',
             'use_hard_route_eval',
             'use_adir', 'adir_steps', 'adir_max_step_deg',
+            'paper_feat_dim', 'paper_n_groups', 'paper_knn',
+            'paper_sim_layers', 'paper_depth_bins',
+            'paper_sim_loss_weight', 'paper_fov_loss_weight',
+            'paper_coarse_loss_weight',
         ):
             if gmp_key in ckpt_args and not hasattr(eval_args, gmp_key):
                 setattr(eval_args, gmp_key, ckpt_args[gmp_key])
@@ -796,6 +825,10 @@ def _build_model_from_ckpt(args, checkpoint, device, rotation_only, quiet=False)
     state_dict = _auto_permute_spconv_weights(state_dict, model)
     _adapt_model_to_checkpoint(model, state_dict, device)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if fusion_backend == 'paper_explicit_bev' and (missing or unexpected):
+        raise RuntimeError(
+            "PaperExplicitBEV checkpoint architecture mismatch: "
+            f"missing={missing}, unexpected={unexpected}")
     if not quiet:
         if missing:
             print(f"   Missing keys: {missing}")
@@ -1028,8 +1061,11 @@ def evaluate_checkpoint(args):
     collate_fn = make_collate_fn((args.target_width, args.target_height))
     _ckpt_max_pcd = ckpt_args.get('max_pcd_points', 0) if ckpt_args else 0
     if _ckpt_max_pcd > 0:
-        print(f"   [点云] 训练时 max_pcd_points={_ckpt_max_pcd}, 评估时不下采样 (保留全量点云用于可视化)")
-        print(f"   [点云] 模型 PointEncoder 内部有 FPS 采样, 全量输入不影响推理精度")
+        if _p.get('fusion_backend') == 'paper_explicit_bev':
+            collate_fn._max_pcd_points = int(_ckpt_max_pcd)
+            print(f"   [点云] Paper backend 与训练一致: max_pcd_points={_ckpt_max_pcd}")
+        else:
+            print(f"   [点云] 训练时 max_pcd_points={_ckpt_max_pcd}, 评估保留全量点云")
     val_loader = DataLoader(
         eval_dataset,
         batch_size=args.batch_size,
@@ -1109,6 +1145,7 @@ def evaluate_checkpoint(args):
                     distribution=getattr(args, 'perturb_distribution', 'uniform'),
                     per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
                     per_axis_weights=_paw,
+                    rotation_definition=args.rotation_target_definition,
                 )
             
                 resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device)
@@ -1127,7 +1164,8 @@ def evaluate_checkpoint(args):
                                        post_cam2ego_T, intrinsic_matrix, masks=masks_tensor, out_init_loss=False)
                 else:
                     T_pred, _, _ = model(resize_imgs, pcs, gt_T_to_camera_torch, init_T_to_camera,
-                                         post_cam2ego_T, intrinsic_matrix, masks=masks, out_init_loss=False)
+                                         post_cam2ego_T, intrinsic_matrix, masks=masks_tensor,
+                                         out_init_loss=False)
 
                 imgs_np = np.array(imgs)
                 masks_np = np.array(masks)
@@ -1450,7 +1488,7 @@ def _gdiag_model_forward(active_model, resize_imgs, pcs_t, gt_T_t, init_T_t, pos
         return active_model(resize_imgs, pcs_t, gt_T_t, init_T_t, post_T, K,
                             masks=masks_t, out_init_loss=False)
     T_pred, _, _ = active_model(resize_imgs, pcs_t, gt_T_t, init_T_t, post_T, K,
-                                masks=masks, out_init_loss=False)
+                                masks=masks_t, out_init_loss=False)
     return T_pred
 
 
@@ -1559,12 +1597,14 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
             T_gt_agg[:3, :3] = R_gt_agg
 
             errs = compute_pose_errors(T_agg, T_gt_agg)
+            right_delta = R_gt_agg.T @ R_agg
+            signed_rpy = _ScipyRot.from_matrix(right_delta).as_euler('xyz', degrees=True)
             seq_results[sid] = {
-                'rot': errs['rot_error'], 'roll': errs['roll_error'],
-                'pitch': errs['pitch_error'], 'yaw': errs['yaw_error'],
-                'roll_signed': errs.get('roll_signed', errs['roll_error']),
-                'pitch_signed': errs.get('pitch_signed', errs['pitch_error']),
-                'yaw_signed': errs.get('yaw_signed', errs['yaw_error']),
+                'rot': errs['rot_error'], 'roll': abs(float(signed_rpy[0])),
+                'pitch': abs(float(signed_rpy[1])), 'yaw': abs(float(signed_rpy[2])),
+                'roll_signed': float(signed_rpy[0]),
+                'pitch_signed': float(signed_rpy[1]),
+                'yaw_signed': float(signed_rpy[2]),
             }
             all_rot.append(errs['rot_error'])
             all_roll.append(errs['roll_error'])
@@ -1636,6 +1676,7 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                         rotation_only=True,
                         distribution=getattr(args, 'perturb_distribution', 'uniform'),
                         per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                        rotation_definition=args.rotation_target_definition,
                     )
 
                 original_init_T_np = init_T_np.copy()
@@ -1812,8 +1853,7 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
                     if use_dp:
                         stacked_masks = cb_dev['masks_t'].repeat(n_sub_c, 1, 1)
                     else:
-                        masks_list = cb_dev['masks']
-                        stacked_masks_raw = masks_list * n_sub_c
+                        stacked_masks_raw = cb_dev['masks_t'].repeat(n_sub_c, 1)
 
                     all_init_T = []
                     for cfg_label, rpy in sub_cfgs:
@@ -2229,6 +2269,74 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         },
     }
 
+    # V70.2 acceptance protocol: compute each OOD rig independently, then
+    # gate on the worst rig/axis so opposite biases cannot cancel.
+    canonical_injected = float(fi_injected_geo)
+    axis_names = ('roll', 'pitch', 'yaw')
+    zd_per_seq = results['zero_drift'].get('per_seq', {})
+    pos_per_seq = results['fixed_inject'].get('per_seq', {})
+    neg_per_seq = results['neg_inject'].get('per_seq', {})
+    common_rigs = sorted(set(zd_per_seq) & set(pos_per_seq) & set(neg_per_seq))
+    per_rig = {}
+    genuine_values, all_slopes, all_zd = [], [], []
+    for rig in common_rigs:
+        zd_vec = np.asarray([zd_per_seq[rig][f'{a}_signed'] for a in axis_names])
+        pos_vec = np.asarray([pos_per_seq[rig][f'{a}_signed'] for a in axis_names])
+        neg_vec = np.asarray([neg_per_seq[rig][f'{a}_signed'] for a in axis_names])
+        genuine_residual_rig = 0.5 * (
+            np.linalg.norm(pos_vec - zd_vec) + np.linalg.norm(neg_vec - zd_vec))
+        genuine_rig = ((canonical_injected - genuine_residual_rig)
+                       / canonical_injected * 100.0
+                       if canonical_injected > 1e-6 else 0.0)
+        slopes_rig = [
+            float(((inject_deg - pos_vec[i]) - (-inject_deg - neg_vec[i]))
+                  / (2.0 * inject_deg))
+            for i in range(3)
+        ]
+        zd_max_rig = float(np.max(np.abs(zd_vec)))
+        per_rig[str(rig)] = {
+            'genuine_recovery_pct': float(genuine_rig),
+            'genuine_residual_deg': float(genuine_residual_rig),
+            'signed_correction_slope_axes': slopes_rig,
+            'signed_correction_slope_min_axis': float(min(slopes_rig)),
+            'zd_max_deg': zd_max_rig,
+            'zd_signed_rpy_deg': [float(v) for v in zd_vec],
+        }
+        genuine_values.append(float(genuine_rig))
+        all_slopes.extend(slopes_rig)
+        all_zd.append(zd_max_rig)
+    acceptance_genuine = float(np.mean(genuine_values)) if genuine_values else 0.0
+    acceptance_genuine_worst = float(np.min(genuine_values)) if genuine_values else 0.0
+    slope_mean = float(np.mean(all_slopes)) if all_slopes else 0.0
+    slope_worst = float(np.min(all_slopes)) if all_slopes else 0.0
+    zd_max_axis = float(np.max(all_zd)) if all_zd else float('inf')
+    rec_min = float(getattr(args, 'gdiag_genuine_recovery_min', 95.0))
+    slope_min = float(getattr(args, 'gdiag_signed_slope_min', 0.8))
+    zd_max = float(getattr(args, 'gdiag_zd_max_deg', 0.1))
+    acceptance_pass = (
+        bool(common_rigs)
+        and acceptance_genuine_worst >= rec_min
+        and slope_worst >= slope_min
+        and zd_max_axis <= zd_max)
+    results['acceptance_gate'] = {
+        'passed': bool(acceptance_pass),
+        'inject_definition': 'per_axis_lidar_rpy_right_multiply',
+        'inject_deg_per_axis': float(inject_deg),
+        'injected_geodesic_deg': canonical_injected,
+        'genuine_recovery_pct': float(acceptance_genuine),
+        'genuine_recovery_min_rig_pct': acceptance_genuine_worst,
+        'signed_correction_slope': slope_mean,
+        'signed_correction_slope_min_axis': slope_worst,
+        'zd_max_deg': zd_max_axis,
+        'n_rigs': len(common_rigs),
+        'per_rig': per_rig,
+        'thresholds': {
+            'genuine_recovery_min_pct': rec_min,
+            'signed_slope_min': slope_min,
+            'zd_max_deg': zd_max,
+        },
+    }
+
     print(f"\n   === GS_medw (MEDW-aggregated Generalization Score) ===")
     print(f"   GS_medw = {gs_medw:.4f} (lower=better, all metrics based on MEDW per-seq aggregation)")
     print(f"     S1 Zero-Drift:  {s1_zd:.4f} (w={w_medw[0]}) [MEDW max_rpy={zd_max_rpy:.4f}°]")
@@ -2241,6 +2349,11 @@ def _run_generalization_diagnostics(model, val_loader, args, device, eval_dir,
         pg = per_axis_genuine[axis]
         print(f"     {axis:5s}: raw={pg['raw_recovery_pct']:.1f}% genuine={pg['genuine_recovery_pct']:.1f}% shortcut={pg['shortcut_proportion_pct']:.1f}%")
     print(f"   Shortcut Risk: {worst_risk} (R:{shortcut_risk_detail['roll']} P:{shortcut_risk_detail['pitch']} Y:{shortcut_risk_detail['yaw']})")
+    print(f"   V70.2 Acceptance: {'PASS' if acceptance_pass else 'FAIL'} "
+          f"(GenuineMean={acceptance_genuine:.1f}%, "
+          f"GenuineWorst={acceptance_genuine_worst:.1f}%/{rec_min:.1f}%, "
+          f"SlopeWorst={slope_worst:.3f}/{slope_min:.3f}, "
+          f"ZDmax={zd_max_axis:.4f}°/{zd_max:.4f}°)")
 
     for axis in ['roll', 'pitch', 'yaw']:
         cl = cross_leakage[axis]
@@ -3281,7 +3394,8 @@ def _generate_temporal_projections(vis_data_cache, T_agg_per_sample, eval_dir,
             np.random.seed(42 + idx)
             init_T, _, _ = generate_single_perturbation_from_T(
                 gt_T[np.newaxis], angle_range_deg=angle_deg,
-                trans_range=trans_r, rotation_only=rotation_only)
+                trans_range=trans_r, rotation_only=rotation_only,
+                rotation_definition=getattr(args, 'rotation_target_definition', 'per_axis'))
             init_T = init_T[0]
 
         valid_mask = mask == 1
@@ -3680,7 +3794,8 @@ def compare_checkpoints(args):
                 trans_range=args.trans_range, rotation_only=rotation_only,
                 distribution=getattr(args, 'perturb_distribution', 'uniform'),
                 per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
-                per_axis_weights=_paw)
+                per_axis_weights=_paw,
+                rotation_definition=args.rotation_target_definition)
 
             imgs_arr = np.array(imgs)
             pcs_np = np.array(pcs)[:, :, :3] if args.xyz_only > 0 else np.array(pcs)
@@ -3695,11 +3810,12 @@ def compare_checkpoints(args):
             init_T_t = torch.from_numpy(init_T_np).float().to(device)
             post_T = torch.eye(4).unsqueeze(0).repeat(gt_T_t.shape[0], 1, 1).float().to(device)
             K_t = torch.from_numpy(K_np).float().to(device)
+            masks_t = torch.from_numpy(masks_np).float().to(device)
 
             pred_a, _, _ = model_a(resize_imgs, pcs_t, gt_T_t, init_T_t, post_T, K_t,
-                                   masks=masks, out_init_loss=False)
+                                   masks=masks_t, out_init_loss=False)
             pred_b, _, _ = model_b(resize_imgs, pcs_t, gt_T_t, init_T_t, post_T, K_t,
-                                   masks=masks, out_init_loss=False)
+                                   masks=masks_t, out_init_loss=False)
 
             pred_a_np = pred_a.detach().cpu().numpy()
             pred_b_np = pred_b.detach().cpu().numpy()
@@ -4594,6 +4710,9 @@ def main():
                        help="扰动角度范围（默认从checkpoint的eval_noise/train_noise读取，若无则20.0）")
     parser.add_argument("--trans_range", type=float, default=None,
                        help="扰动平移范围（默认从checkpoint的eval_noise/train_noise读取，若无则1.5）")
+    parser.add_argument("--rotation_target_definition", choices=["per_axis", "total"],
+                        default=None,
+                        help="Rotation range meaning; defaults to checkpoint protocol")
     parser.add_argument("--target_width", type=int, default=640, help="目标图像宽度")
     parser.add_argument("--target_height", type=int, default=360, help="目标图像高度")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
@@ -4671,6 +4790,9 @@ def main():
                             "Outputs generalization_diagnostics.json with MEDW-aggregated GS_medw score.")
     parser.add_argument("--gdiag_inject_deg", type=float, default=2.0,
                        help="Injection magnitude for generalization_diag fixed-inject test (default: 2.0°)")
+    parser.add_argument("--gdiag_genuine_recovery_min", type=float, default=95.0)
+    parser.add_argument("--gdiag_signed_slope_min", type=float, default=0.8)
+    parser.add_argument("--gdiag_zd_max_deg", type=float, default=0.1)
     parser.add_argument("--gdiag_max_batches", type=int, default=0,
                        help="Max batches for generalization_diag sub-tests (0=same as main eval)")
     parser.add_argument("--gdiag_only", action='store_true', default=False,

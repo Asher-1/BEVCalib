@@ -153,6 +153,15 @@ def load_config(config_path=None):
             "EVAL_MAX_FRAMES_PER_SEQ": cfg.get("eval_params", {}).get("eval_max_frames_per_seq", None),
             "SHORTCUT_DIAG": cfg.get("eval_params", {}).get("shortcut_diag", False),
             "GENERALIZATION_DIAG": cfg.get("eval_params", {}).get("generalization_diag", False),
+            "GDIAG_INJECT_DEG": cfg.get("eval_params", {}).get("gdiag_inject_deg", 2.0),
+            "GDIAG_GENUINE_RECOVERY_MIN": cfg.get("eval_params", {}).get(
+                "gdiag_genuine_recovery_min", 95.0),
+            "GDIAG_SIGNED_SLOPE_MIN": cfg.get("eval_params", {}).get(
+                "gdiag_signed_slope_min", 0.8),
+            "GDIAG_ZD_MAX_DEG": cfg.get("eval_params", {}).get(
+                "gdiag_zd_max_deg", 0.1),
+            "REQUIRE_ACCEPTANCE_GATE": cfg.get("eval_params", {}).get(
+                "require_acceptance_gate", False),
             "CF_BEV_R_ITER_STEPS": cfg.get("eval_params", {}).get("cf_bev_r_iter_steps", 0),
             "EXCLUDE_SEQS": cfg.get("eval_params", {}).get("exclude_seqs", None),
             "PROJFUSION_ROOT": cfg.get("projfusion_root",
@@ -231,7 +240,7 @@ def parse_script_args():
                         help="对每个模型运行 shortcut 诊断测试 (fixed-bias, invariance, ablation, GradCAM)")
     parser.add_argument("--generalization_diag", action="store_true", default=False,
                         help="对每个模型运行泛化诊断 (zero-drift, inject, shortcut-resistance)")
-    parser.add_argument("--gdiag_inject_deg", type=float, default=2.0,
+    parser.add_argument("--gdiag_inject_deg", type=float, default=None,
                         help="泛化诊断注入角度 (default: 2.0°)")
     parser.add_argument("--cf_bev_r_iter_steps", type=int, default=0,
                         help="CF-BEV-R gdiag 迭代推理步数 (0=单步, 2=部署对齐)")
@@ -281,7 +290,13 @@ _EVAL_MF_CLI = getattr(_script_args, "eval_max_frames_per_seq", None)
 EVAL_MAX_FRAMES_PER_SEQ = _EVAL_MF_CLI if _EVAL_MF_CLI is not None else CFG.get("EVAL_MAX_FRAMES_PER_SEQ")
 SHORTCUT_DIAG = getattr(_script_args, "shortcut_diag", False) or CFG.get("SHORTCUT_DIAG", False)
 GENERALIZATION_DIAG = getattr(_script_args, "generalization_diag", False) or CFG.get("GENERALIZATION_DIAG", False)
-GDIAG_INJECT_DEG = getattr(_script_args, "gdiag_inject_deg", 2.0)
+GDIAG_INJECT_DEG = (_script_args.gdiag_inject_deg
+                    if _script_args.gdiag_inject_deg is not None
+                    else CFG.get("GDIAG_INJECT_DEG", 2.0))
+GDIAG_GENUINE_RECOVERY_MIN = CFG.get("GDIAG_GENUINE_RECOVERY_MIN", 95.0)
+GDIAG_SIGNED_SLOPE_MIN = CFG.get("GDIAG_SIGNED_SLOPE_MIN", 0.8)
+GDIAG_ZD_MAX_DEG = CFG.get("GDIAG_ZD_MAX_DEG", 0.1)
+REQUIRE_ACCEPTANCE_GATE = bool(CFG.get("REQUIRE_ACCEPTANCE_GATE", False))
 CF_BEV_R_ITER_STEPS = int(getattr(_script_args, "cf_bev_r_iter_steps", 0) or CFG.get("CF_BEV_R_ITER_STEPS", 0) or 0)
 GDIAG_ONLY = getattr(_script_args, "gdiag_only", False)
 _EXCLUDE_SEQS_CLI = getattr(_script_args, "exclude_seqs", None)
@@ -299,7 +314,8 @@ def _is_gdiag_complete(gdiag_json):
         with open(gdiag_json, 'r') as f:
             data = json.load(f)
         n_seqs = data.get('composite', {}).get('raw', {}).get('n_seqs_evaluated', 0)
-        return int(n_seqs) >= GDIAG_MIN_SEQS
+        acceptance_ok = (not REQUIRE_ACCEPTANCE_GATE or 'acceptance_gate' in data)
+        return int(n_seqs) >= GDIAG_MIN_SEQS and acceptance_ok
     except Exception:
         return False
 
@@ -472,6 +488,8 @@ def _detect_backbone_from_model(mcfg):
 
     Priority: train.log > dir_name > default 'Swin'.
     """
+    if mcfg.get('fusion_backend') == 'paper_explicit_bev':
+        return 'ResNet-50 (paper)'
     model_base = _resolve_model_base(mcfg)
     train_log = os.path.join(model_base, "train.log")
     if os.path.isfile(train_log):
@@ -517,7 +535,7 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
     env["PROJFUSION_ROOT"] = mcfg.get("projfusion_root", PROJFUSION_ROOT)
     if "use_drcv" in mcfg:
         env["USE_DRCV_BACKEND"] = "1" if mcfg["use_drcv"] else "0"
-    elif mcfg.get("fusion_backend") == "geo_match_proj" or mcfg.get("gmp", False):
+    elif mcfg.get("fusion_backend") in ("geo_match_proj", "paper_explicit_bev") or mcfg.get("gmp", False):
         env["USE_DRCV_BACKEND"] = "0"
     for env_key in ("BEV_XBOUND_MIN", "BEV_XBOUND_MAX",
                     "BEV_YBOUND_MIN", "BEV_YBOUND_MAX", "BEV_XY_STEP"):
@@ -585,6 +603,7 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
         "voxel_mode", "scatter_reduce", "to_bev_mode", "fuser_type",
         "use_foundation_depth", "depth_model_type", "fd_mode",
         "intrinsic_input", "target_width", "target_height",
+        "rotation_target_definition",
         "use_hard_route_eval",
         "pitch_vertical_bands",
     ]
@@ -619,6 +638,14 @@ def _build_eval_cmd_and_env(mcfg, per_model_dir):
     if mcfg.get("generalization_diag", False) or GENERALIZATION_DIAG:
         cmd.append("--generalization_diag")
         cmd.extend(["--gdiag_inject_deg", str(mcfg.get("gdiag_inject_deg", GDIAG_INJECT_DEG))])
+        cmd.extend([
+            "--gdiag_genuine_recovery_min",
+            str(mcfg.get("gdiag_genuine_recovery_min", GDIAG_GENUINE_RECOVERY_MIN)),
+            "--gdiag_signed_slope_min",
+            str(mcfg.get("gdiag_signed_slope_min", GDIAG_SIGNED_SLOPE_MIN)),
+            "--gdiag_zd_max_deg",
+            str(mcfg.get("gdiag_zd_max_deg", GDIAG_ZD_MAX_DEG)),
+        ])
         _iter_steps = int(mcfg.get("cf_bev_r_iter_steps", CF_BEV_R_ITER_STEPS) or 0)
         if _iter_steps > 0:
             cmd.extend(["--cf_bev_r_iter_steps", str(_iter_steps)])
@@ -2363,7 +2390,26 @@ def generate_report(all_stats):
             )
         lines.append("")
 
-        lines.append("Fixed-Inject 恢复能力 (inject all RPY, MEDW聚合, Genuine=方向感知扣除ZeroDrift):")
+        lines.append("V70.2 OOD 联合验收 (唯一 checkpoint/部署结论门控):")
+        lines.append("")
+        lines.append("| 模型 | Verdict | Genuine Mean | Genuine Worst Rig | Signed Slope | Worst Rig/Axis | ZD max |")
+        lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+        for s in gdiag_sorted:
+            gate = s['gdiag'].get('acceptance_gate', {})
+            if not gate:
+                lines.append(f"| {s['label']} | N/A | - | - | - | - | - |")
+                continue
+            lines.append(
+                f"| {s['label']} "
+                f"| {'PASS' if gate.get('passed') else 'FAIL'} "
+                f"| {gate.get('genuine_recovery_pct', -1):.1f}% "
+                f"| {gate.get('genuine_recovery_min_rig_pct', -1):.1f}% "
+                f"| {gate.get('signed_correction_slope', -1):.3f} "
+                f"| {gate.get('signed_correction_slope_min_axis', -1):.3f} "
+                f"| {gate.get('zd_max_deg', -1):.4f}° |")
+        lines.append("")
+
+        lines.append("Fixed-Inject 恢复能力 (辅助诊断，不替代上述联合门控):")
         lines.append("")
         lines.append("| 模型 | Injected | Raw Residual | ZD(rot) | ZD方向扣除 | Genuine Resid | Raw Rec% | Genuine Rec% |")
         lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
@@ -2518,7 +2564,7 @@ def generate_report(all_stats):
             )
         lines.append("")
 
-        lines.append("Prediction Independence (预测独立性 — 捷径检测):")
+        lines.append("Prediction Independence (历史辅助诊断，不参与 V70.2 门控):")
         lines.append("")
         lines.append("| 模型 | Roll独立性 | Pitch独立性 | Yaw独立性 | 综合独立性 | 判定 |")
         lines.append("| --- | ---: | ---: | ---: | ---: | --- |")
@@ -2558,14 +2604,14 @@ def generate_report(all_stats):
         lines.append("")
         lines.append("| | Shortcut低(<20%) | Shortcut中(20-50%) | Shortcut高(>50%) |")
         lines.append("| --- | --- | --- | --- |")
-        lines.append("| Genuine高(>70%) | **理想模型**: 实打实的矫正 | 良好但有ZD辅助 | 需结合PredIndep验证 |")
+        lines.append("| Genuine高(>70%) | **理想模型**: 实打实的矫正 | 良好但有ZD辅助 | 以V70.2联合门控为准 |")
         lines.append("| Genuine中(30-70%) | 可用模型 | 一般 | 偏弱 |")
         lines.append("| Genuine低(<30%) | 较差模型 | 差 | **纯捷径**: 全靠ZD |")
         lines.append("")
         lines.append("- Genuine Recovery: 扣除ZD后的净残差, 反映模型输出离GT多近")
         lines.append("- Shortcut Proportion: 表观矫正中ZD贡献的比例, 反映矫正来源")
-        lines.append("- Prediction Independence: 模型预测是否随注入量变化, 独立交叉验证捷径")
-        lines.append("- 三者必须联合解读: 高Genuine+高Shortcut+SHORTCUT判定 = 纯靠ZD的虚假矫正")
+        lines.append("- Prediction Independence: 仅保留历史可比性，不进入checkpoint或部署判定")
+        lines.append("- V70.2 只以 Genuine Recovery + 最差轴 signed slope + ZD 联合门控判定")
         lines.append("")
 
     # === ZD-Corrected 部署精度估算 ===
@@ -2717,10 +2763,16 @@ def generate_report(all_stats):
         _comp_raw = best_gs['gdiag'].get('composite', {}).get('raw', {})
         _has_signed = _comp_raw.get('zero_drift_signed_rpy') is not None
         genuine_rec = _comp_raw.get('genuine_recovery_pct', raw_rec) if _has_signed else raw_rec
+        _accept = best_gs['gdiag'].get('acceptance_gate', {})
+        _accept_text = (
+            f", Acceptance={'PASS' if _accept.get('passed') else 'FAIL'}"
+            f", SlopeWorst={_accept.get('signed_correction_slope_min_axis', -1):.3f}"
+            if _accept else "")
         lines.append(f"{finding_idx}. 最佳综合泛化 (GS_medw): {best_gs['label']} "
                      f"(GS_medw={gs_val:.4f}, GenuineRecovery={genuine_rec:.1f}%, "
                      f"ZeroDrift={zd_rot:.4f}°, "
-                     f"Shortcut={best_gs['gdiag'].get('shortcut_risk', 'N/A')})")
+                     f"Shortcut={best_gs['gdiag'].get('shortcut_risk', 'N/A')}"
+                     f"{_accept_text})")
         finding_idx += 1
     lines.append("")
 

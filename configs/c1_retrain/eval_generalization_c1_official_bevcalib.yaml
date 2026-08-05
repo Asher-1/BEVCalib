@@ -1,0 +1,84 @@
+# C1 Official BEVCalib Replica 泛化评估
+# 对齐训练: configs/c1_retrain/c1_official_bevcalib_replica.yaml
+#
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_official_bevcalib.yaml \
+#     --parallel -1 --eval_max_frames_per_seq 500
+#
+# 架构: fusion_backend=bev (BEVCalib), Swin+LSS, use_mlp_head=0, bev_pool_factor=0
+# 扰动: rotation_only ±20° (与训练 eval_angle_range_deg 一致), trans=0
+# BEV: custom 100×100, zstep=4, xy_step=2, x∈[0,200] y∈[-100,100]
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_official_bevcalib"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 20.0
+  trans_range: 0.0
+  batch_size: 2
+  vis_interval: 99999
+  timeout: 14400
+  eval_max_frames_per_seq: 500
+  shortcut_diag: false
+  generalization_diag: true
+  gdiag_inject_deg: 2.0
+  gdiag_genuine_recovery_min: 95.0
+  gdiag_signed_slope_min: 0.80
+  gdiag_zd_max_deg: 0.10
+  require_acceptance_gate: false
+
+models:
+  - label: "c1-official-bevcalib-best-val"
+    dir_name: "model_small_20deg_c1_official_bevcalib_rotation_20deg"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_400.pth"]
+    bev_zbound_step: "4.0"
+    bev_xbound_min: 0
+    bev_xbound_max: 200
+    bev_ybound_min: -100
+    bev_ybound_max: 100
+    bev_xy_step: 2.0
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "bev"
+    mode_desc: "Official BEVCalib replica (best supervised val, ±20° rot-only)"
+    target_width: 960
+    target_height: 540
+    use_mlp_head: 0
+    bev_pool_factor: 0
+    deformable: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"
+
+  - label: "c1-official-bevcalib-ep480"
+    dir_name: "model_small_20deg_c1_official_bevcalib_rotation_20deg"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_480.pth"
+    ckpt_fallback: ["ckpt_best_val.pth", "ckpt_440.pth"]
+    bev_zbound_step: "4.0"
+    bev_xbound_min: 0
+    bev_xbound_max: 200
+    bev_ybound_min: -100
+    bev_ybound_max: 100
+    bev_xy_step: 2.0
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "bev"
+    mode_desc: "Official BEVCalib replica (epoch 480, ±20° rot-only)"
+    target_width: 960
+    target_height: 540
+    use_mlp_head: 0
+    bev_pool_factor: 0
+    deformable: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"

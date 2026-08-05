@@ -22,6 +22,15 @@ def gen_dx_bx(xbound, ybound, zbound):
     )
     return dx, bx, nx
 
+
+def _probe_encoder_feature_hw(encoder, img_h, img_w):
+    """Run a dry forward to get the backbone's actual (fH, fW)."""
+    with torch.no_grad():
+        dummy = torch.zeros(1, 1, 3, img_h, img_w)
+        feat = encoder(dummy)
+    return int(feat.shape[-2]), int(feat.shape[-1])
+
+
 class LSS(nn.Module):
     ### Adapted from https://github.com/nv-tlabs/lift-splat-shoot
     def __init__(self, 
@@ -239,12 +248,35 @@ class Cam2BEV(nn.Module):
         self.fd_mode = fd_mode
         img_H, img_W = img_shape
         transformedImgShape = (3, img_H, img_W)
-        featureShape = (encoder_out_channels, img_H // 8, img_W // 8)
-        
-        print(f"[Cam2BEV] 输入图像尺寸: {img_W}x{img_H}, 特征尺寸: {featureShape[2]}x{featureShape[1]}")
-        
+        est_fH, est_fW = img_H // 8, img_W // 8
+        est_featureShape = (encoder_out_channels, est_fH, est_fW)
+
+        if backbone_type == "dinov2":
+            from img_branch.dinov2_encoder import DINOv2Encoder
+            self.CamEncode = DINOv2Encoder(
+                featureShape=est_featureShape,
+                out_channels=encoder_out_channels,
+                variant=backbone_variant,
+                freeze_backbone=freeze_backbone,
+                freeze_layers=freeze_layers,
+                weights_path=backbone_weights,
+            )
+        else:
+            self.CamEncode = SwinT_tiny_Encoder(
+                output_indices, est_featureShape, encoder_out_channels,
+                FPN_in_channels, FPN_out_channels,
+            )
+
+        act_fH, act_fW = _probe_encoder_feature_hw(self.CamEncode, img_H, img_W)
+        featureShape = (encoder_out_channels, act_fH, act_fW)
+        print(
+            f"[Cam2BEV] 输入图像尺寸: {img_W}x{img_H}, "
+            f"特征尺寸: {act_fW}x{act_fH}"
+            + (f" (修正自估算 {est_fW}x{est_fH})" if (act_fH, act_fW) != (est_fH, est_fW) else "")
+        )
+
         self.depth_supervision = None
-        
+
         if use_foundation_depth:
             if fd_mode == "replace_v1":
                 from .foundation_depth import FoundationDepthLSS
@@ -289,18 +321,6 @@ class Cam2BEV(nn.Module):
                 raise ValueError(f"Unknown fd_mode: {fd_mode}")
         else:
             self.lss = LSS(transformedImgShape=transformedImgShape, featureShape=featureShape)
-        if backbone_type == "dinov2":
-            from img_branch.dinov2_encoder import DINOv2Encoder
-            self.CamEncode = DINOv2Encoder(
-                featureShape=featureShape,
-                out_channels=encoder_out_channels,
-                variant=backbone_variant,
-                freeze_backbone=freeze_backbone,
-                freeze_layers=freeze_layers,
-                weights_path=backbone_weights,
-            )
-        else:
-            self.CamEncode = SwinT_tiny_Encoder(output_indices, featureShape, encoder_out_channels, FPN_in_channels, FPN_out_channels)
         dx, bx, nx = gen_dx_bx(xbound=xbound, ybound=ybound, zbound=zbound)
         self.dx = nn.Parameter(dx, requires_grad = False)
         self.bx = nn.Parameter(bx, requires_grad = False)
@@ -323,13 +343,20 @@ class Cam2BEV(nn.Module):
         img_pc = img_depth_feature
         geom_feats = geometry
         B_traced, N, D, H, W, C = img_pc.shape
+        _, _, Dg, Hg, Wg, _ = geom_feats.shape
+        if (D, H, W) != (Dg, Hg, Wg):
+            raise RuntimeError(
+                f"LSS feature/geometry spatial mismatch: "
+                f"img_depth={tuple(img_pc.shape)} geometry={tuple(geom_feats.shape)}. "
+                f"Cam2BEV should probe encoder output and rebuild LSS frustum accordingly."
+            )
         B = int(B_traced)
         Nprime = B * int(N) * int(D) * int(H) * int(W)
         img_pc = img_pc.reshape(Nprime, C)
 
         # Align the geometry to the voxel grid
         geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
-        geom_feats = geom_feats.view(Nprime, 3)
+        geom_feats = geom_feats.reshape(Nprime, 3)
         batch_ix = torch.cat(
             [
                 torch.full([Nprime // B, 1], ix, device=img_pc.device, dtype=torch.long)
@@ -357,7 +384,7 @@ class Cam2BEV(nn.Module):
 
             # Align the geometry to the voxel grid
             geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
-            geom_feats = geom_feats.view(Nprime, 3)
+            geom_feats = geom_feats.reshape(Nprime, 3)
             batch_ix = torch.cat(
                 [
                     torch.full([Nprime // B, 1], ix, device=img_pc.device, dtype=torch.long)

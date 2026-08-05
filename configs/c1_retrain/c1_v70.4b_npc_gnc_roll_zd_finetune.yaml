@@ -1,0 +1,145 @@
+# V70.4b: NPC-aligned GNC retrain (fixes μ²r²/(μ²+r²) → μ·r²/(r²+μ))
+#
+# V70.4 used misaligned GNC formula; this config is identical except aligned loss.
+#
+# Launch:
+#   bash batch_train.sh configs/c1_retrain/c1_v70.4b_npc_gnc_roll_zd_finetune.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+
+  params:
+    fusion_backend: paper_explicit_bev
+    rotation_only: true
+    target_width: 960
+    target_height: 540
+    backbone_lr_scale: 0.5
+    head_dropout: 0.1
+    paper_feat_dim: 128
+    paper_n_groups: 256
+    paper_knn: 8
+    paper_sim_layers: 3
+    paper_depth_bins: 16
+
+    batch_size: 8
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    no_amp: 1
+    optimizer: adam
+    wd: 0.0
+    use_compile: false
+
+    val_split_mode: group
+    val_holdout_ratio: 0.2
+    val_holdout_sequences: "03,07,11,20,22"
+
+    enable_axis_loss: false
+    weight_axis_rotation: 0.0
+    axis_weights: "2.0,1.0,2.0"
+    use_geodesic_loss: 0
+    quat_norm_weight: 0.5
+
+    angle_range_deg: 5
+    eval_angle_range_deg: 5
+    rotation_target_definition: per_axis
+    trans_range: 0.0
+    symmetric_perturb: 1
+    perturb_distribution: uniform
+    multi_scale_perturb: "0.5:0.25,1.0:0.25,2.0:0.30,3.0:0.15,5.0:0.05"
+    per_axis_prob: 0.5
+    per_axis_weights: "2.0,1.0,2.0"
+
+    augment_mount_jitter_prob: 0.7
+    augment_mount_jitter_rot_sigma: 4.0
+    augment_mount_jitter_trans_sigma: 0.0
+    augment_color_jitter: 0.25
+    augment_intrinsic: 0.0
+
+    xyz_only: 1
+    max_pcd_points: 40960
+    max_frames_per_seq: 500
+    pose_aware_sampling: true
+
+    zero_perturbation_prob: 0.05
+    zero_drift_dedicated_ratio: 0.35
+    zero_drift_loss_weight: 0.40
+    zero_drift_loss_weight_start: 0.08
+    zero_drift_loss_ramp_epochs: 12
+    zero_drift_loss_start_epoch: 1
+    zero_drift_loss_margin_deg: 0.05
+
+    inject_recovery_loss_weight: 0.50
+    inject_recovery_loss_start_epoch: 1
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.25
+
+    # NPC-aligned GNC (maijiayao1/NPC GNC-GM surrogate + weight form)
+    enable_gnc_loss: 1
+    gnc_mu_start_deg: 2.0
+    gnc_mu_end_deg: 0.05
+    gnc_noise_bound_deg: 0.05
+    gnc_anneal_epochs: 80
+    gnc_start_epoch: 1
+    gnc_on_paper_rotation: 1
+    gnc_on_inject_recovery: 1
+    gnc_axis_weights: "2.0,1.0,2.0"
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_inject_recovery_eval: 1
+    inject_recovery_eval_deg: 2.0
+    inject_recovery_eval_batches: 0
+    jacobian_eval_angle_deg: 2.0
+    jacobian_eval_batches: 0
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 400
+
+    enable_dual_gate_ckpt: 1
+    enable_recovery_gate_ckpt: 1
+    enable_zd_gate_ckpt: 1
+    dual_gate_inject_recovery_min: 95.0
+    dual_gate_signed_slope_min: 0.80
+    dual_gate_zd_max: 0.10
+    dual_gate_jacobian_min: 0.80
+    dual_gate_medw_max: 0.10
+
+    data_balance: 1
+    use_mgda: 0
+    no_tensorboard: true
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    save_ckpt_per_epoches: 20
+    seed: 42
+    resume_ckpt: auto
+
+experiments:
+  - name: "c1_v70.4b_npc_gnc_roll_zd_finetune"
+    description: "V70.4b: NPC-aligned GNC + Roll-weight + stronger ZD (retrain)"
+    dataset: "all_training_data_c1"
+    version: "c1_v70.4b_npc_gnc_roll_zd_finetune"
+    params:
+      num_epochs: 120
+      warmup_epochs: 2
+      learning_rate: 2.5e-5
+      lr_schedule: cosine_warm_restarts
+      cosine_T0: 40
+      cosine_Tmult: 2
+      early_stopping_patience: 40
+      eval_epoches: 10
+
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v70.2_fix1_paper_explicit_bev_group_holdout/all_training_data_c1_scratch/checkpoint/ckpt_best_medw.pth"
+      pretrain_ckpt_fallback: "logs/all_training_data_c1/model_small_5deg_c1_v70.2_fix1_paper_explicit_bev_group_holdout/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"

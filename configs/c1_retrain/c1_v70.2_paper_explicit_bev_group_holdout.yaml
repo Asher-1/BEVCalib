@@ -1,0 +1,132 @@
+# V70.2: paper-faithful implicit correspondences + explicit BEV alignment.
+#
+# Canonical recovery protocol:
+#   init_R = gt_R @ Rxyz(2deg, 2deg, 2deg)
+#   "2deg" always means per LiDAR R/P/Y axis (3.444deg geodesic total).
+#   Train mini-eval, OOD gate, gdiag and deployment must use this definition.
+#
+# This is intentionally one end-to-end experiment. It must not warm-start from
+# V70.1 CF-BEV-R checkpoints and does not continue the S4R/S4Z curriculum.
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+
+  params:
+    fusion_backend: paper_explicit_bev
+    rotation_only: true
+    target_width: 960
+    target_height: 540
+    backbone_lr_scale: 1.0
+    head_dropout: 0.1
+    paper_feat_dim: 128
+    paper_n_groups: 256
+    paper_knn: 8
+    paper_sim_layers: 3
+    paper_depth_bins: 16
+
+    batch_size: 8
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    no_amp: 1
+    optimizer: adam
+    wd: 0.0
+    use_compile: false
+
+    # No frame from an OOD validation rig may occur in training.
+    val_split_mode: group
+    val_holdout_ratio: 0.2
+    val_holdout_sequences: "03,07,11,20,22"
+
+    # Paper Eq. (11), (15), (16) uses L1 on rotation sin/cos heads.  Keep the
+    # repository-specific geodesic/axis objectives disabled for this baseline.
+    enable_axis_loss: false
+    weight_axis_rotation: 0.0
+    axis_weights: "1.0,1.0,1.0"
+    use_geodesic_loss: 0
+    quat_norm_weight: 0.5
+
+    angle_range_deg: 5
+    eval_angle_range_deg: 5
+    rotation_target_definition: per_axis
+    trans_range: 0.0
+    symmetric_perturb: 1
+    perturb_distribution: uniform
+    multi_scale_perturb: "0.5:0.15,1.0:0.20,2.0:0.30,3.0:0.25,5.0:0.10"
+    per_axis_prob: 0.5
+    per_axis_weights: "1.0,1.0,1.0"
+
+    # Cross-rig randomization required for unknown mounting geometry.
+    augment_mount_jitter_prob: 0.7
+    augment_mount_jitter_rot_sigma: 3.0
+    augment_mount_jitter_trans_sigma: 0.0
+    augment_color_jitter: 0.25
+    # Changing K without warping RGB corrupts Eq. (8) correspondence labels.
+    augment_intrinsic: 0.0
+
+    xyz_only: 1
+    max_pcd_points: 40960
+    max_frames_per_seq: 500
+    pose_aware_sampling: true
+
+    # OOD inject is acceptance-only; Eq. (16) has no inject curriculum loss.
+    inject_recovery_loss_weight: 0.0
+    inject_recovery_magnitude_deg: 2.0
+    inject_recovery_dedicated_ratio: 0.0
+
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    enable_inject_recovery_eval: 1
+    inject_recovery_eval_deg: 2.0
+    inject_recovery_eval_batches: 0
+    jacobian_eval_angle_deg: 2.0
+    jacobian_eval_batches: 0
+    jacobian_eval_n_probes: 5
+    medw_eval_max_frames: 400
+
+    enable_dual_gate_ckpt: 1
+    enable_recovery_gate_ckpt: 1
+    enable_zd_gate_ckpt: 1
+    dual_gate_inject_recovery_min: 95.0
+    dual_gate_signed_slope_min: 0.80
+    dual_gate_zd_max: 0.10
+    dual_gate_jacobian_min: 0.80
+    dual_gate_medw_max: 0.10
+
+    data_balance: 1
+    use_mgda: 0
+    no_tensorboard: true
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    # 1860 epochs would otherwise create 186 large periodic checkpoints.
+    save_ckpt_per_epoches: 100
+    seed: 42
+
+experiments:
+  - name: "c1_v70.2_fix1_paper_explicit_bev_group_holdout"
+    description: "V70.2 fix1: observable init perturbation + paper FPN/BEV; complete-rig OOD gate"
+    dataset: "all_training_data_c1"
+    version: "c1_v70.2_fix1_paper_explicit_bev_group_holdout"
+    params:
+      # 500 frames/sequence gives ~140 optimizer steps/epoch on 8 GPUs.
+      # 1860 epochs ~= the paper's 260k iterations; 365 epochs ~= 51k steps.
+      num_epochs: 1860
+      warmup_epochs: 0
+      learning_rate: 1.0e-4
+      lr_schedule: step
+      step_size: 365
+      early_stopping_patience: 2000
+      eval_epoches: 20

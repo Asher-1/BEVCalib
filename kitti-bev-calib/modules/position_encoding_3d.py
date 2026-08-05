@@ -53,9 +53,6 @@ class PositionEncoding3D(nn.Module):
             nn.Linear(feat_dim, feat_dim),
         )
 
-        self._cached_pe = None
-        self._cached_key = None
-
     @staticmethod
     def _lid_discretization(d_min: float, d_max: float, n_bins: int) -> torch.Tensor:
         """Linear Increasing Discretization (Reading et al., 2021)."""
@@ -85,16 +82,12 @@ class PositionEncoding3D(nn.Module):
         B = cam_intrinsic.shape[0]
         device = cam_intrinsic.device
 
-        # Only cache during eval (training needs fresh graphs for backward)
-        if not self.training:
-            cache_key = (feat_h, feat_w, B, device)
-            if self._cached_pe is not None and self._cached_key == cache_key:
-                fx_now = cam_intrinsic[:, 0, 0].mean().item()
-                if hasattr(self, '_cached_fx') and abs(self._cached_fx - fx_now) < 0.1:
-                    return self._cached_pe
-
-        u_coords = (torch.arange(feat_w, device=device).float() + 0.5) * self.patch_size
-        v_coords = (torch.arange(feat_h, device=device).float() + 0.5) * self.patch_size
+        if isinstance(self.patch_size, (tuple, list)):
+            patch_y, patch_x = self.patch_size
+        else:
+            patch_y = patch_x = self.patch_size
+        u_coords = (torch.arange(feat_w, device=device).float() + 0.5) * patch_x
+        v_coords = (torch.arange(feat_h, device=device).float() + 0.5) * patch_y
         vv, uu = torch.meshgrid(v_coords, u_coords, indexing='ij')
         pixel_coords = torch.stack([uu.flatten(), vv.flatten()], dim=-1)
 
@@ -121,10 +114,5 @@ class PositionEncoding3D(nn.Module):
         ], dim=-1)
 
         pe_3d = self.pe_net(coords_3d)
-
-        if not self.training:
-            self._cached_pe = pe_3d
-            self._cached_key = (feat_h, feat_w, B, device)
-            self._cached_fx = cam_intrinsic[:, 0, 0].mean().item()
 
         return pe_3d

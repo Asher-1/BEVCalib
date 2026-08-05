@@ -1,0 +1,203 @@
+# C1 Official BEVCalib Replica — 对齐 UCR-CISL/BEVCalib 官方训练（c1 数据集适配版）
+#
+# 官方训练命令 (https://github.com/UCR-CISL/BEVCalib):
+#   python kitti-bev-calib/train_kitti.py \
+#     --angle_range_deg 20 --trans_range 1.5 \
+#     --deformable 0 --bev_encoder 1 --batch_size 16 --xyz_only 1 \
+#     --scheduler 1 --lr 1e-4 --step_size 80 \
+#     --num_epochs 500 --save_ckpt_per_epoches 40
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 开关链路审计（官方值 | 本配置 | 链路）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# [A] 模型结构 → build_calib_model → BEVCalib
+#   fusion_backend=bev          | bev           | 工厂选 BEVCalib（非 cf_bev_r/paper）
+#   use_deformable=0            | 0             | deformable_transformer vs TransformerEncoder
+#   cam2bev_mode=lss            | lss           | Cam2BEV LSS（非 query-BEV）
+#   backbone_type=swin          | swin          | Swin-T encoder
+#   fuser_type=concat           | concat        | ConvFuser（非 diff）
+#   use_mlp_head=0              | 0             | Linear head（fork 默认=1 ⚠️ 必须显式关）
+#   bev_pool_factor=0           | 0             | Transformer 前无 avg_pool（官方默认）
+#   bev_encoder=1               | (train_universal 硬编码) | BEVEncoder 中间层
+#   voxel/to_bev/scatter        | hard/concat/sum | LiDAR sparse conv 路径
+#   use_foundation_depth=0      | 0             | 标准 LSS depth head
+#   native_cross/correlation/…  | 0             | 关闭 fork 扩展分支
+#
+# [B] 数据 → CustomDataset → collate_fn → train loop
+#   use_custom_dataset=1        | (train_universal 硬编码) | c1 数据必需；官方=0(KittiDataset)
+#   target 704×256              | 960×540       | ⚠️ c1 鱼眼 intentional
+#   BEV kitti 90×90 zstep=20    | custom 100×100 zstep=4 | ⚠️ intentional（见 env）
+#   max_pcd_points=0            | 0             | 全量点云（官方无此参数=不限；c1 ~10万点/帧）
+#   max_frames_per_seq=全量      | 500           | ⚠️ 加速 intentional
+#   val_split random            | frame 80/20   | ⚠️ intentional
+#   xyz_only=1                  | (train_universal 硬编码) | 仅 xyz 点云
+#
+# [C] 训练超参 → optimizer / scheduler / AMP
+#   batch_size=16 (单卡总量)     | 2/GPU×8=16    | ⚠️ DDP 下 per-GPU；8/GPU=64 是 OOM 根因
+#   lr=1e-4 step=80 scheduler=1 | 同左          | StepLR gamma=0.5
+#   no_amp / FP32               | no_amp=1      | fork 默认 AMP=开 ⚠️ 必须显式 FP32
+#   num_epochs=500              | 500           |
+#   save_ckpt_per_epoches=40    | 40            |
+#
+# [D] Loss / 扰动 → realworld_loss + pose perturb
+#   trans_range=1.5 rot+trans   | trans=0 rot_only | ⚠️ c1 平移已知 intentional
+#   perturb uniform             | uniform       |
+#   无增强                       | 全 0          |
+#   quat_norm_weight=0.5        | 0.5           |
+#   enable_axis_loss=0          | false         | fork 默认=0 ✓
+#
+# [E] Fork 泄漏默认值（官方无，必须显式关闭）
+#   enable_vis=1                | 0             | 训练可视化
+#   enable_ckpt_eval=1          | 0             | 存 ckpt 时额外 eval forward
+#   use_mlp_head=1              | 0             | 见 [A]
+#   no_amp=0 (AMP on)           | no_amp=1      | 见 [C]
+#
+# OOM 根因（第一性原理）:
+#   官方 batch_size=16 是单进程总量；DDP 8 卡时 batch_size=8 → global 64 → Transformer O(N²) 爆显存。
+#   全量点云(~10万点)在 bs=2/GPU 下实测 ~5.8GB，不是 OOM 主因；max_pcd_points/bev_pool_factor 非必须。
+#
+# Launch:
+#   bash batch_train.sh --force configs/c1_retrain/c1_official_bevcalib_replica.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 3
+  retry_delay: 120
+
+defaults:
+  env:
+    # BEV 布局: bev_settings.py CUSTOM_CONFIG（官方 KITTI: BEV_DATASET_TYPE=kitti, zstep=20）
+    BEV_DATASET_TYPE: custom
+    BEV_XBOUND_MIN: 0
+    BEV_XBOUND_MAX: 200
+    BEV_YBOUND_MIN: -100
+    BEV_YBOUND_MAX: 100
+    BEV_XY_STEP: 2.0
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+
+  params:
+    # ===== [A] 网络结构: 官方 BEVCalib =====
+    fusion_backend: bev
+    use_deformable: 0
+    cam2bev_mode: lss
+    backbone_type: swin
+    fuser_type: concat
+    use_mlp_head: 0
+    voxel_mode: hard
+    to_bev_mode: concat
+    scatter_reduce: sum
+    drop_path_rate: 0.1
+    head_dropout: 0.1
+    bev_pool_factor: 0
+    use_pitch_branch: 0
+    native_cross: 0
+    correlation_fusion: 0
+    cross_correlation_fusion: 0
+    explicit_tinit: 0
+    tinit_bev_film: 0
+    tinit_query_film: 0
+    intrinsic_input: 0
+    use_foundation_depth: 0
+    cam_drop_prob: 0.0
+    iterative_refine: 0
+    domain_adversarial: 0
+    bev_instance_norm: 0
+
+    # ===== [B] 输入 / 数据（c1 intentional 差异见文件头）=====
+    target_width: 960
+    target_height: 540
+    max_frames_per_seq: 500
+    max_pcd_points: 0
+    validate_data: 0
+    val_split_mode: frame
+    val_holdout_ratio: 0.2
+
+    # ===== [C] 训练超参（global batch = 2×8 = 16，对齐官方单卡 batch_size=16）=====
+    batch_size: 2
+    learning_rate: 1.0e-4
+    lr_schedule: step
+    step_size: 80
+    warmup_epochs: 0
+    backbone_lr_scale: 1.0
+    wd: 1.0e-4
+    optimizer: adamw
+    num_epochs: 500
+    save_ckpt_per_epoches: 40
+    eval_epoches: 50
+    seed: 114514
+    grad_accum_steps: 1
+
+    # ===== [D] 任务 / loss / 扰动 =====
+    angle_range_deg: 20
+    trans_range: 0.0
+    eval_angle_range_deg: 20
+    eval_trans_range: 0.0
+    rotation_only: true
+    rotation_target_definition: per_axis
+    enable_axis_loss: false
+    weight_axis_rotation: 0.0
+    use_geodesic_loss: 0
+    use_balanced_axis_loss: 0
+    quat_norm_weight: 0.5
+    perturb_distribution: uniform
+    per_axis_prob: 0.0
+    per_axis_weights: "1.0,1.0,1.0"
+    axis_weights: "1.0,1.0,1.0"
+    symmetric_perturb: 0
+    zero_perturbation_prob: 0.0
+    multi_scale_perturb: ""
+
+    # ===== [D] 无数据增强（官方）=====
+    augment_color_jitter: 0.0
+    augment_pc_jitter: 0.0
+    augment_pc_dropout: 0.0
+    augment_intrinsic: 0.0
+    augment_intrinsic_cxcy: 0.0
+    augment_pitch_flip_prob: 0.0
+    augment_pitch_sign_flip_prob: 0.0
+    augment_mount_jitter_prob: 0.0
+    augment_fov_crop_prob: 0.0
+    augment_lidar_sparse_prob: 0.0
+
+    # ===== [C] FP32（官方；fork 默认 AMP=开）=====
+    no_amp: 1
+    amp_bf16: 0
+
+    # ===== [E] 关闭 fork 扩展 =====
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 0
+    enable_jacobian_eval: 0
+    enable_dual_gate_ckpt: 0
+    enable_recovery_gate_ckpt: 0
+    enable_zd_gate_ckpt: 0
+    enable_inject_recovery_eval: 0
+    enable_gnc_loss: 0
+    data_balance: 0
+    early_stopping_patience: 0
+    no_tensorboard: false
+    use_compile: false
+    ddp_auto_scale: 0
+
+    pretrain_ckpt: null
+    resume_ckpt: null
+
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+
+experiments:
+  - name: "c1_official_bevcalib_rotation_20deg"
+    description: "Official BEVCalib arch on c1: rotation_only ±20deg, global_bs=16, full points"
+    dataset: "all_training_data_c1"
+    version: "c1_official_bevcalib_rotation_20deg"
+    params:
+      pretrain_ckpt: null

@@ -1,0 +1,119 @@
+# C1 Official BEVCalib 交叉泛化评估
+# 目的: 在统一测试条件下对比 V1 (replica ±20°) 和 V2 (OOD ±5°) 模型
+#
+# 交叉矩阵:
+#   V1 best-val  → ±5° 测试 (原仅测 ±20°)
+#   V2 best-val  → ±20° 测试 (原仅测 ±5°)
+#   V2 best-medw → ±20° 测试 (原仅测 ±5°)
+#
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_official_bevcalib_cross.yaml \
+#     --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_official_bevcalib_cross"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  # ── 交叉评估使用 ±20° 作为统一测试范围 ──
+  # ±20° 是最宽范围，能暴露模型在大角度 OOD 样本上的泛化能力
+  # V1 训练 ±20° → 测试 ±20° (in-distribution)
+  # V2 训练 ±5°  → 测试 ±20° (strong OOD)
+  # 同时 V1 也补测 ±5° 以完成交叉矩阵
+  angle_range: 20.0
+  trans_range: 0.0
+  batch_size: 2
+  vis_interval: 99999
+  timeout: 14400
+  eval_max_frames_per_seq: 500
+  shortcut_diag: false
+  generalization_diag: true
+  gdiag_inject_deg: 2.0
+  gdiag_genuine_recovery_min: 95.0
+  gdiag_signed_slope_min: 0.80
+  gdiag_zd_max_deg: 0.10
+  require_acceptance_gate: false
+
+models:
+  # ── V1: Replica ±20° 预训练 (补测 ±20° — 与原 V1 评估相同，作为 baseline 参照) ──
+  - label: "v1-best-val@20deg"
+    dir_name: "model_small_20deg_c1_official_bevcalib_rotation_20deg"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_400.pth"]
+    bev_zbound_step: "4.0"
+    bev_xbound_min: 0
+    bev_xbound_max: 200
+    bev_ybound_min: -100
+    bev_ybound_max: 100
+    bev_xy_step: 2.0
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "bev"
+    mode_desc: "V1 replica ±20° pretrained — test ±20° (baseline)"
+    target_width: 960
+    target_height: 540
+    use_mlp_head: 0
+    bev_pool_factor: 0
+    deformable: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"
+
+  # ── V2: OOD ±5° 精调 best-val → 测 ±20° (strong OOD test) ──
+  - label: "v2-best-val@20deg"
+    dir_name: "model_small_5deg_c1_official_bevcalib_5deg_ood_finetune"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    bev_xbound_min: 0
+    bev_xbound_max: 200
+    bev_ybound_min: -100
+    bev_ybound_max: 100
+    bev_xy_step: 2.0
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "bev"
+    mode_desc: "V2 OOD ±5° finetune best-val — test ±20° (OOD)"
+    target_width: 960
+    target_height: 540
+    use_mlp_head: 0
+    bev_pool_factor: 0
+    deformable: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"
+
+  # ── V2: OOD ±5° 精调 best-medw → 测 ±20° (strong OOD test) ──
+  - label: "v2-best-medw@20deg"
+    dir_name: "model_small_5deg_c1_official_bevcalib_5deg_ood_finetune"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    bev_xbound_min: 0
+    bev_xbound_max: 200
+    bev_ybound_min: -100
+    bev_ybound_max: 100
+    bev_xy_step: 2.0
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "bev"
+    mode_desc: "V2 OOD ±5° finetune best-medw — test ±20° (OOD)"
+    target_width: 960
+    target_height: 540
+    use_mlp_head: 0
+    bev_pool_factor: 0
+    deformable: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"

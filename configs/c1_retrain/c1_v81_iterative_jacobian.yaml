@@ -1,0 +1,234 @@
+# C1 V81: 迭代训练监督 + Jacobian 约束
+#
+# 数据集: all_training_data_c1 (camera_1, fisheye, 1920x1080, FOV~98°)
+#
+# ========================================================================
+# 设计思路
+# ========================================================================
+#
+# 核心发现 (来自 V62 过拟合分析):
+#   - Jacobian 校正增益: 训练域 0.946 → 测试域 0.39, 退化 59%
+#   - 训练目标与部署目标不一致: 训练学"大方向校正", 部署需"精细修正"
+#   - V66 DINOv2 单帧 BEST=0.14° 但迭代 Recovery=16%
+#
+# V81 策略: "迭代训练监督"
+#   1. 基于 V66 DINOv2 最优模型继续训练
+#   2. 每个 batch 以 50% 概率执行 1-3 次迭代推理
+#   3. 迭代后计算 loss, 强制模型学会"从自身预测出发继续修正"
+#   4. Jacobian 约束: 确保小角度变化产生足够的特征响应
+#   5. 配合 zero_drift_loss 控制漂移
+#
+# 预期:
+#   - 迭代 Recovery: 从 16% 提升至 >60%
+#   - Gen BEST: 0.06°-0.10° (多帧聚合)
+#   - Zero-Drift: < 0.15°
+#
+# Usage:
+#   bash batch_train.sh configs/c1_retrain/c1_v81_iterative_jacobian.yaml
+
+global:
+  dry_run: false
+  batch_log_dir: "logs"
+  wait_between_experiments: 10
+  max_retries: 1
+  retry_delay: 60
+
+defaults:
+  env:
+    BEV_ZBOUND_STEP: 4.0
+    USE_DRCV_BACKEND: 0
+    HF_HUB_OFFLINE: 1
+    NCCL_IB_TIMEOUT: 50
+    NCCL_SOCKET_IFNAME: eth0
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: 1
+    DDP_TIMEOUT_MINUTES: 180
+    NCCL_TIMEOUT: 7200
+
+  params:
+    fusion_backend: cf_bev_r
+    rotation_only: true
+
+    # === DINOv2 Backbone (继承 V66 最优配置) ===
+    backbone_type: "dinov2"
+    backbone_variant: "dinov2-small"
+    freeze_backbone: 1
+    backbone_freeze_layers: "0:-2"
+    backbone_lr_scale: 0.01
+
+    # === CF-BEV-R 网络结构 ===
+    cf_feat_dim: 256
+    cf_n_groups: 256
+    cf_knn: 8
+    cf_corr_heads: 4
+    cf_corr_radius: 4
+    cf_num_queries: 6
+    cf_encoder_layers: 2
+    cf_decoder_layers: 4
+    use_rocr: 1
+    rocr_dropout: 0.3
+    rocr_center_bias: 0.5
+    use_pitch_branch: 1
+    corr_window_mode: adaptive
+
+    # DLA + Pitch Branch
+    use_dla: 1
+    use_pitch_fusion: 1
+    use_instance_norm: 0
+    use_gated_instance_norm: 0
+
+    # === V81: 迭代训练监督 (复用 V67 机制, 应用于 DINOv2) ===
+    iterative_refine: 2
+    iterative_refine_weight: 0.3
+    iterative_refine_start_epoch: 10
+    iterative_refine_use_synthetic_init: 1
+    iterative_refine_synthetic_residual_deg: "1.0,0.5"
+
+    # === V81: Jacobian 约束 (确保小角度灵敏度) ===
+    jacobian_loss_weight: 0.2
+    jacobian_loss_start_epoch: 15
+    jacobian_loss_probe_deg: 1.5
+    jacobian_loss_interval: 4
+    jacobian_loss_axis_weights: "1.0,2.0,1.5"
+
+    # === 损失函数 (P3: Pitch 轴强化) ===
+    axis_weights: "1.5,5.0,2.5"
+    weight_axis_rotation: 0.6
+    use_geodesic_loss: 1
+    head_dropout: 0.08
+    overcorrection_penalty: 0.3
+
+    # Zero-Drift Loss (V81: 轻度约束)
+    zero_drift_loss_weight: 0.1
+    zero_drift_loss_start_epoch: 20
+    zero_drift_loss_ramp_epochs: 10
+    zero_drift_loss_weight_start: 0.0
+
+    # Correlation alignment
+    corr_alignment_weight: 0.3
+    corr_alignment_warmup: 10
+
+    # Similarity Loss (disabled: DINOv2 feat map size differs)
+    use_sim_loss: 0
+    sim_loss_weight: 0.0
+
+    # === 训练参数 ===
+    batch_size: 12
+    num_epochs: 200
+    learning_rate: 0.0002
+    lr_schedule: cosine_warm_restarts
+    cosine_T0: 60
+    cosine_Tmult: 2
+    warmup_epochs: 10
+
+    # DDP 多卡
+    use_ddp: true
+    ddp_gpus: 8
+    nnodes: 1
+    ddp_auto_scale: 0
+    use_compile: false
+
+    # 分辨率 (与 V66 一致)
+    target_width: 1280
+    target_height: 720
+    xyz_only: 1
+
+    # 扰动
+    angle_range_deg: 5
+    trans_range: 0.0
+    multi_scale_perturb: "0.5:0.15,1.0:0.15,2.0:0.20,3.0:0.20,5.0:0.30"
+    symmetric_perturb: 1
+    per_axis_prob: 0.4
+    per_axis_weights: "1.0,2.0,1.5"
+    perturb_distribution: uniform
+    zero_perturbation_prob: 0.05
+    continuous_noise_max_deg: 3.0
+
+    # 数据增强
+    tinit_dropout_prob: 0.3
+    continuous_tinit_noise: 1
+    augment_mount_jitter_prob: 0.3
+    augment_mount_jitter_rot_sigma: 1.5
+    augment_mount_jitter_trans_sigma: 0.01
+    augment_color_jitter: 0.15
+
+    # 数据
+    max_frames_per_seq: 500
+    max_pcd_points: 16384
+    foreground: true
+    pitch_vertical_bands: 5
+
+    # 评估 & checkpoint
+    no_tensorboard: true
+    no_amp: 1
+    enable_vis: 0
+    enable_ckpt_eval: 0
+    enable_medw_eval: 1
+    enable_jacobian_eval: 1
+    jacobian_eval_angle_deg: 3.0
+    jacobian_eval_batches: 2
+    jacobian_eval_n_probes: 3
+    medw_eval_max_frames: 200
+    enable_dual_gate_ckpt: 1
+    dual_gate_jacobian_min: 0.85
+    dual_gate_medw_max: 0.10
+    save_ckpt_per_epoches: 10
+
+    seed: 42
+    # V81: 从 V66 最优模型继续训练
+    pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v66_dinov2_hires_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+    resume_ckpt: auto
+
+experiments:
+  # ===== S1: ±5° 迭代训练 =====
+  - name: "c1_v81_iterative_jacobian_S1"
+    description: "V81: DINOv2 + Iterative Training + Jacobian Constraint, ±5°, 200ep"
+    dataset: "all_training_data_c1"
+    version: "c1_v81_iterative_jacobian_S1"
+    params:
+      angle_range_deg: 5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 200
+      early_stopping_patience: 60
+      eval_epoches: 10
+
+  # ===== S2: ±3° fine-tune =====
+  - name: "c1_v81_iterative_jacobian_S2"
+    description: "V81 S2: ±3° finetune with iterative training"
+    dataset: "all_training_data_c1"
+    version: "c1_v81_iterative_jacobian_S2"
+    params:
+      angle_range_deg: 3
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 100
+      warmup_epochs: 5
+      learning_rate: 5e-5
+      early_stopping_patience: 30
+      eval_epoches: 5
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 3.0
+      iterative_refine: 2
+      iterative_refine_synthetic_residual_deg: "0.5,0.3"
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_5deg_c1_v81_iterative_jacobian_S1/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"
+
+  # ===== S3: ±1.5° 精度推进 =====
+  - name: "c1_v81_iterative_jacobian_S3"
+    description: "V81 S3: ±1.5° precision push"
+    dataset: "all_training_data_c1"
+    version: "c1_v81_iterative_jacobian_S3"
+    params:
+      angle_range_deg: 1.5
+      trans_range: 0.0
+      eval_angle_range_deg: 5
+      num_epochs: 60
+      warmup_epochs: 3
+      learning_rate: 2e-5
+      early_stopping_patience: 20
+      eval_epoches: 3
+      per_axis_prob: 0.5
+      continuous_noise_max_deg: 2.0
+      overcorrection_penalty: 0.3
+      iterative_refine: 1
+      iterative_refine_synthetic_residual_deg: "0.3"
+      pretrain_ckpt: "logs/all_training_data_c1/model_small_3deg_c1_v81_iterative_jacobian_S2/all_training_data_c1_scratch/checkpoint/ckpt_best_val.pth"

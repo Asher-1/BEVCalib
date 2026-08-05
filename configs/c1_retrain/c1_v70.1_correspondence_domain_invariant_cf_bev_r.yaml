@@ -156,7 +156,7 @@ defaults:
     dual_gate_jacobian_min: 0.85
     dual_gate_medw_max: 0.09
     dual_gate_inject_recovery_min: 50.0
-    dual_gate_pred_indep_max: 0.55
+    dual_gate_signed_slope_min: 0.70
     dual_gate_zd_max: 0.30
 
     no_tensorboard: true
@@ -289,7 +289,7 @@ experiments:
       jacobian_loss_interval: 5
 
       dual_gate_inject_recovery_min: 48.0
-      dual_gate_pred_indep_max: 0.50
+      dual_gate_signed_slope_min: 0.75
       dual_gate_jacobian_min: 0.84
       dual_gate_medw_max: 0.08
       dual_gate_zd_max: 0.32
@@ -334,7 +334,7 @@ experiments:
       augment_color_jitter: 0.25
 
       dual_gate_inject_recovery_min: 48.0
-      dual_gate_pred_indep_max: 0.48
+      dual_gate_signed_slope_min: 0.75
       dual_gate_jacobian_min: 0.84
       dual_gate_medw_max: 0.09
 

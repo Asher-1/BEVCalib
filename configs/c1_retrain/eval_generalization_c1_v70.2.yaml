@@ -1,0 +1,72 @@
+# V70.2 paper Explicit-BEV OOD acceptance evaluation.
+#
+# Run after training completes:
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_v70.2.yaml \
+#     --parallel -1 --eval_max_frames_per_seq 400
+#
+# Re-run diagnostics after protocol changes:
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_v70.2.yaml \
+#     --gdiag_only --force --parallel 1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_v70.2"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 8
+  vis_interval: 99999
+  timeout: 14400
+  eval_max_frames_per_seq: 500
+  shortcut_diag: false
+  generalization_diag: true
+  gdiag_inject_deg: 2.0
+  gdiag_genuine_recovery_min: 95.0
+  gdiag_signed_slope_min: 0.80
+  gdiag_zd_max_deg: 0.10
+  require_acceptance_gate: true
+
+models:
+  - label: "c1-v70.2-best-medw"
+    dir_name: "model_small_5deg_c1_v70.2_fix1_paper_explicit_bev_group_holdout"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "paper_explicit_bev"
+    mode_desc: "V70.2 paper Explicit-BEV (best OOD MEDW400, ep521)"
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v70.2-best-val"
+    dir_name: "model_small_5deg_c1_v70.2_fix1_paper_explicit_bev_group_holdout"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "paper_explicit_bev"
+    mode_desc: "V70.2 paper Explicit-BEV (best supervised val, ep641)"
+    target_width: 960
+    target_height: 540
+
+  - label: "c1-v70.2-last-ep1860"
+    dir_name: "model_small_5deg_c1_v70.2_fix1_paper_explicit_bev_group_holdout"
+    ckpt: "ckpt_1860.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "paper_explicit_bev"
+    mode_desc: "V70.2 paper Explicit-BEV (last epoch 1860)"
+    target_width: 960
+    target_height: 540

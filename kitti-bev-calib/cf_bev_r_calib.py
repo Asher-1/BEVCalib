@@ -910,8 +910,8 @@ class CFBevRCalib(nn.Module):
 
                 # Coarse-to-Fine: re-project points using corrected T_init
                 T_corrected = T_init.clone()
-                R_init = T_init[:, :3, :3]
-                T_corrected[:, :3, :3] = torch.bmm(v60_R_coarse, R_init)
+                # The coarse head is supervised against absolute R_gt.
+                T_corrected[:, :3, :3] = v60_R_coarse
                 uv_feat_c, _ = self._compute_uv_feat(xyz_groups, T_corrected, cam_intrinsic)
                 valid_mask_c = (
                     (uv_feat_c[..., 0] >= 0) & (uv_feat_c[..., 0] < cur_feat_w)
@@ -929,6 +929,9 @@ class CFBevRCalib(nn.Module):
                 valid_mask = valid_mask_c
                 n_img = cur_feat_h * cur_feat_w
                 attn_mask = valid_mask.unsqueeze(1).expand(-1, n_img, -1)
+                # All downstream correspondence geometry must use T_coarse.
+                uv_feat = uv_feat_c
+                uv_px = uv_feat_c * self.patch_size
 
         # V60: FOV Classification
         if self.fov_classifier is not None:

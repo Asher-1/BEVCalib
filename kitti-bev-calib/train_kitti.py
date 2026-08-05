@@ -260,6 +260,12 @@ def _log_gmp_step_scalars(writer, loss, global_step):
         ('magnitude_gt_deg', 'V46/train/magnitude_gt_deg'),
         ('overcorr_ratio', 'V46/train/overcorr_ratio'),
         ('overcorr_scale', 'V46/train/overcorr_scale'),
+        ('paper_rgb_volume_valid_ratio', 'Paper/train/rgb_volume_valid_ratio'),
+        ('paper_point_volume_valid_ratio', 'Paper/train/point_volume_valid_ratio'),
+        ('paper_similarity_loss', 'Paper/train/similarity_loss'),
+        ('paper_fov_loss', 'Paper/train/fov_loss'),
+        ('paper_coarse_rotation_loss', 'Paper/train/coarse_rotation_loss'),
+        ('paper_fine_rotation_loss', 'Paper/train/final_rotation_loss'),
     ):
         v = _loss_scalar(loss, key)
         if v is not None:
@@ -323,6 +329,48 @@ def stratified_split_by_sequence(dataset, train_ratio=0.8, seed=114514):
         split_stats[seq_id] = (n_train, len(indices) - n_train, len(indices))
     
     return Subset(dataset, train_indices), Subset(dataset, val_indices), split_stats
+
+
+def group_holdout_split_by_sequence(dataset, val_ratio=0.2, seed=114514,
+                                    val_sequences=""):
+    """Split complete sequences between train and validation.
+
+    Calibration is a rig-level task: frames from one sequence share the same
+    extrinsic. A frame-level split leaks that target into validation and cannot
+    measure cross-rig generalization.
+    """
+    seq_to_indices = defaultdict(list)
+    for idx, entry in enumerate(dataset.all_files):
+        seq_to_indices[entry.split('/')[0]].append(idx)
+
+    all_sequences = sorted(seq_to_indices)
+    explicit = [s.strip() for s in str(val_sequences or '').split(',') if s.strip()]
+    if explicit:
+        unknown = sorted(set(explicit) - set(all_sequences))
+        if unknown:
+            raise ValueError(f"Unknown val holdout sequences: {unknown}")
+        val_sequences_set = set(explicit)
+    else:
+        if len(all_sequences) < 2:
+            raise ValueError("Group holdout requires at least two sequences")
+        rng = np.random.RandomState(seed)
+        shuffled = np.asarray(all_sequences, dtype=object)
+        rng.shuffle(shuffled)
+        n_val = max(1, int(round(len(all_sequences) * float(val_ratio))))
+        n_val = min(n_val, len(all_sequences) - 1)
+        val_sequences_set = set(shuffled[:n_val].tolist())
+
+    train_sequences = [s for s in all_sequences if s not in val_sequences_set]
+    val_sequences_out = [s for s in all_sequences if s in val_sequences_set]
+    train_indices = [i for s in train_sequences for i in seq_to_indices[s]]
+    val_indices = [i for s in val_sequences_out for i in seq_to_indices[s]]
+    split_stats = {
+        s: (len(seq_to_indices[s]), 0, len(seq_to_indices[s]))
+        if s in train_sequences else (0, len(seq_to_indices[s]), len(seq_to_indices[s]))
+        for s in all_sequences
+    }
+    return (Subset(dataset, train_indices), Subset(dataset, val_indices),
+            split_stats, train_sequences, val_sequences_out)
 
 
 def parse_seq_weight_overrides(spec):
@@ -484,7 +532,7 @@ def _compute_medw_deploy(T_pred_arr, T_gt_arr, seq_arr, unique_seqs, window=200)
 
 
 def _euler_perturb_T(T_base_np, delta_rpy_deg):
-    """Apply Euler perturbation (degrees) via LEFT multiply: R_out = dR @ R_base."""
+    """Apply the canonical LiDAR-axis perturbation: R_out = R_base @ dR."""
     r, p, y = np.deg2rad(delta_rpy_deg)
     cr, sr = np.cos(r), np.sin(r)
     cp, sp = np.cos(p), np.sin(p)
@@ -494,7 +542,7 @@ def _euler_perturb_T(T_base_np, delta_rpy_deg):
     Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
     dR = Rz @ Ry @ Rx
     T_out = T_base_np.copy()
-    T_out[:3, :3] = dR @ T_base_np[:3, :3]
+    T_out[:3, :3] = T_base_np[:3, :3] @ dR
     return T_out
 
 
@@ -523,10 +571,10 @@ def _rotation_matrix_to_euler(R):
 
 
 def _perturbation_euler_from_T_pair(gt_T, init_T):
-    """Applied rotation perturbation (deg) from gt→init: R_init = delta_R @ R_gt."""
+    """Canonical LiDAR-axis error where R_init = R_gt @ delta_R."""
     R_gt = gt_T[:3, :3]
     R_init = init_T[:3, :3]
-    delta_R = R_init @ R_gt.T
+    delta_R = R_gt.T @ R_init
     return _rotation_matrix_to_euler(delta_R)
 
 
@@ -557,14 +605,14 @@ def _axis_correction_torch(R_gt, R_init, R_out):
     R_gt_f = R_gt.float()
     R_init_f = R_init.float()
     R_out_f = R_out.float()
-    R_err_init = torch.bmm(R_init_f, R_gt_f.transpose(1, 2))
-    R_err_out = torch.bmm(R_out_f, R_gt_f.transpose(1, 2))
+    R_err_init = torch.bmm(R_gt_f.transpose(1, 2), R_init_f)
+    R_err_out = torch.bmm(R_gt_f.transpose(1, 2), R_out_f)
     return _euler_from_delta_R_torch(R_err_init) - _euler_from_delta_R_torch(R_err_out)
 
 
 def _zero_drift_axis_error_deg(R_gt, R_pred):
-    """Per-axis signed R_pred vs R_gt error in degrees (euler of R_pred @ R_gt^T)."""
-    R_err = torch.bmm(R_pred.float(), R_gt.float().transpose(1, 2))
+    """Signed LiDAR-axis error in degrees (Euler of R_gt^T @ R_pred)."""
+    R_err = torch.bmm(R_gt.float().transpose(1, 2), R_pred.float())
     return _euler_from_delta_R_torch(R_err)
 
 
@@ -706,14 +754,19 @@ def _jacobian_pass(jac_result, j_min=0.85):
 
 
 def _recovery_gate_pass(jac_result, recovery_min, inject_result=None,
-                        inject_recovery_min=0.0, pred_indep_max=0.55):
-    """Recovery gate: prefer mini inject eval; fallback to Jacobian overall proxy."""
+                        inject_recovery_min=0.0, signed_slope_min=0.7,
+                        zd_max_deg=0.3):
+    """OOD recovery gate based on correction slope, genuine recovery and ZD."""
     if inject_result is not None and float(inject_recovery_min) > 0:
-        rec = float(inject_result.get('recovery_pct', 0.0))
-        indep = float(inject_result.get('pred_independence', 1.0))
+        rec = float(inject_result.get('genuine_recovery_pct', 0.0))
+        slope = float(inject_result.get('signed_correction_slope', 0.0))
+        slope_worst = float(inject_result.get('signed_correction_slope_min_axis', slope))
+        zd = float(inject_result.get('zd_max_deg', float('inf')))
         if rec < float(inject_recovery_min):
             return False
-        if float(pred_indep_max) > 0 and indep > float(pred_indep_max):
+        if slope_worst < float(signed_slope_min):
+            return False
+        if zd > float(zd_max_deg):
             return False
         return True
     if jac_result is None or float(recovery_min) <= 0:
@@ -723,12 +776,14 @@ def _recovery_gate_pass(jac_result, recovery_min, inject_result=None,
 
 
 def _dual_gate_pass(medw_result, jac_result, medw_max_deg, jac_min, recovery_min=0.0,
-                    inject_result=None, inject_recovery_min=0.0, pred_indep_max=0.55):
+                    inject_result=None, inject_recovery_min=0.0,
+                    signed_slope_min=0.7, zd_max_deg=0.3):
     if not (_medw_axis_pass(medw_result, medw_max_deg) and _jacobian_pass(jac_result, jac_min)):
         return False
     if inject_result is not None and float(inject_recovery_min) > 0:
         return _recovery_gate_pass(
-            jac_result, recovery_min, inject_result, inject_recovery_min, pred_indep_max)
+            jac_result, recovery_min, inject_result, inject_recovery_min,
+            signed_slope_min, zd_max_deg)
     if float(recovery_min) > 0 and not _recovery_gate_pass(jac_result, recovery_min):
         return False
     return True
@@ -739,13 +794,15 @@ def _zd_gate_pass(medw_result, zd_max_deg):
 
 
 def _format_dual_gate_status(medw_result, jac_result, medw_max_deg, jac_min, recovery_min=0.0,
-                             inject_result=None, inject_recovery_min=0.0, pred_indep_max=0.55):
+                             inject_result=None, inject_recovery_min=0.0,
+                             signed_slope_min=0.7, zd_max_deg=0.3):
     """Human-readable dual-gate pass/fail breakdown."""
     medw_max = _medw_max_rpy(medw_result)
     medw_ok = _medw_axis_pass(medw_result, medw_max_deg)
     jac_ok = _jacobian_pass(jac_result, jac_min)
     rec_ok = _recovery_gate_pass(
-        jac_result, recovery_min, inject_result, inject_recovery_min, pred_indep_max)
+        jac_result, recovery_min, inject_result, inject_recovery_min,
+        signed_slope_min, zd_max_deg)
     medw_detail = "N/A"
     if medw_result is not None:
         medw_detail = (f"max(R,P,Y)={medw_max:.4f}° "
@@ -763,10 +820,13 @@ def _format_dual_gate_status(medw_result, jac_result, medw_max_deg, jac_min, rec
                       f"{'PASS' if jac_ok else 'FAIL'}")
     rec_detail = ""
     if inject_result is not None and float(inject_recovery_min) > 0:
-        rec_detail = (f"; InjectRec={inject_result.get('recovery_pct', float('nan')):.1f}% "
+        rec_detail = (f"; GenuineRec={inject_result.get('genuine_recovery_pct', float('nan')):.1f}% "
                       f"thr>={inject_recovery_min:.1f}% "
-                      f"PredIndep={inject_result.get('pred_independence', float('nan')):.3f} "
-                      f"thr<={pred_indep_max:.2f} "
+                      f"Slope={inject_result.get('signed_correction_slope', float('nan')):.3f} "
+                      f"(worst={inject_result.get('signed_correction_slope_min_axis', inject_result.get('signed_correction_slope', float('nan'))):.3f}) "
+                      f"thr>={signed_slope_min:.2f} "
+                      f"ZDmax={inject_result.get('zd_max_deg', float('nan')):.3f}° "
+                      f"thr<={zd_max_deg:.2f}° "
                       f"{'PASS' if rec_ok else 'FAIL'}")
     elif float(recovery_min) > 0:
         rec_detail = (f"; Recovery proxy overall>={recovery_min:.2f} "
@@ -782,7 +842,7 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
     jac_thr = float(args.dual_gate_jacobian_min)
     rec_thr = float(getattr(args, 'dual_gate_recovery_min', 0.0))
     inj_rec_thr = float(getattr(args, 'dual_gate_inject_recovery_min', 0.0))
-    pred_indep_max = float(getattr(args, 'dual_gate_pred_indep_max', 0.55))
+    slope_min = float(getattr(args, 'dual_gate_signed_slope_min', 0.70))
     zd_thr = float(getattr(args, 'dual_gate_zd_max', 0.35))
     converged = best_dual.get('epoch', -1) > 0
 
@@ -795,7 +855,7 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
         last = kpi_history[-1]
         _, medw_d, jac_d = _format_dual_gate_status(
             last.get('medw'), last.get('jacobian'), medw_thr, jac_thr, rec_thr,
-            last.get('inject_recovery'), inj_rec_thr, pred_indep_max)
+            last.get('inject_recovery'), inj_rec_thr, slope_min, zd_thr)
         verdict = "NOT_CONVERGED"
         verdict_cn = "未收敛"
         detail = f"末次 eval (ep{last['epoch']}): {medw_d}; {jac_d}"
@@ -814,7 +874,9 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
         f"- Jacobian@±{args.jacobian_eval_angle_deg}°: overall 及 R/P/Y 均 > **{jac_thr:.2f}**",
     ]
     if inj_rec_thr > 0:
-        lines.append(f"- Inject recovery: >= **{inj_rec_thr:.1f}%**, PredIndep <= **{pred_indep_max:.2f}**")
+        lines.append(f"- OOD Genuine recovery: >= **{inj_rec_thr:.1f}%**")
+        lines.append(f"- Signed correction slope: >= **{slope_min:.2f}**")
+        lines.append(f"- Zero drift max-axis: <= **{zd_thr:.2f}°**")
     elif rec_thr > 0:
         lines.append(f"- Recovery proxy: Jacobian overall >= **{rec_thr:.2f}**")
     if getattr(args, 'enable_zd_gate_ckpt', 0) > 0:
@@ -857,7 +919,8 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
         ])
         if best_recovery.get('recovery_pct', float('-inf')) > float('-inf'):
             lines.append(f"- Inject recovery: {best_recovery.get('recovery_pct', float('nan')):.1f}%")
-            lines.append(f"- PredIndep: {best_recovery.get('pred_independence', float('nan')):.3f}")
+            lines.append(f"- Signed correction slope: {best_recovery.get('signed_correction_slope', float('nan')):.3f}")
+            lines.append(f"- OOD ZD max-axis: {best_recovery.get('zd_max_deg', float('nan')):.3f}°")
         else:
             lines.append(f"- Jacobian overall: {best_recovery.get('overall', float('nan')):.3f}")
         lines.extend([
@@ -914,7 +977,7 @@ def _write_convergence_report(log_dir, ckpt_save_dir, args, best_medw, best_dual
             'jacobian_min': jac_thr,
             'recovery_min': rec_thr,
             'inject_recovery_min_pct': inj_rec_thr,
-            'pred_indep_max': pred_indep_max,
+            'signed_correction_slope_min': slope_min,
             'zd_max_rpy_deg': zd_thr,
             'medw_window': args.medw_eval_max_frames,
             'jacobian_angle_deg': args.jacobian_eval_angle_deg,
@@ -1153,10 +1216,11 @@ def _forward_val_batch_once(raw_model, imgs, pcs_np, masks, gt_T_np, init_T_np, 
     rot_errs, roll_s, pitch_s, yaw_s = [], [], [], []
     for b in range(B):
         e = compute_pose_errors(T_pred_np[b], gt_T_np[b])
+        signed = _perturbation_euler_from_T_pair(gt_T_np[b], T_pred_np[b])
         rot_errs.append(e['rot_error'])
-        roll_s.append(e['roll_signed'])
-        pitch_s.append(e['pitch_signed'])
-        yaw_s.append(e['yaw_signed'])
+        roll_s.append(signed[0])
+        pitch_s.append(signed[1])
+        yaw_s.append(signed[2])
     return {
         'rot_mean': float(np.mean(rot_errs)),
         'roll_signed_mean': float(np.mean(roll_s)),
@@ -1167,37 +1231,58 @@ def _forward_val_batch_once(raw_model, imgs, pcs_np, masks, gt_T_np, init_T_np, 
 
 def _compute_inject_recovery_one_batch(raw_model, imgs, pcs, masks, gt_T_np, intrinsics, device,
                                      inject_deg, use_amp, amp_dtype, identity_4x4, xyz_only_choise):
-    """Mini gdiag: fixed inject recovery % + lightweight PredIndep proxy (ZD vs inject)."""
+    """OOD mini-gdiag using the canonical per-axis LiDAR-frame injection."""
     pcs_np = _batch_data_to_numpy(pcs, xyz_only=xyz_only_choise)
     inject_deg = float(inject_deg)
     zd_init = gt_T_np.copy()
-    inj_init = _apply_fixed_inject_batch(gt_T_np, inject_deg)
+    pos_init = _apply_fixed_inject_batch(gt_T_np, inject_deg)
+    neg_init = _apply_fixed_inject_batch(gt_T_np, -inject_deg)
     init_rots = [
-        compute_pose_errors(inj_init[b], gt_T_np[b])['rot_error']
+        compute_pose_errors(pos_init[b], gt_T_np[b])['rot_error']
         for b in range(gt_T_np.shape[0])
     ]
     mean_init = float(np.mean(init_rots))
     zd_out = _forward_val_batch_once(
         raw_model, imgs, pcs_np, masks, gt_T_np, zd_init, intrinsics,
         device, use_amp, amp_dtype, identity_4x4)
-    inj_out = _forward_val_batch_once(
-        raw_model, imgs, pcs_np, masks, gt_T_np, inj_init, intrinsics,
+    pos_out = _forward_val_batch_once(
+        raw_model, imgs, pcs_np, masks, gt_T_np, pos_init, intrinsics,
         device, use_amp, amp_dtype, identity_4x4)
-    mean_out = inj_out['rot_mean']
+    neg_out = _forward_val_batch_once(
+        raw_model, imgs, pcs_np, masks, gt_T_np, neg_init, intrinsics,
+        device, use_amp, amp_dtype, identity_4x4)
+    mean_out = pos_out['rot_mean']
     recovery_pct = ((mean_init - mean_out) / mean_init * 100.0) if mean_init > 1e-6 else 0.0
-    indep_axes = []
+    zd_vec, pos_vec, neg_vec, slopes = [], [], [], []
     for ax in ('roll', 'pitch', 'yaw'):
-        zd_s = zd_out[f'{ax}_signed_mean']
-        inj_s = inj_out[f'{ax}_signed_mean']
-        pred_range = abs(inj_s - zd_s)
-        indep_axes.append(min(1.0, pred_range / inject_deg) if inject_deg > 0 else 0.0)
-    pred_independence = float(np.mean(indep_axes))
+        zd_s = float(zd_out[f'{ax}_signed_mean'])
+        pos_s = float(pos_out[f'{ax}_signed_mean'])
+        neg_s = float(neg_out[f'{ax}_signed_mean'])
+        zd_vec.append(zd_s)
+        pos_vec.append(pos_s)
+        neg_vec.append(neg_s)
+        # correction(delta)=delta-output_error; ideal derivative is one.
+        corr_pos = inject_deg - pos_s
+        corr_neg = -inject_deg - neg_s
+        slopes.append((corr_pos - corr_neg) / (2.0 * inject_deg))
+    zd_vec = np.asarray(zd_vec)
+    pos_vec = np.asarray(pos_vec)
+    neg_vec = np.asarray(neg_vec)
+    genuine_residual = float(
+        0.5 * (np.linalg.norm(pos_vec - zd_vec) + np.linalg.norm(neg_vec - zd_vec)))
+    genuine_recovery = ((mean_init - genuine_residual) / mean_init * 100.0)
     return {
         'recovery_pct': float(recovery_pct),
+        'genuine_recovery_pct': float(genuine_recovery),
+        'signed_correction_slope': float(np.mean(slopes)),
+        'signed_correction_slope_min_axis': float(np.min(slopes)),
+        'signed_correction_slope_axes': [float(x) for x in slopes],
+        'zd_max_deg': float(np.max(np.abs(zd_vec))),
+        'zd_signed_rpy_deg': [float(x) for x in zd_vec],
         'mean_init_rot': mean_init,
         'mean_residual_rot': mean_out,
-        'pred_independence': pred_independence,
         'inject_deg': inject_deg,
+        'inject_definition': 'per_axis_lidar_rpy_right_multiply',
     }
 
 
@@ -1211,7 +1296,7 @@ def _run_jacobian_eval_inprocess(raw_model, val_loader, device, args, use_amp, a
     raw_model.eval()
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(val_loader):
-            if batch_idx >= n_batches or batch_data is None:
+            if (n_batches > 0 and batch_idx >= n_batches) or batch_data is None:
                 break
             imgs, pcs, masks, gt_T_to_camera, intrinsics = batch_data[:5]
             gt_T_np = np.array(gt_T_to_camera).astype(np.float32)
@@ -1650,6 +1735,9 @@ def parse_args():
     parser.add_argument("--angle_range_deg", type=float, default=None)
     parser.add_argument("--trans_range", type=float, default=None)
     parser.add_argument("--eval_angle_range_deg", type=float, default=None)
+    parser.add_argument("--rotation_target_definition", choices=["per_axis", "total"],
+                        default="per_axis",
+                        help="Meaning of angle ranges; canonical protocol uses per_axis")
     parser.add_argument("--eval_trans_range", type=float, default=None)
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--eval_epoches", type=int, default=50)
@@ -1661,6 +1749,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--wd", type=float, default=1e-4)
+    parser.add_argument("--optimizer", choices=["adam", "adamw"], default="adamw")
     parser.add_argument("--step_size", type=int, default=100)
     parser.add_argument("--scheduler", type=int, default=-1)
     parser.add_argument("--pretrain_ckpt", type=str, default=None)
@@ -1668,6 +1757,11 @@ def parse_args():
                         help="Comma-separated fallback ckpt paths when pretrain_ckpt is missing")
     parser.add_argument("--resume_ckpt", type=str, default=None, help="Resume training from a full checkpoint (restores epoch, optimizer, scheduler, scaler)")
     parser.add_argument("--use_custom_dataset", type=int, default=0, help="使用 CustomDataset (1) 还是 KittiDataset (0)")
+    parser.add_argument("--val_split_mode", choices=["group", "frame"], default="group",
+                        help="CustomDataset split; group holds out complete sequences/rigs")
+    parser.add_argument("--val_holdout_ratio", type=float, default=0.2)
+    parser.add_argument("--val_holdout_sequences", type=str, default="",
+                        help="Comma-separated complete sequences reserved for OOD validation")
     # 图像尺寸参数
     parser.add_argument("--target_width", type=int, default=None, help="目标图像宽度 (默认: KITTI=704, 自定义4K=640)")
     parser.add_argument("--target_height", type=int, default=None, help="目标图像高度 (默认: KITTI=256, 自定义4K=360)")
@@ -1705,8 +1799,7 @@ def parse_args():
                         help="Triple gate (fallback): min val Jacobian overall when inject eval off (0=off)")
     parser.add_argument("--dual_gate_inject_recovery_min", type=float, default=0.0,
                         help="Recovery gate: min val fixed-inject recovery %% (gdiag-aligned, e.g. 55)")
-    parser.add_argument("--dual_gate_pred_indep_max", type=float, default=0.55,
-                        help="Recovery gate: reject ckpt when PredIndep proxy exceeds this (V67≈0.79)")
+    parser.add_argument("--dual_gate_signed_slope_min", type=float, default=0.70)
     parser.add_argument("--enable_inject_recovery_eval", type=int, default=0,
                         help="Mini gdiag inject recovery on val batches each eval epoch (1=on)")
     parser.add_argument("--inject_recovery_eval_deg", type=float, default=2.0,
@@ -1725,6 +1818,10 @@ def parse_args():
                         help="V52 S2: stop if val Jacobian overall below this for patience evals (0=off)")
     parser.add_argument("--jacobian_early_stop_patience", type=int, default=2,
                         help="V52 S2: consecutive eval cycles below jacobian_early_stop_min before stop")
+    parser.add_argument("--medw_early_stop_patience", type=int, default=0,
+                        help="Stop if holdout MEDW max(R,P,Y) fails to improve for N eval cycles (0=off)")
+    parser.add_argument("--medw_early_stop_min_delta_deg", type=float, default=0.0,
+                        help="Minimum MEDW max(R,P,Y) improvement (deg) to reset medw early-stop counter")
     parser.add_argument("--enable_jacobian_eval", type=int, default=0,
                         help="eval epoch 时在 val 上跑 lightweight Jacobian (1=启用)")
     parser.add_argument("--jacobian_eval_angle_deg", type=float, default=3.0,
@@ -1876,8 +1973,16 @@ def parse_args():
                         help="V36/V37: ProjFusion-style projection canvas expansion (2.5 recommended)")
     parser.add_argument("--fusion_backend", type=str, default="bev",
                         choices=["bev", "bev_only", "proj_only", "hybrid_dual", "hybrid_triple",
-                                 "geo_match_proj", "cf_bev_r"],
+                                 "geo_match_proj", "cf_bev_r", "paper_explicit_bev"],
                         help="Fusion backend: HTCN variants, V40 geo_match_proj (GMP), or V42 cf_bev_r.")
+    parser.add_argument("--paper_feat_dim", type=int, default=256)
+    parser.add_argument("--paper_n_groups", type=int, default=256)
+    parser.add_argument("--paper_knn", type=int, default=8)
+    parser.add_argument("--paper_sim_layers", type=int, default=3)
+    parser.add_argument("--paper_depth_bins", type=int, default=16)
+    parser.add_argument("--paper_sim_loss_weight", type=float, default=1.0)
+    parser.add_argument("--paper_fov_loss_weight", type=float, default=0.5)
+    parser.add_argument("--paper_coarse_loss_weight", type=float, default=1.0)
     # --- CF-BEV-R (V42) parameters ---
     parser.add_argument("--cf_feat_dim", type=int, default=256)
     parser.add_argument("--cf_n_groups", type=int, default=128)
@@ -2107,6 +2212,38 @@ def parse_args():
                         help="V52: Fixed-Inject magnitude on all RPY axes (match gdiag inject_deg)")
     parser.add_argument("--inject_recovery_dedicated_ratio", type=float, default=0.0,
                         help="V52: fraction of batches with gt + fixed all-axis inject")
+    parser.add_argument("--enable_gnc_loss", type=int, default=0,
+                        help="V70.4: enable GNC (Graduated Non-Convexity) robust rotation loss")
+    parser.add_argument("--gnc_mu_start_deg", type=float, default=2.0,
+                        help="V70.4: linear deg scale for mu_homotopy init (converted via noise_bound)")
+    parser.add_argument("--gnc_mu_end_deg", type=float, default=0.05,
+                        help="V70.4: linear deg scale for mu_homotopy final (NPC stop ~ mu<1)")
+    parser.add_argument("--gnc_mu_start", type=float, default=0.0,
+                        help="V70.4: explicit dimensionless mu_homotopy start (0=derive from mu_start_deg)")
+    parser.add_argument("--gnc_mu_end", type=float, default=0.0,
+                        help="V70.4: explicit dimensionless mu_homotopy end (0=derive from mu_end_deg)")
+    parser.add_argument("--gnc_noise_bound_deg", type=float, default=0.05,
+                        help="V70.4: NPC noise_bound inlier threshold (degrees, squared internally)")
+    parser.add_argument("--gnc_use_irls", type=int, default=0,
+                        help="V70.4c: use NPC IRLS weight*w*r^2 instead of surrogate rho(r)")
+    parser.add_argument("--gnc_mu_adaptive_init", type=int, default=0,
+                        help="V70.4c: mu0 = min(2*max(r_init^2)/c, cap) per batch (NPC init)")
+    parser.add_argument("--gnc_factor", type=float, default=1.4,
+                        help="V70.4c: NPC outer-loop mu divisor when gnc_schedule=npc_factor")
+    parser.add_argument("--gnc_mu_cap", type=float, default=1e6,
+                        help="V70.4c: NPC mu initialization cap")
+    parser.add_argument("--gnc_schedule", type=str, default="geometric",
+                        help="V70.4c: mu schedule: geometric | npc_factor")
+    parser.add_argument("--gnc_anneal_epochs", type=int, default=100,
+                        help="V70.4: epochs to geometrically anneal mu_start → mu_end")
+    parser.add_argument("--gnc_start_epoch", type=int, default=1,
+                        help="V70.4: epoch to start applying GNC loss")
+    parser.add_argument("--gnc_on_paper_rotation", type=int, default=1,
+                        help="V70.4: apply GNC to paper fine/coarse rotation loss (1=enable)")
+    parser.add_argument("--gnc_on_inject_recovery", type=int, default=1,
+                        help="V70.4: apply GNC to inject-recovery loss (1=enable)")
+    parser.add_argument("--gnc_axis_weights", type=str, default="",
+                        help="V70.4: roll,pitch,yaw GNC weights (empty=use axis_weights)")
     parser.add_argument("--use_mgda", type=int, default=0,
                         help="V52d/V53e: MGDA minimum-norm grad for pose+zd(+inject) tasks")
     parser.add_argument("--mgda_start_epoch", type=int, default=5,
@@ -2543,11 +2680,21 @@ def main():
             tprint("   (KITTI数据集模式)")
     
     if args.use_custom_dataset and hasattr(dataset, 'all_files'):
-        train_dataset, val_dataset, split_stats = stratified_split_by_sequence(
-            dataset, train_ratio=0.8, seed=114514
-        )
+        if args.val_split_mode == 'group':
+            (train_dataset, val_dataset, split_stats,
+             train_sequences, val_sequences) = group_holdout_split_by_sequence(
+                dataset, val_ratio=args.val_holdout_ratio, seed=args.seed,
+                val_sequences=args.val_holdout_sequences)
+            if set(train_sequences) & set(val_sequences):
+                raise RuntimeError("Sequence leakage detected between train and validation")
+            if is_main:
+                tprint(f"OOD Group Holdout: train={train_sequences}, val={val_sequences}")
+        else:
+            train_dataset, val_dataset, split_stats = stratified_split_by_sequence(
+                dataset, train_ratio=0.8, seed=114514
+            )
         if is_main:
-            tprint("数据集按Sequence分层划分 (每个Sequence独立80/20):")
+            tprint(f"数据集划分模式: {args.val_split_mode}")
             tprint(f"  {'Seq':<6} {'Train':>7} {'Val':>7} {'Total':>7}  {'Train%':>6}")
             tprint(f"  {'─'*4}  {'─'*5}  {'─'*5}  {'─'*5}  {'─'*6}")
             for seq_id, (n_tr, n_va, n_tot) in split_stats.items():
@@ -2741,7 +2888,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        shuffle=(val_sampler is None),
+        shuffle=False,
         sampler=val_sampler,
         pin_memory=True,
         persistent_workers=True,
@@ -3015,7 +3162,8 @@ def main():
             param_groups.append({'params': pose_head_params, 'lr': args.lr, 'name': 'pose_head'})
         else:
             param_groups.append({'params': head_params, 'lr': args.lr, 'name': 'head'})
-        optimizer = torch.optim.AdamW(param_groups, weight_decay=args.wd)
+        optimizer_cls = torch.optim.Adam if args.optimizer == 'adam' else torch.optim.AdamW
+        optimizer = optimizer_cls(param_groups, weight_decay=args.wd)
         _backbone_group_count = len(param_groups) - (2 if _use_prs and pose_head_params else 1)
     else:
         param_groups = []
@@ -3028,7 +3176,8 @@ def main():
             param_groups.append({'params': pose_head_params, 'lr': args.lr, 'name': 'pose_head'})
         else:
             param_groups.append({'params': head_params, 'lr': args.lr, 'name': 'head'})
-        optimizer = torch.optim.AdamW(param_groups, weight_decay=args.wd)
+        optimizer_cls = torch.optim.Adam if args.optimizer == 'adam' else torch.optim.AdamW
+        optimizer = optimizer_cls(param_groups, weight_decay=args.wd)
         _backbone_group_count = max(len(param_groups) - (2 if _use_prs and pose_head_params else 1), 1)
 
     _prs_corr_pg = next((i for i, pg in enumerate(optimizer.param_groups)
@@ -3327,6 +3476,9 @@ def main():
             _parse_csv_cli_list(args.jacobian_loss_axis_weights))
         if len(jacobian_loss_axis_weights_parsed) != 3:
             raise ValueError("--jacobian_loss_axis_weights expects three comma-separated values")
+    from losses.gnc_loss import parse_gnc_axis_weights, gnc_noise_bound_sq
+    gnc_axis_weights_parsed = parse_gnc_axis_weights(args) if int(getattr(args, 'enable_gnc_loss', 0)) > 0 else None
+    gnc_noise_bound_sq_val = gnc_noise_bound_sq(args) if int(getattr(args, 'enable_gnc_loss', 0)) > 0 else None
 
     global_step = 0
     
@@ -3346,7 +3498,9 @@ def main():
                  'jacobian_pitch': float('-inf'), 'jacobian_yaw': float('-inf')}
     best_jacobian = {'epoch': -1, 'overall': float('-inf'),
                      'roll': float('-inf'), 'pitch': float('-inf'), 'yaw': float('-inf')}
-    best_recovery = {'epoch': -1, 'recovery_pct': float('-inf'), 'pred_independence': float('inf'),
+    best_recovery = {'epoch': -1, 'recovery_pct': float('-inf'),
+                     'genuine_recovery_pct': float('-inf'),
+                     'signed_correction_slope': float('-inf'), 'zd_max_deg': float('inf'),
                      'overall': float('-inf'), 'mean_init_rot': float('inf'),
                      'mean_residual_rot': float('inf')}
     best_zd = {'epoch': -1, 'rot': float('inf'), 'roll': float('inf'), 'pitch': float('inf'),
@@ -3357,6 +3511,7 @@ def main():
     checkpoint_records = []
     early_stop_counter = 0
     jacobian_early_stop_counter = 0
+    medw_early_stop_counter = 0
     early_stop_triggered = False
     
     if is_main:
@@ -3387,9 +3542,12 @@ def main():
             tprint(f"  • MEDW eval: MEDW{args.medw_eval_max_frames} on val split "
                    f"(reuse val forward) every {args.eval_epoches} epochs")
         if args.enable_jacobian_eval > 0:
-            _jac_extra = (args.jacobian_eval_batches * 3 * args.jacobian_eval_n_probes)
-            tprint(f"  • Jacobian eval: ±{args.jacobian_eval_angle_deg}° sweep on val batch[0:"
-                   f"{args.jacobian_eval_batches}] (+{_jac_extra} extra forwards/eval, "
+            _jac_scope = ("all val batches" if args.jacobian_eval_batches <= 0
+                          else f"val batch[0:{args.jacobian_eval_batches}]")
+            _jac_extra = ("full-val" if args.jacobian_eval_batches <= 0 else
+                          str(args.jacobian_eval_batches * 3 * args.jacobian_eval_n_probes))
+            tprint(f"  • Jacobian eval: ±{args.jacobian_eval_angle_deg}° sweep on {_jac_scope} "
+                   f"(+{_jac_extra} extra forwards/eval, "
                    f"correction=init_err-out_err)")
         if getattr(args, 'jacobian_loss_weight', 0.0) > 0:
             tprint(f"  • Jacobian loss: weight={args.jacobian_loss_weight}, "
@@ -3421,6 +3579,10 @@ def main():
         if getattr(args, 'jacobian_early_stop_min', 0.0) > 0:
             tprint(f"  • Jacobian early-stop: overall < {args.jacobian_early_stop_min} "
                    f"for {args.jacobian_early_stop_patience} eval cycles → stop")
+        if int(getattr(args, 'medw_early_stop_patience', 0)) > 0:
+            _medw_delta = float(getattr(args, 'medw_early_stop_min_delta_deg', 0.0))
+            tprint(f"  • MEDW early-stop: no max(R,P,Y) improvement ≥{_medw_delta}° "
+                   f"for {args.medw_early_stop_patience} eval cycles → stop")
         if args.enable_jacobian_gate_ckpt > 0:
             tprint("  • Jacobian gate ckpt: best val Jacobian overall → ckpt_best_jacobian.pth")
         if getattr(args, 'inject_recovery_loss_weight', 0.0) > 0:
@@ -3428,6 +3590,17 @@ def main():
                    f"start_ep={args.inject_recovery_loss_start_epoch}, "
                    f"inject={args.inject_recovery_magnitude_deg}° all-RPY, "
                    f"dedicated_ratio={getattr(args, 'inject_recovery_dedicated_ratio', 0.0)}")
+        if int(getattr(args, 'enable_gnc_loss', 0)) > 0:
+            _gnc_paper = "yes" if int(getattr(args, 'gnc_on_paper_rotation', 1)) > 0 else "no"
+            _gnc_inj = "yes" if int(getattr(args, 'gnc_on_inject_recovery', 1)) > 0 else "no"
+            _gnc_irls = "yes" if int(getattr(args, 'gnc_use_irls', 0)) > 0 else "no"
+            _gnc_adapt = "yes" if int(getattr(args, 'gnc_mu_adaptive_init', 0)) > 0 else "no"
+            tprint(f"  • GNC robust loss (NPC-aligned): schedule={getattr(args, 'gnc_schedule', 'geometric')}, "
+                   f"factor={getattr(args, 'gnc_factor', 1.4)}, irls={_gnc_irls}, "
+                   f"adaptive_mu0={_gnc_adapt}, cap={getattr(args, 'gnc_mu_cap', 1e6)}, "
+                   f"noise_bound={args.gnc_noise_bound_deg}°, "
+                   f"anneal {args.gnc_anneal_epochs}ep, start_ep={args.gnc_start_epoch}, "
+                   f"axis R/P/Y={gnc_axis_weights_parsed}, paper={_gnc_paper}, inject={_gnc_inj}")
         if getattr(args, 'correction_quat_loss_weight', 0.0) > 0:
             tprint(f"  • Direct correction quaternion loss: "
                    f"weight={args.correction_quat_loss_weight}")
@@ -3450,20 +3623,23 @@ def main():
                        f"AND Jacobian R/P/Y/overall > {args.dual_gate_jacobian_min}")
             if getattr(args, 'enable_inject_recovery_eval', 0) > 0 and _inj_thr > 0:
                 _dg_msg += (f" AND inject recovery >= {_inj_thr:.1f}% "
-                            f"AND PredIndep <= {args.dual_gate_pred_indep_max:.2f}")
+                            f"AND slope >= {args.dual_gate_signed_slope_min:.2f} "
+                            f"AND OOD-ZD <= {args.dual_gate_zd_max:.2f}°")
             elif _rec_thr > 0:
                 _dg_msg += f" AND Jacobian overall >= {_rec_thr:.2f} (recovery proxy)"
             tprint(_dg_msg + " → ckpt_best_dual.pth")
         if getattr(args, 'enable_inject_recovery_eval', 0) > 0:
+            _inj_scope = ("all val batches" if args.inject_recovery_eval_batches <= 0
+                          else f"val batch[0:{args.inject_recovery_eval_batches}]")
             tprint(f"  • Mini inject recovery eval: ±{args.inject_recovery_eval_deg}° fixed inject, "
-                   f"val batch[0:{args.inject_recovery_eval_batches}] "
-                   f"(+{2 * args.inject_recovery_eval_batches} forwards/eval)")
+                   f"{_inj_scope}")
         if getattr(args, 'enable_recovery_gate_ckpt', 0) > 0:
             _inj_thr = float(getattr(args, 'dual_gate_inject_recovery_min', 0.0))
             _jac_thr = float(getattr(args, 'dual_gate_recovery_min', 0.0))
             if getattr(args, 'enable_inject_recovery_eval', 0) > 0 and _inj_thr > 0:
                 tprint(f"  • Recovery gate ckpt: val inject recovery >= {_inj_thr:.1f}% "
-                       f"AND PredIndep <= {args.dual_gate_pred_indep_max:.2f} "
+                       f"AND slope >= {args.dual_gate_signed_slope_min:.2f} "
+                       f"AND OOD-ZD <= {args.dual_gate_zd_max:.2f}° "
                        f"→ ckpt_best_recovery.pth")
             else:
                 tprint(f"  • Recovery gate ckpt: val Jacobian overall >= {_jac_thr:.2f} "
@@ -3548,6 +3724,8 @@ def main():
                 early_stop_counter = int(ckpt['early_stop_counter'])
             if 'jacobian_early_stop_counter' in ckpt:
                 jacobian_early_stop_counter = int(ckpt['jacobian_early_stop_counter'])
+            if 'medw_early_stop_counter' in ckpt:
+                medw_early_stop_counter = int(ckpt['medw_early_stop_counter'])
             if _v321_ema_enabled and _v321_ema_model is not None and 'ema_state_dict' in ckpt:
                 _v321_ema_model.load_state_dict(ckpt['ema_state_dict'])
                 if is_main:
@@ -3725,12 +3903,14 @@ def main():
 
             t_prep_start = time.time()
             gt_T_to_camera_np = np.array(gt_T_to_camera, dtype=np.float32)
+            _mount_point_transform = None
             if args.augment_mount_jitter_prob > 0:
-                gt_T_to_camera_np = augment_mount_jitter(
+                gt_T_to_camera_np, _mount_point_transform = augment_mount_jitter(
                     gt_T_to_camera_np,
                     prob=args.augment_mount_jitter_prob,
                     rotation_sigma_deg=args.augment_mount_jitter_rot_sigma,
                     translation_sigma_m=args.augment_mount_jitter_trans_sigma,
+                    return_point_transform=True,
                 )
             _sign_flip_p = getattr(args, 'augment_pitch_sign_flip_prob', 0.0)
             if args.augment_pitch_flip_prob > 0 or _sign_flip_p > 0:
@@ -3787,6 +3967,7 @@ def main():
                     per_axis_prob=args.per_axis_prob,
                     per_axis_weights=per_axis_weights_parsed,
                     symmetric_perturb=bool(getattr(args, 'symmetric_perturb', 0)),
+                    rotation_definition=args.rotation_target_definition,
                 )
                 if _v321_continuous_noise:
                     init_T_to_camera_np = _v321_apply_continuous_noise(
@@ -3805,6 +3986,7 @@ def main():
                     distribution=args.perturb_distribution,
                     per_axis_prob=args.per_axis_prob,
                     per_axis_weights=per_axis_weights_parsed,
+                    rotation_definition=args.rotation_target_definition,
                 )
                 if _v321_continuous_noise:
                     _v32_init_T_alt = _v321_apply_continuous_noise(
@@ -3829,6 +4011,13 @@ def main():
                 pcs_np = np.array(pcs)[:, :, :3]
             else:
                 pcs_np = np.array(pcs)
+            if _mount_point_transform is not None:
+                xyz = pcs_np[..., :3]
+                xyz_aug = np.einsum(
+                    'bij,bnj->bni', _mount_point_transform[:, :3, :3], xyz)
+                xyz_aug += _mount_point_transform[:, None, :3, 3]
+                pcs_np = pcs_np.copy()
+                pcs_np[..., :3] = xyz_aug
             if args.max_pcd_points > 0:
                 pcs_np, masks = _subsample_pcd(pcs_np, masks, args.max_pcd_points)
             if args.augment_pc_jitter > 0:
@@ -3946,6 +4135,23 @@ def main():
                         _v42_kwargs = {}
                         if _v42_enabled:
                             _v42_kwargs['rocr_detach'] = (epoch < _v42_rocr_detach_epochs)
+                        from losses.gnc_loss import (
+                            effective_gnc_mu_deg, weighted_gnc_axis_mean,
+                            init_r_max_deg_from_matrices,
+                        )
+                        _gnc_init_r_max = None
+                        if int(getattr(args, 'gnc_mu_adaptive_init', 0)) > 0:
+                            _gnc_init_r_max = init_r_max_deg_from_matrices(
+                                _fwd_gt[:B_cur, :3, :3], _fwd_init[:B_cur, :3, :3])
+                        _gnc_mu = effective_gnc_mu_deg(args, epoch, init_r_max_deg=_gnc_init_r_max)
+                        _gnc_use_irls = int(getattr(args, 'gnc_use_irls', 0)) > 0
+                        if (_gnc_mu is not None
+                                and int(getattr(args, 'gnc_on_paper_rotation', 1)) > 0
+                                and gnc_axis_weights_parsed is not None):
+                            _v42_kwargs['gnc_mu'] = _gnc_mu
+                            _v42_kwargs['gnc_axis_weights'] = gnc_axis_weights_parsed
+                            _v42_kwargs['gnc_noise_bound_sq'] = gnc_noise_bound_sq_val
+                            _v42_kwargs['gnc_use_irls'] = _gnc_use_irls
                         T_pred_all, init_loss, loss = model(
                             _fwd_imgs, _fwd_pcs, _fwd_gt, _fwd_init, _fwd_post, _fwd_K,
                             masks=_fwd_masks, out_init_loss=out_init_loss_choice,
@@ -4098,11 +4304,24 @@ def main():
                             _R_gt_inj = _fwd_gt[:B_cur, :3, :3]
                             _R_pred_inj = T_pred[:B_cur, :3, :3]
                             _out_err_inj = _zero_drift_axis_error_deg(_R_gt_inj, _R_pred_inj)
-                            _inj_loss = torch.nn.functional.smooth_l1_loss(
-                                _out_err_inj, torch.zeros_like(_out_err_inj),
-                                beta=0.1, reduction='mean')
+                            if (_gnc_mu is not None
+                                    and int(getattr(args, 'gnc_on_inject_recovery', 1)) > 0
+                                    and gnc_axis_weights_parsed is not None):
+                                _inj_loss = weighted_gnc_axis_mean(
+                                    _out_err_inj.abs(), _gnc_mu, gnc_axis_weights_parsed,
+                                    noise_bound_sq=gnc_noise_bound_sq_val,
+                                    use_irls_weight=_gnc_use_irls)
+                            else:
+                                _inj_loss = torch.nn.functional.smooth_l1_loss(
+                                    _out_err_inj, torch.zeros_like(_out_err_inj),
+                                    beta=0.1, reduction='mean')
                             _task_inj = _inj_loss_w * _inj_loss
                             loss['inject_recovery_loss'] = _inj_loss.item()
+                            if _gnc_mu is not None:
+                                loss['gnc_mu_deg'] = _gnc_mu
+                                loss['gnc_use_irls'] = float(_gnc_use_irls)
+                                if _gnc_init_r_max is not None:
+                                    loss['gnc_init_r_max_deg'] = _gnc_init_r_max
 
                         _task_photo = None
                         _lsp_w_eff = _effective_lsp_weight(args, epoch)
@@ -4305,6 +4524,7 @@ def main():
                                     rotation_only=True,
                                     distribution='uniform',
                                     per_axis_prob=getattr(args, 'per_axis_prob', 0.0),
+                                    rotation_definition=args.rotation_target_definition,
                                 )
                                 _iter_T_current = torch.from_numpy(
                                     _synth_init_np.astype(np.float32)).to(device, non_blocking=True)
@@ -4763,6 +4983,7 @@ def main():
                 'kpi_history': kpi_history,
                 'early_stop_counter': early_stop_counter,
                 'jacobian_early_stop_counter': jacobian_early_stop_counter,
+                'medw_early_stop_counter': medw_early_stop_counter,
                 'args': vars(args),
             }
             if _v321_ema_enabled and _v321_ema_model is not None:
@@ -4808,6 +5029,7 @@ def main():
                             distribution=args.perturb_distribution,
                             per_axis_prob=args.per_axis_prob,
                             per_axis_weights=per_axis_weights_parsed,
+                            rotation_definition=args.rotation_target_definition,
                         )
                         
                         resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
@@ -4995,7 +5217,8 @@ def main():
                     init_T_to_camera_np, ang_err, trans_err = generate_single_perturbation_from_T(
                         gt_T_to_camera_np, angle_range_deg=eval_angle_range, trans_range=eval_trans_range,
                         rotation_only=rotation_only, distribution=args.perturb_distribution,
-                        per_axis_prob=args.per_axis_prob, per_axis_weights=per_axis_weights_parsed)
+                        per_axis_prob=args.per_axis_prob, per_axis_weights=per_axis_weights_parsed,
+                        rotation_definition=args.rotation_target_definition)
                     resize_imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2).float().to(device, non_blocking=True)
                     if xyz_only_choise:
                         pcs_np = np.array(pcs)[:, :, :3]
@@ -5020,7 +5243,8 @@ def main():
                     # Jacobian: piggyback on already-loaded val batch (no 2nd dataloader pass).
                     # Extra cost = jacobian_eval_batches × 3 axes × n_probes forwards per eval epoch.
                     if (jacobian_axis_accum is not None
-                            and batch_index < args.jacobian_eval_batches):
+                            and (args.jacobian_eval_batches <= 0
+                                 or batch_index < args.jacobian_eval_batches)):
                         j_batch = _compute_jacobian_one_batch(
                             raw_model, imgs, pcs_np, masks, gt_T_to_camera_np, intrinsics,
                             device, args.jacobian_eval_angle_deg, args.jacobian_eval_n_probes,
@@ -5030,7 +5254,8 @@ def main():
                                 jacobian_axis_accum[k].append(v)
 
                     if (inject_recovery_accum is not None
-                            and batch_index < args.inject_recovery_eval_batches):
+                            and (args.inject_recovery_eval_batches <= 0
+                                 or batch_index < args.inject_recovery_eval_batches)):
                         _ir = _compute_inject_recovery_one_batch(
                             raw_model, imgs, pcs_np, masks, gt_T_to_camera_np, intrinsics,
                             device, args.inject_recovery_eval_deg, use_amp, amp_dtype,
@@ -5130,10 +5355,15 @@ def main():
                 if is_main and inject_recovery_accum:
                     inject_result = {
                         'recovery_pct': float(np.mean([x['recovery_pct'] for x in inject_recovery_accum])),
-                        'pred_independence': float(np.mean([x['pred_independence'] for x in inject_recovery_accum])),
+                        'genuine_recovery_pct': float(np.mean([x['genuine_recovery_pct'] for x in inject_recovery_accum])),
+                        'signed_correction_slope': float(np.mean([x['signed_correction_slope'] for x in inject_recovery_accum])),
+                        'signed_correction_slope_min_axis': float(np.min([
+                            x['signed_correction_slope_min_axis'] for x in inject_recovery_accum])),
+                        'zd_max_deg': float(np.max([x['zd_max_deg'] for x in inject_recovery_accum])),
                         'mean_init_rot': float(np.mean([x['mean_init_rot'] for x in inject_recovery_accum])),
                         'mean_residual_rot': float(np.mean([x['mean_residual_rot'] for x in inject_recovery_accum])),
                         'inject_deg': float(inject_recovery_accum[0].get('inject_deg', args.inject_recovery_eval_deg)),
+                        'inject_definition': 'per_axis_lidar_rpy_right_multiply',
                     }
 
             raw_model.train()
@@ -5282,13 +5512,18 @@ def main():
 
                 if inject_result is not None:
                     writer.add_scalar('Epoch/inject_recovery/recovery_pct', inject_result['recovery_pct'], epoch)
-                    writer.add_scalar('Epoch/inject_recovery/pred_independence', inject_result['pred_independence'], epoch)
+                    writer.add_scalar('Epoch/inject_recovery/genuine_pct', inject_result['genuine_recovery_pct'], epoch)
+                    writer.add_scalar('Epoch/inject_recovery/signed_slope', inject_result['signed_correction_slope'], epoch)
+                    writer.add_scalar('Epoch/inject_recovery/zd_max_deg', inject_result['zd_max_deg'], epoch)
                     tprint(f"Epoch [{epoch+1}/{num_epochs}], Mini inject recovery "
                            f"(fixed {inject_result['inject_deg']:.1f}° RPY): "
                            f"recovery={inject_result['recovery_pct']:.1f}% "
                            f"(init={inject_result['mean_init_rot']:.3f}° "
                            f"residual={inject_result['mean_residual_rot']:.3f}°) "
-                           f"PredIndep={inject_result['pred_independence']:.3f}")
+                           f"Genuine={inject_result['genuine_recovery_pct']:.1f}% "
+                           f"Slope={inject_result['signed_correction_slope']:.3f} "
+                           f"(worst={inject_result['signed_correction_slope_min_axis']:.3f}) "
+                           f"ZDmax={inject_result['zd_max_deg']:.3f}°")
 
                 if args.enable_jacobian_eval > 0 and jac_result is not None:
                     writer.add_scalar('Epoch/jacobian/overall', jac_result['overall'], epoch)
@@ -5353,6 +5588,7 @@ def main():
                     tprint("  [JAC WARN] Insufficient Jacobian data from val sweep")
 
                 if args.enable_medw_eval > 0 and medw_result is not None:
+                    _best_medw_epoch_before = best_medw.get('epoch', -1)
                     medw_max_rpy = _medw_max_rpy(medw_result)
                     if medw_max_rpy < best_medw.get('max_rpy', float('inf')):
                         best_medw.update({
@@ -5402,6 +5638,25 @@ def main():
                         tprint(f"  ★ New best MEDW → {best_medw_path} "
                                f"(max_rpy={medw_max_rpy:.4f}° R={medw_result['roll']:.4f} "
                                f"P={medw_result['pitch']:.4f} Y={medw_result['yaw']:.4f})")
+
+                    _medw_es_pat = int(getattr(args, 'medw_early_stop_patience', 0))
+                    if _medw_es_pat > 0:
+                        _medw_es_delta = float(getattr(args, 'medw_early_stop_min_delta_deg', 0.0))
+                        _medw_improved = (
+                            best_medw.get('epoch', -1) != _best_medw_epoch_before
+                            and medw_max_rpy <= best_medw.get('max_rpy', float('inf')) - _medw_es_delta
+                        )
+                        if _medw_improved:
+                            medw_early_stop_counter = 0
+                        else:
+                            medw_early_stop_counter += 1
+                            tprint(f"  MEDW early-stop: no improvement "
+                                   f"({medw_early_stop_counter}/{_medw_es_pat} eval cycles, "
+                                   f"cur={medw_max_rpy:.4f}° best={best_medw.get('max_rpy', float('inf')):.4f}°)")
+                        if medw_early_stop_counter >= _medw_es_pat:
+                            tprint(f"Early stopping triggered at epoch {epoch+1} "
+                                   f"(holdout MEDW max(R,P,Y) plateau for {_medw_es_pat} eval cycles)")
+                            early_stop_triggered = True
 
                 if (getattr(args, 'enable_zd_gate_ckpt', 0) > 0
                         and medw_result is not None
@@ -5454,18 +5709,23 @@ def main():
                         and _recovery_gate_pass(
                             jac_result, args.dual_gate_recovery_min, inject_result,
                             getattr(args, 'dual_gate_inject_recovery_min', 0.0),
-                            getattr(args, 'dual_gate_pred_indep_max', 0.55))):
-                    _rec_score = (float(inject_result['recovery_pct'])
+                            getattr(args, 'dual_gate_signed_slope_min', 0.70),
+                            getattr(args, 'dual_gate_zd_max', 0.30))):
+                    _rec_score = (float(inject_result['genuine_recovery_pct'])
                                   if inject_result is not None
                                   else float(jac_result['overall']))
                     if _rec_score > best_recovery.get(
-                            'recovery_pct' if inject_result is not None else 'overall',
+                            'genuine_recovery_pct' if inject_result is not None else 'overall',
                             float('-inf')):
                         _upd = {'epoch': epoch + 1}
                         if inject_result is not None:
                             _upd.update({
                                 'recovery_pct': float(inject_result['recovery_pct']),
-                                'pred_independence': float(inject_result['pred_independence']),
+                                'genuine_recovery_pct': float(inject_result['genuine_recovery_pct']),
+                                'signed_correction_slope': float(inject_result['signed_correction_slope']),
+                                'signed_correction_slope_min_axis': float(
+                                    inject_result['signed_correction_slope_min_axis']),
+                                'zd_max_deg': float(inject_result['zd_max_deg']),
                                 'mean_init_rot': float(inject_result['mean_init_rot']),
                                 'mean_residual_rot': float(inject_result['mean_residual_rot']),
                             })
@@ -5507,9 +5767,11 @@ def main():
                         torch.save(_rec_data, rec_path)
                         if inject_result is not None:
                             tprint(f"  ★ Recovery gate PASS → {rec_path} "
-                                   f"(inject recovery={inject_result['recovery_pct']:.1f}% "
+                                   f"(genuine recovery={inject_result['genuine_recovery_pct']:.1f}% "
                                    f">= {args.dual_gate_inject_recovery_min:.1f}%, "
-                                   f"PredIndep={inject_result['pred_independence']:.3f})")
+                                   f"slope={inject_result['signed_correction_slope']:.3f}, "
+                                   f"worst={inject_result['signed_correction_slope_min_axis']:.3f}, "
+                                   f"ZDmax={inject_result['zd_max_deg']:.3f}°)")
                         else:
                             tprint(f"  ★ Recovery gate PASS → {rec_path} "
                                    f"(Jacobian overall={_jac_ov:.3f} >= "
@@ -5523,14 +5785,16 @@ def main():
                         getattr(args, 'dual_gate_recovery_min', 0.0),
                         inject_result,
                         getattr(args, 'dual_gate_inject_recovery_min', 0.0),
-                        getattr(args, 'dual_gate_pred_indep_max', 0.55))
+                        getattr(args, 'dual_gate_signed_slope_min', 0.70),
+                        getattr(args, 'dual_gate_zd_max', 0.30))
                     _dg_verdict, _dg_medw, _dg_jac = _format_dual_gate_status(
                         medw_result, jac_result,
                         args.dual_gate_medw_max, args.dual_gate_jacobian_min,
                         getattr(args, 'dual_gate_recovery_min', 0.0),
                         inject_result,
                         getattr(args, 'dual_gate_inject_recovery_min', 0.0),
-                        getattr(args, 'dual_gate_pred_indep_max', 0.55))
+                        getattr(args, 'dual_gate_signed_slope_min', 0.70),
+                        getattr(args, 'dual_gate_zd_max', 0.30))
                     if _dual_pass:
                         medw_max_rpy = _medw_max_rpy(medw_result)
                         jac_ov = float(jac_result['overall'])
@@ -5686,7 +5950,8 @@ def main():
             md_lines.append(f"Best Recovery Gate (Epoch {best_recovery['epoch']}):")
             if best_recovery.get('recovery_pct', float('-inf')) > float('-inf'):
                 md_lines.append(f"  inject recovery: {best_recovery.get('recovery_pct', float('nan')):.1f}% "
-                                f"PredIndep={best_recovery.get('pred_independence', float('nan')):.3f}")
+                                f"Slope={best_recovery.get('signed_correction_slope', float('nan')):.3f} "
+                                f"ZDmax={best_recovery.get('zd_max_deg', float('nan')):.3f}°")
             else:
                 md_lines.append(f"  Jacobian overall: {best_recovery.get('overall', float('nan')):.3f}")
             md_lines.append(f"  ckpt: {os.path.join(ckpt_save_dir, 'ckpt_best_recovery.pth')}")

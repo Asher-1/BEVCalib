@@ -19,7 +19,8 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
                                          per_axis_prob=0.0,
                                          curriculum_scale=1.0,
                                          per_axis_weights=None,
-                                         symmetric_perturb=False):
+                                         symmetric_perturb=False,
+                                         rotation_definition='per_axis'):
     """
     Vectorized batch perturbation with configurable distribution and per-axis mode.
 
@@ -34,6 +35,9 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
         per_axis_weights: tuple of 3 floats for (roll, pitch, yaw) sampling weights
                           in per-axis mode. None = uniform. e.g. (0.5, 0.3, 0.2)
         symmetric_perturb: if True, force half of batch positive and half negative
+        rotation_definition: ``per_axis`` samples LiDAR roll/pitch/yaw independently
+            in ``[-angle_range_deg, angle_range_deg]``; ``total`` samples one
+            axis-angle whose total magnitude is bounded by ``angle_range_deg``.
 
     distribution='magnitude_balanced': sample |angle| uniformly from [0, max],
     then assign random sign. Ensures equal representation of all magnitudes
@@ -82,13 +86,20 @@ def generate_single_perturbation_from_T(T, angle_range_deg=20, trans_range=1.5,
         for i in range(B):
             rotvecs[i, axis_idx[i]] = angles_rad[i]
         delta_rots = R.from_rotvec(rotvecs)
-    else:
+    elif rotation_definition == 'per_axis':
+        euler_deg = np.stack([_apply_symmetric(_sample_angles(B), B)
+                              for _ in range(3)], axis=1)
+        delta_rots = R.from_euler('xyz', euler_deg, degrees=True)
+    elif rotation_definition == 'total':
         rand_axes = np.random.randn(B, 3)
         rand_axes /= np.linalg.norm(rand_axes, axis=1, keepdims=True)
         rand_angles = np.deg2rad(_apply_symmetric(_sample_angles(B), B))
         delta_rots = R.from_rotvec(rand_axes * rand_angles[:, None])
+    else:
+        raise ValueError(f"Unknown rotation_definition={rotation_definition!r}")
 
-    new_rots = delta_rots * orig_rots
+    # Canonical LiDAR-frame convention: R_init = R_gt @ delta_R.
+    new_rots = orig_rots * delta_rots
 
     if not rotation_only:
         rand_dirs = np.random.randn(B, 3)
@@ -178,7 +189,8 @@ def augment_gt_pitch_flip(T, prob=0.5, max_deg=6.0, sign_flip_prob=0.0):
     return T_aug
 
 
-def augment_mount_jitter(T, prob=0.3, rotation_sigma_deg=0.5, translation_sigma_m=0.01):
+def augment_mount_jitter(T, prob=0.3, rotation_sigma_deg=0.5,
+                         translation_sigma_m=0.01, return_point_transform=False):
     """Simulate camera mount installation diversity by jittering GT extrinsics.
 
     Unlike perturbation augmentation (which creates the init→GT correction target),
@@ -201,12 +213,19 @@ def augment_mount_jitter(T, prob=0.3, rotation_sigma_deg=0.5, translation_sigma_
         T_aug: (B, 4, 4) jittered GT extrinsics
     """
     if prob <= 0:
+        if return_point_transform:
+            identity = np.broadcast_to(np.eye(4, dtype=np.float32), T.shape).copy()
+            return T, identity
         return T
     B = T.shape[0]
+    T_original = T.copy()
     T_aug = T.copy()
     jitter_mask = np.random.rand(B) < prob
     n_jitter = jitter_mask.sum()
     if n_jitter == 0:
+        if return_point_transform:
+            identity = np.broadcast_to(np.eye(4, dtype=np.float32), T.shape).copy()
+            return T_aug, identity
         return T_aug
 
     rot_jitter_rad = np.deg2rad(
@@ -219,6 +238,11 @@ def augment_mount_jitter(T, prob=0.3, rotation_sigma_deg=0.5, translation_sigma_
         T_aug[i, :3, :3] = T_aug[i, :3, :3] @ delta_rots[idx].as_matrix().astype(np.float32)
         T_aug[i, :3, 3] += trans_jitter[idx]
 
+    if return_point_transform:
+        # Preserve the observation while changing the virtual LiDAR mounting:
+        # T_aug @ P_aug == T_original @ P_original.
+        point_transform = np.linalg.inv(T_aug) @ T_original
+        return T_aug, point_transform.astype(np.float32)
     return T_aug
 
 

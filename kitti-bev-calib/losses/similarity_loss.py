@@ -47,7 +47,12 @@ def build_gt_correspondence(
     device = xyz_groups.device
 
     uv_gt = compute_projection_v42(xyz_groups, T_gt, cam_intrinsic)
-    uv_feat = uv_gt / patch_size
+    if isinstance(patch_size, (tuple, list)):
+        patch_y, patch_x = patch_size
+        scale = uv_gt.new_tensor([patch_x, patch_y])
+        uv_feat = uv_gt / scale
+    else:
+        uv_feat = uv_gt / patch_size
 
     in_fov = (
         (uv_feat[..., 0] >= 0) & (uv_feat[..., 0] < feat_w)

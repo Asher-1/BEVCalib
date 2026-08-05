@@ -1,0 +1,116 @@
+# V81 DINOv2 + Iterative Training + Jacobian Constraint 泛化评估
+#
+# P1 核心验证: 迭代训练监督 + Jacobian 约束是否改善 DINOv2 泛化
+# 对比基线: V66 DINOv2 (无迭代/Jacobian)
+#
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_v81.yaml \
+#     --parallel -1 --eval_max_frames_per_seq 500
+#
+#   # 带迭代推理评估 (测量 Recovery 改善):
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_v81.yaml \
+#     --parallel -1 --cf_bev_r_iter_steps 2
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_v81"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 4
+  vis_interval: 99999
+  timeout: 14400
+  eval_max_frames_per_seq: 500
+  shortcut_diag: false
+  generalization_diag: true
+  gdiag_inject_deg: 2.0
+  gdiag_genuine_recovery_min: 95.0
+  gdiag_signed_slope_min: 0.80
+  gdiag_zd_max_deg: 0.10
+  require_acceptance_gate: false
+
+models:
+  # ============================================================
+  # V81: DINOv2 + Iterative Refine + Jacobian (P1+P3)
+  # ============================================================
+
+  - label: "c1-v81-best-dual"
+    dir_name: "model_small_5deg_c1_v81_iterative_jacobian_S1"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_dual.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V81 DINOv2+Iter+Jac 1280x720 (best-dual)"
+    pitch_vertical_bands: 5
+    target_width: 1280
+    target_height: 720
+
+  - label: "c1-v81-best-medw"
+    dir_name: "model_small_5deg_c1_v81_iterative_jacobian_S1"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_dual.pth", "ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V81 DINOv2+Iter+Jac 1280x720 (best-medw)"
+    pitch_vertical_bands: 5
+    target_width: 1280
+    target_height: 720
+
+  - label: "c1-v81-best-val"
+    dir_name: "model_small_5deg_c1_v81_iterative_jacobian_S1"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V81 DINOv2+Iter+Jac 1280x720 (best-val)"
+    pitch_vertical_bands: 5
+    target_width: 1280
+    target_height: 720
+
+  # ============================================================
+  # V66 基线对比 (DINOv2, 无迭代/Jacobian)
+  # ============================================================
+
+  - label: "c1-v66-best-dual-baseline"
+    dir_name: "model_small_5deg_c1_v66_dinov2_hires_S1"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_dual.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V66 DINOv2 1280x720 baseline (best-dual)"
+    pitch_vertical_bands: 3
+    target_width: 1280
+    target_height: 720
+
+  - label: "c1-v66-best-medw-baseline"
+    dir_name: "model_small_5deg_c1_v66_dinov2_hires_S1"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_medw.pth"
+    bev_zbound_step: "4.0"
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "cf_bev_r"
+    mode_desc: "V66 DINOv2 1280x720 baseline (best-medw)"
+    pitch_vertical_bands: 3
+    target_width: 1280
+    target_height: 720

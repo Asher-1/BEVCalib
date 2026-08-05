@@ -432,6 +432,12 @@ class HybridTripleCalib(nn.Module):
 def build_calib_model(args, device, img_shape, rotation_only, is_main=False, tprint=print):
     """Factory: CFBevRCalib, GeoMatchProjCalib, HybridTripleCalib, or legacy BEVCalib."""
     fusion_backend = getattr(args, 'fusion_backend', 'bev') or 'bev'
+    if fusion_backend == 'paper_explicit_bev':
+        from paper_explicit_bev_calib import PaperExplicitBEVCalib
+        model = PaperExplicitBEVCalib.from_args(args, img_shape=img_shape).to(device)
+        if is_main:
+            tprint("[PaperExplicitBEV] implicit correspondences -> T_coarse -> dual BEV CNN refinement")
+        return model
     if fusion_backend == 'cf_bev_r':
         from cf_bev_r_calib import CFBevRCalib
         model = CFBevRCalib.from_args(args, img_shape=img_shape).to(device)

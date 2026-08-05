@@ -1,0 +1,80 @@
+# C1 Official BEVCalib ±5° OOD 精调 泛化评估
+# 对齐训练: configs/c1_retrain/c1_official_bevcalib_5deg_ood_finetune.yaml
+#
+#   python run_generalization_eval.py \
+#     --config configs/c1_retrain/eval_generalization_c1_official_bevcalib_v2.yaml \
+#     --parallel -1
+
+bevcalib_root: "/mnt/drtraining/user/dahailu/code/BEVCalib"
+models_dir: "logs/all_training_data_c1"
+test_data: "/mnt/drtraining/user/dahailu/data/bevcalib/test_data_c1"
+output_dir: "logs/evaluations/generalization_c1_official_bevcalib_v2"
+eval_script: "evaluate_checkpoint.py"
+
+eval_params:
+  angle_range: 5.0
+  trans_range: 0.0
+  batch_size: 2
+  vis_interval: 99999
+  timeout: 14400
+  eval_max_frames_per_seq: 500
+  shortcut_diag: false
+  generalization_diag: true
+  gdiag_inject_deg: 2.0
+  gdiag_genuine_recovery_min: 95.0
+  gdiag_signed_slope_min: 0.80
+  gdiag_zd_max_deg: 0.10
+  require_acceptance_gate: true
+
+models:
+  - label: "c1-official-v2-best-val"
+    dir_name: "model_small_5deg_c1_official_bevcalib_5deg_ood_finetune"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_val.pth"
+    ckpt_fallback: ["ckpt_best_medw.pth"]
+    bev_zbound_step: "4.0"
+    bev_xbound_min: 0
+    bev_xbound_max: 200
+    bev_ybound_min: -100
+    bev_ybound_max: 100
+    bev_xy_step: 2.0
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "bev"
+    mode_desc: "Official BEVCalib ±5° OOD finetune (best val)"
+    target_width: 960
+    target_height: 540
+    use_mlp_head: 0
+    bev_pool_factor: 0
+    deformable: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"
+
+  - label: "c1-official-v2-best-medw"
+    dir_name: "model_small_5deg_c1_official_bevcalib_5deg_ood_finetune"
+    scratch_label: "all_training_data_c1_scratch"
+    ckpt: "ckpt_best_medw.pth"
+    ckpt_fallback: ["ckpt_best_val.pth"]
+    bev_zbound_step: "4.0"
+    bev_xbound_min: 0
+    bev_xbound_max: 200
+    bev_ybound_min: -100
+    bev_ybound_max: 100
+    bev_xy_step: 2.0
+    use_drcv: 0
+    rotation_only: 1
+    rotation_target_definition: "per_axis"
+    fusion_backend: "bev"
+    mode_desc: "Official BEVCalib ±5° OOD finetune (MEDW gate)"
+    target_width: 960
+    target_height: 540
+    use_mlp_head: 0
+    bev_pool_factor: 0
+    deformable: 0
+    voxel_mode: "hard"
+    scatter_reduce: "sum"
+    to_bev_mode: "concat"
+    fuser_type: "concat"

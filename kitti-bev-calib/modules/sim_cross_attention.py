@@ -79,6 +79,7 @@ class SimCrossAttention(nn.Module):
         img_features: torch.Tensor,
         pc_pos_emb: Optional[torch.Tensor] = None,
         img_pos_emb: Optional[torch.Tensor] = None,
+        return_layer_outputs: bool = False,
     ) -> Tuple[torch.Tensor, list]:
         """
         Args:
@@ -109,6 +110,7 @@ class SimCrossAttention(nn.Module):
             q = q + pc_pos_emb
 
         sim_matrices = []
+        layer_outputs = []
         scale = math.sqrt(self.dim_head)
 
         for layer_idx in range(self.n_layers):
@@ -141,5 +143,8 @@ class SimCrossAttention(nn.Module):
 
             q = q + out
             q = q + self.ffn_layers[layer_idx](self.norm_out_layers[layer_idx](q))
+            layer_outputs.append(q)
 
+        if return_layer_outputs:
+            return q, sim_matrices, layer_outputs
         return q, sim_matrices
